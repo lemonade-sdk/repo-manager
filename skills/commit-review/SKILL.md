@@ -18,8 +18,12 @@ The JSON must use this shape:
   "repo": "OWNER/REPO",
   "commit_sha": "COMMIT_SHA",
   "pr_number": 123,
+  "merge_date": "2026-06-09T12:34:56Z",
   "summary": "One sentence summarizing what the PR does.",
   "author": "@github-handle",
+  "reviewers": [
+    "@github-handle"
+  ],
   "shout_outs": [
     {
       "handle": "@github-handle",
@@ -97,7 +101,9 @@ Judge the commit against these criteria.
 ### PR Context
 
 - Summarize what the PR does in one sentence.
+- Identify the PR merge date as an ISO 8601 timestamp and put it in `merge_date`. If the associated PR is not merged or no merge date is available, use an empty string.
 - Identify the author's GitHub handle.
+- Identify the GitHub handles of people who substantively reviewed the PR. Put them in the `reviewers` JSON array even if they do not meet the high bar for a shout out. Do not include the PR author as a reviewer unless they also reviewed someone else's substantial changes on the PR.
 - Identify collaborators or reviewers who were substantially involved enough to deserve a shout out. Use a very high bar: include people only when they made an exceptional contribution beyond review, such as substantial hands-on testing, direct contribution to code or architecture, radically changing the solution direction, or catching a major release/security/API risk and materially driving the fix. Do not include routine approvers, drive-by commenters, normal review comments, small suggestions, CI-review comments, filing follow-up issues by itself, or people merely performing expected reviewer responsibilities. Catching issues during review is not enough by itself unless the person also substantially drove the resolution beyond ordinary review. Filing follow-up issues only supports a shout out when it is evidence from substantial hands-on validation or another exceptional contribution.
 
 ### Review Quality

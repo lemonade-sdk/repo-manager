@@ -545,7 +545,7 @@ def cmd_db_row(args):
     print(f"Summary: {row['summary'] or ''}")
     print(f"Verdict: {row['verdict'] or ''}")
     print(f"Explanation: {row['verdict_reason'] or ''}")
-    print(f"Reviewed At: {row['reviewed_at']}")
+    print(f"Audited At: {row['reviewed_at']}")
     print(f"JSON: {row['json_path'] or ''}")
     print()
     if row["json_path"] and Path(row["json_path"]).exists():
@@ -555,6 +555,13 @@ def cmd_db_row(args):
             print_pretty_review(json.loads(row["raw_output"]))
         except json.JSONDecodeError:
             print(row["raw_output"])
+
+
+def cmd_ui(args):
+    from repo_manager.web import serve
+
+    workspace = find_workspace()
+    serve(workspace, args.host, args.port, not args.no_open)
 
 
 def print_pretty_review(data):
@@ -654,6 +661,12 @@ def build_parser():
     db_row = sub.add_parser("db-row", help="Print saved commit review contents by table row index.")
     db_row.add_argument("index", type=int)
     db_row.set_defaults(func=cmd_db_row)
+
+    ui = sub.add_parser("ui", help="Serve a local web UI for saved reviews and announcements.")
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser.")
+    ui.set_defaults(func=cmd_ui)
     return parser
 
 

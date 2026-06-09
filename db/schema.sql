@@ -49,3 +49,22 @@ CREATE TABLE IF NOT EXISTS release_announcements (
   skill_version TEXT NOT NULL,
   PRIMARY KEY (repo, branch, tag_start, head_sha, skill_version)
 );
+
+CREATE TABLE IF NOT EXISTS review_todos (
+  todo_id TEXT PRIMARY KEY,
+  review_kind TEXT NOT NULL,
+  review_key TEXT NOT NULL,
+  todo_index INTEGER NOT NULL,
+  todo_text TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_todos_review
+ON review_todos (review_kind, review_key);
+
+CREATE TABLE IF NOT EXISTS review_read_states (
+  review_key TEXT PRIMARY KEY,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);

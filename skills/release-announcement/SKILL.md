@@ -15,6 +15,9 @@ Write for enthusiastic users of the project, not contributors. Avoid development
 
 ## Grouping
 
+- If the release includes user-relevant breaking changes, add a `Breaking Changes` section before the first feature section.
+- Omit `Breaking Changes` entirely when there are no actual breaking changes.
+- In `Breaking Changes`, explain each breaking change at a user level and include required migration or compatibility action when known.
 - Create one heading per major feature in the release.
 - Decide major features by user-visible scope and importance.
 - Coalesce multiple commits into one feature when they are highly related.
@@ -37,6 +40,10 @@ Use Discord-friendly Markdown:
 ```markdown
 # Release Highlights
 
+## Breaking Changes
+
+- Concise user-level breaking change and what users need to do.
+
 ## Major Feature Name
 
 One short paragraph explaining the feature at a user level.
@@ -47,5 +54,7 @@ Shout out: @handle for ...
 
 - Concise one-sentence user-level explanation. Shout out: @handle for ...
 ```
+
+Only include the `Breaking Changes` section when it has at least one real item.
 
 Do not include a verdict, internal evidence, raw PR lists, or exhaustive commit inventories.

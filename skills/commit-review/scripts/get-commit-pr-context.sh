@@ -29,7 +29,7 @@ fi
 echo "## Pull request"
 gh pr view "$pr_number" \
   --repo "$repo" \
-  --json number,title,url,state,author,body,baseRefName,headRefName,reviewDecision,reviews,comments,commits,files,reviewRequests,statusCheckRollup
+  --json number,title,url,state,mergedAt,author,body,baseRefName,headRefName,reviewDecision,reviews,comments,commits,files,reviewRequests,statusCheckRollup
 
 echo
 echo "## Inline review comments"

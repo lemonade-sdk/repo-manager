@@ -79,6 +79,14 @@ repo-manager db-table
 repo-manager db-row 1
 ```
 
+Browse saved reviews, the release-level review, and generated announcement in a local web UI:
+
+```bash
+repo-manager ui
+```
+
+The UI serves the current workspace at `http://127.0.0.1:8765/` by default. Use `--no-open` to print the URL without opening a browser. Commit and release review to-dos can be checked off in the UI, and that state is persisted in SQLite.
+
 Workspace state lives under `.repo-manager/` in the initialized folder, including `config.json`, the SQLite database, explicit review artifacts, and the reusable repo checkout.
 
 ## Skills
