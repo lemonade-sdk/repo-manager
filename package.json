@@ -1,0 +1,14 @@
+{
+  "name": "repo-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi skills for managing GitHub projects at scale.",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}
