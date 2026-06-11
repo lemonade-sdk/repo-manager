@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -6,7 +7,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,7 +77,18 @@ def db_path(workspace=None):
 def connect_db(workspace=None):
     conn = sqlite3.connect(db_path(workspace))
     conn.row_factory = sqlite3.Row
+    ensure_db_schema(conn)
     return conn
+
+
+def ensure_db_schema(conn):
+    for table in ("commit_reviews", "release_reviews", "release_announcements"):
+        try:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            continue
+        if columns and "range_start" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN range_start TEXT NOT NULL DEFAULT ''")
 
 
 def init_db(workspace):
@@ -111,23 +125,39 @@ def run_pi(skill_name, prompt, cwd):
     pi = shutil.which("pi")
     if not pi:
         raise SystemExit("`pi` was not found on PATH.")
-    cmd = [pi, "--mode", "json", "--skill", str(skill_path(skill_name)), prompt]
+    cmd = [pi, "--mode", "json", "--skill", str(skill_path(skill_name))]
     saw_text = False
+    assistant_text = []
+
+    def feed_prompt(proc):
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,
             text=True,
             bufsize=1,
         )
         assert proc.stdout is not None
+        writer = threading.Thread(target=feed_prompt, args=(proc,), daemon=True)
+        writer.start()
         print(f"Running Pi skill: {skill_name}", flush=True)
         for line in proc.stdout:
-            if render_pi_event(line):
+            rendered = render_pi_event(line)
+            if rendered:
                 saw_text = True
+                assistant_text.append(rendered)
         returncode = proc.wait()
+        writer.join(timeout=1)
     except KeyboardInterrupt:
         if "proc" in locals() and proc.poll() is None:
             proc.terminate()
@@ -140,6 +170,7 @@ def run_pi(skill_name, prompt, cwd):
         print()
     if returncode != 0:
         raise SystemExit(returncode)
+    return "".join(assistant_text)
 
 
 def truncate_pi_detail(value, limit=180):
@@ -167,8 +198,8 @@ def render_pi_event(line):
         text = line.strip()
         if text:
             print(text, flush=True)
-            return True
-        return False
+            return text + "\n"
+        return ""
 
     event_type = event.get("type")
     if event_type == "agent_start":
@@ -189,13 +220,139 @@ def render_pi_event(line):
     elif event_type == "message_update":
         assistant_event = event.get("assistantMessageEvent") or {}
         if assistant_event.get("type") == "text_delta":
-            print(assistant_event.get("delta", ""), end="", flush=True)
-            return True
+            delta = assistant_event.get("delta", "")
+            print(delta, end="", flush=True)
+            return delta
         if assistant_event.get("type") == "error":
             message = assistant_event.get("error", {}).get("errorMessage")
             if message:
                 print(f"\nPi error: {message}", flush=True)
-    return False
+    return ""
+
+
+def extract_json_object(text):
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    candidates = [stripped]
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def write_json_artifact_from_output(path, output):
+    parsed = extract_json_object(output)
+    if parsed is None:
+        return False
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(parsed, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def normalize_release_priority(value):
+    text = str(value or "").strip().upper()
+    if text in ("P0", "BLOCKING", "BLOCKER", "HIGH"):
+        return "P0" if text in ("P0", "BLOCKING", "BLOCKER") else "P1"
+    if text in ("P1", "RECOMMENDED", "MEDIUM"):
+        return "P1"
+    if text in ("P2", "FUTURE", "LOW"):
+        return "P2"
+    return "P1"
+
+
+def normalize_release_review_data(data):
+    todos = data.get("prioritized_todos")
+    if not isinstance(todos, list):
+        todos = []
+
+    normalized_todos = []
+    for item in todos:
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("action") or item.get("risk") or item.get("description")
+            if text:
+                normalized_todos.append({"priority": normalize_release_priority(item.get("priority")), "text": str(text)})
+        elif item:
+            normalized_todos.append({"priority": "P1", "text": str(item)})
+
+    if not normalized_todos:
+        for item in data.get("recommendations") or []:
+            if isinstance(item, dict):
+                text = item.get("action") or item.get("text")
+                if text:
+                    normalized_todos.append(
+                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
+                    )
+
+    if not normalized_todos:
+        open_items = ((data.get("maintainer_todos_summary") or {}).get("open_items") or [])
+        for item in open_items:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("reason")
+                if text:
+                    normalized_todos.append(
+                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
+                    )
+
+    if not normalized_todos:
+        for item in data.get("open_release_risks") or []:
+            if isinstance(item, dict):
+                text = item.get("risk") or item.get("description")
+                if text:
+                    normalized_todos.append(
+                        {"priority": normalize_release_priority(item.get("severity")), "text": str(text)}
+                    )
+
+    data["prioritized_todos"] = normalized_todos
+
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict == "ready":
+        normalized_verdict = "Ready"
+    elif verdict in ("blocked", "blocker", "fail", "failed"):
+        normalized_verdict = "Blocked"
+    elif verdict in ("needs attention", "conditional pass", "conditional", "pass with conditions"):
+        normalized_verdict = "Needs Attention"
+    elif any(todo.get("priority") == "P0" for todo in normalized_todos):
+        normalized_verdict = "Blocked"
+    elif normalized_todos:
+        normalized_verdict = "Needs Attention"
+    else:
+        normalized_verdict = "Ready"
+
+    if normalized_verdict == "Ready" and normalized_todos:
+        normalized_verdict = "Needs Attention"
+    if normalized_verdict == "Needs Attention" and any(todo.get("priority") == "P0" for todo in normalized_todos):
+        normalized_verdict = "Blocked"
+    data["verdict"] = normalized_verdict
+    return data
+
+
+def validate_release_review_data(data):
+    verdict = data.get("verdict")
+    todos = data.get("prioritized_todos")
+    if verdict not in ("Ready", "Needs Attention", "Blocked"):
+        raise SystemExit(f"Release review produced unsupported verdict: {verdict!r}")
+    if not isinstance(todos, list):
+        raise SystemExit("Release review did not produce prioritized_todos as a list.")
+    if verdict in ("Needs Attention", "Blocked") and not todos:
+        raise SystemExit("Release review requires maintainer attention but produced no prioritized_todos.")
+    if verdict == "Ready" and todos:
+        raise SystemExit("Release review produced Ready verdict with non-empty prioritized_todos.")
+    for index, item in enumerate(todos):
+        if not isinstance(item, dict) or item.get("priority") not in ("P0", "P1", "P2") or not item.get("text"):
+            raise SystemExit(f"Release review prioritized_todos[{index}] must contain priority P0/P1/P2 and text.")
 
 
 def parse_pr_number(raw):
@@ -233,13 +390,19 @@ def release_artifact_paths(workspace, repo, tag_start, head, kind):
     base = artifact_dir(workspace, repo, "releases")
     safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag_start)
     if kind == "review":
-        return base / f"{safe_tag}..{head}.release-review.json", None
-    return None, base / f"{safe_tag}..{head}.release-announcement.md"
+        return base / f"{safe_tag}.release-review.json", None
+    return None, base / f"{safe_tag}.release-announcement.md"
 
 
 def read_json(path):
     with Path(path).open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def write_text(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def require_files(*paths):
@@ -248,7 +411,7 @@ def require_files(*paths):
         raise SystemExit("Pi completed, but expected artifact file(s) were not created:\n" + "\n".join(missing))
 
 
-def store_commit_review(workspace, repo, branch, tag_start, commit, json_file):
+def store_commit_review(workspace, repo, branch, release_tag, range_start, commit, json_file):
     data = read_json(json_file)
     raw = json.dumps(data, indent=2)
     try:
@@ -259,13 +422,14 @@ def store_commit_review(workspace, repo, branch, tag_start, commit, json_file):
         conn.execute(
             """
             INSERT INTO commit_reviews (
-              repo, commit_sha, branch, tag_start, pr_number, author, summary,
+              repo, commit_sha, branch, tag_start, range_start, pr_number, author, summary,
               verdict, verdict_reason, maintainer_todos, shout_outs, raw_output, json_path,
               reviewed_at, skill_version, rubric_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, commit_sha, rubric_version) DO UPDATE SET
               branch=excluded.branch,
               tag_start=excluded.tag_start,
+              range_start=excluded.range_start,
               pr_number=excluded.pr_number,
               author=excluded.author,
               summary=excluded.summary,
@@ -282,7 +446,8 @@ def store_commit_review(workspace, repo, branch, tag_start, commit, json_file):
                 repo,
                 commit,
                 branch,
-                tag_start,
+                release_tag,
+                range_start,
                 pr_number,
                 data.get("author", ""),
                 data.get("summary", ""),
@@ -308,12 +473,42 @@ def review_exists(workspace, repo, commit):
     return row is not None
 
 
-def list_commits(repo, workspace, branch, tag_start):
+def list_commits(repo, workspace, branch, range_start):
     checkout = clone_or_fetch(repo, workspace)
     run(["git", "-C", str(checkout), "fetch", "origin", branch, "--tags", "--prune"])
-    rev = f"{tag_start}..origin/{branch}"
+    rev = f"{range_start}..origin/{branch}"
     result = run(["git", "-C", str(checkout), "rev-list", "--reverse", rev])
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def version_parts(tag):
+    return tuple(int(part) for part in re.findall(r"\d+", str(tag or "")))
+
+
+def v_tags(repo, workspace):
+    checkout = clone_or_fetch(repo, workspace)
+    run(["git", "-C", str(checkout), "fetch", "origin", "--tags", "--prune"])
+    result = run(["git", "-C", str(checkout), "tag", "--list", "v*"])
+    tags = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return sorted(tags, key=version_parts)
+
+
+def infer_range_start(repo, workspace, release_tag):
+    tags = v_tags(repo, workspace)
+    if not tags:
+        raise SystemExit("No v* tags found. Pass --since explicitly.")
+    if release_tag == "vNext":
+        return tags[-1]
+    if release_tag in tags:
+        index = tags.index(release_tag)
+        if index == 0:
+            raise SystemExit(f"No previous v* tag found before {release_tag}. Pass --since explicitly.")
+        return tags[index - 1]
+    release_version = version_parts(release_tag)
+    older = [tag for tag in tags if version_parts(tag) < release_version]
+    if older:
+        return older[-1]
+    raise SystemExit(f"Could not infer previous v* tag for {release_tag}. Pass --since explicitly.")
 
 
 def head_sha(repo, workspace, branch):
@@ -322,24 +517,67 @@ def head_sha(repo, workspace, branch):
     return result.stdout.strip()
 
 
-def load_reviews(workspace, repo, branch=None, tag_start=None):
+def load_reviews(workspace, repo, branch=None, release_tag=None):
     where = ["repo=?"]
     values = [repo]
     if branch:
         where.append("branch=?")
         values.append(branch)
-    if tag_start:
+    if release_tag:
         where.append("tag_start=?")
-        values.append(tag_start)
+        values.append(release_tag)
     query = "SELECT * FROM commit_reviews WHERE " + " AND ".join(where) + " ORDER BY reviewed_at, commit_sha"
     with connect_db(workspace) as conn:
         return [dict(row) for row in conn.execute(query, values).fetchall()]
 
 
-def compact_reviews(reviews):
+def common_range_start(reviews):
+    values = sorted({review.get("range_start", "") for review in reviews if review.get("range_start", "")})
+    return values[0] if len(values) == 1 else ""
+
+
+def todo_display_text(item):
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return item.get("text") or item.get("reason") or json.dumps(item, sort_keys=True)
+    return str(item)
+
+
+def todo_id(review_kind, review_key, index, item):
+    payload = json.dumps(
+        {"kind": review_kind, "review": review_key, "index": index, "todo": item},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def completed_todo_ids(workspace):
+    with connect_db(workspace) as conn:
+        try:
+            rows = conn.execute("SELECT todo_id FROM review_todos WHERE completed=1").fetchall()
+        except sqlite3.OperationalError:
+            return set()
+    return {row["todo_id"] for row in rows}
+
+
+def compact_reviews(workspace, reviews):
+    completed_ids = completed_todo_ids(workspace)
     rows = []
     for review in reviews:
         data = read_json(review["json_path"]) if review.get("json_path") else {}
+        review_key = f"{review['repo']}|{review['commit_sha']}|{review['rubric_version']}"
+        todos = []
+        for index, item in enumerate(data.get("maintainer_todos", [])):
+            item_id = todo_id("commit", review_key, index, item)
+            todos.append(
+                {
+                    "text": todo_display_text(item),
+                    "priority": item.get("priority", "") if isinstance(item, dict) else "",
+                    "completed": item_id in completed_ids,
+                }
+            )
         rows.append(
             {
                 "commit_sha": review["commit_sha"],
@@ -348,12 +586,110 @@ def compact_reviews(reviews):
                 "summary": data.get("summary", review["summary"]),
                 "verdict": data.get("verdict", review["verdict"]),
                 "verdict_reason": data.get("verdict_reason", review["verdict_reason"]),
-                "maintainer_todos": data.get("maintainer_todos", []),
+                "maintainer_todos": todos,
+                "open_maintainer_todos": [todo for todo in todos if not todo["completed"]],
+                "completed_maintainer_todos": [todo for todo in todos if todo["completed"]],
                 "shout_outs": data.get("shout_outs", []),
                 "evidence": data.get("evidence", {}),
             }
         )
     return json.dumps(rows, indent=2)
+
+
+def latest_release_review(workspace, repo, branch, tag_start):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM release_reviews
+            WHERE repo=? AND branch=? AND tag_start=? AND rubric_version=?
+            ORDER BY reviewed_at DESC
+            LIMIT 1
+            """,
+            (repo, branch, tag_start, RELEASE_RUBRIC_VERSION),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_announcement(workspace, repo, branch, tag_start):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM release_announcements
+            WHERE repo=? AND branch=? AND tag_start=? AND skill_version=?
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """,
+            (repo, branch, tag_start, ANNOUNCEMENT_VERSION),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def github_repo_url(repo):
+    return f"https://github.com/{repo}.git"
+
+
+def pages_path(workspace):
+    return workspace / CONFIG_DIR / "pages"
+
+
+def ensure_pages_checkout(workspace, repo, branch):
+    path = pages_path(workspace)
+    url = github_repo_url(repo)
+    if (path / ".git").exists():
+        dirty = run(["git", "-C", str(path), "status", "--porcelain"]).stdout.strip()
+        if dirty:
+            raise SystemExit(
+                f"Pages checkout has uncommitted changes at {path}. "
+                "Commit, discard, or remove that checkout before publishing."
+            )
+        run(["git", "-C", str(path), "fetch", "origin", branch])
+        run(["git", "-C", str(path), "checkout", branch])
+        run(["git", "-C", str(path), "pull", "--ff-only", "origin", branch])
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "clone", "--branch", branch, "--single-branch", url, str(path)])
+    return path
+
+
+def publish_pages_content(workspace, repo, website_branch, target_dir):
+    from repo_manager.web import export_static_site
+
+    checkout = ensure_pages_checkout(workspace, repo, website_branch)
+    export_dir = workspace / CONFIG_DIR / "pages-export"
+    if export_dir.exists():
+        shutil.rmtree(export_dir)
+    export_static_site(workspace, export_dir)
+
+    target_rel = Path(target_dir)
+    if target_rel.is_absolute() or ".." in target_rel.parts:
+        raise SystemExit("--target-dir must be a relative path inside the website branch checkout.")
+    target = checkout / target_rel
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(export_dir, target)
+    return checkout, target_rel
+
+
+def export_pages_preview(workspace, output_dir):
+    from repo_manager.web import export_static_site
+
+    output_dir = Path(output_dir)
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    export_static_site(workspace, output_dir)
+    return output_dir
+
+
+def commit_and_push_pages(checkout, branch, target_rel, message):
+    run(["git", "-C", str(checkout), "add", "-A", target_rel.as_posix()])
+    status = run(["git", "-C", str(checkout), "status", "--porcelain", target_rel.as_posix()]).stdout.strip()
+    if not status:
+        print("Pages dashboard already up to date.")
+        return
+    run(["git", "-C", str(checkout), "commit", "-m", message])
+    run(["git", "-C", str(checkout), "pull", "--rebase", "origin", branch])
+    run(["git", "-C", str(checkout), "push", "origin", branch])
 
 
 def cmd_init(args):
@@ -393,7 +729,9 @@ def cmd_review_commit(args):
     )
     run_pi("commit-review", prompt, workspace)
     require_files(json_file)
-    store_commit_review(workspace, repo, branch, args.tag_start or "", args.commit, json_file)
+    release_tag = args.release or args.tag_start or ""
+    range_start = args.since or (infer_range_start(repo, workspace, release_tag) if release_tag else "")
+    store_commit_review(workspace, repo, branch, release_tag, range_start, args.commit, json_file)
 
 
 def cmd_sweep(args):
@@ -401,8 +739,9 @@ def cmd_sweep(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    commits = list_commits(repo, workspace, branch, args.tag)
-    print(f"Found {len(commits)} commits in {args.tag}..origin/{branch}")
+    range_start = args.since or infer_range_start(repo, workspace, args.release)
+    commits = list_commits(repo, workspace, branch, range_start)
+    print(f"Found {len(commits)} commits in {range_start}..origin/{branch} for {args.release}")
     for commit in commits:
         if review_exists(workspace, repo, commit) and not args.force:
             print(f"Skipping existing review for {commit}")
@@ -411,13 +750,13 @@ def cmd_sweep(args):
         json_file = commit_artifact_paths(workspace, repo, commit)
         prompt = (
         f"/skill:commit-review {repo} {commit}\n\n"
-            f"This commit is part of the release range {args.tag}..{branch}.\n"
+            f"This commit is part of release {args.release}, covering range {range_start}..{branch}.\n"
             f"Write the machine-readable JSON result to: {json_file}\n"
             "The JSON must match the schema required by the skill."
         )
         run_pi("commit-review", prompt, workspace)
         require_files(json_file)
-        store_commit_review(workspace, repo, branch, args.tag, commit, json_file)
+        store_commit_review(workspace, repo, branch, args.release, range_start, commit, json_file)
 
 
 def cmd_release_review(args):
@@ -425,31 +764,51 @@ def cmd_release_review(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    reviews = load_reviews(workspace, repo, branch, args.tag)
+    reviews = load_reviews(workspace, repo, branch, args.release)
     if not reviews:
-        raise SystemExit("No commit reviews found for that repo/branch/tag.")
+        raise SystemExit("No commit reviews found for that repo/branch/release.")
+    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
     head = head_sha(repo, workspace, branch)
-    json_file, _ = release_artifact_paths(workspace, repo, args.tag, head, "review")
+    json_file, _ = release_artifact_paths(workspace, repo, args.release, head, "review")
     prompt = (
         f"/skill:release-review\n\nRepo: {repo}\nBranch: {branch}\n"
-        f"Starting tag: {args.tag}\nHead SHA: {head}\n\n"
+        f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
         f"Write the machine-readable JSON result to: {json_file}\n"
+        "Each stored commit review includes maintainer_todos with completion state from the repo-manager database. "
+        "Treat completed maintainer_todos as resolved unless they reveal a broader unresolved release risk.\n"
         "Stored commit reviews:\n"
-        f"{compact_reviews(reviews)}"
+        f"{compact_reviews(workspace, reviews)}"
     )
-    run_pi("release-review", prompt, workspace)
+    output = run_pi("release-review", prompt, workspace)
+    if not Path(json_file).exists() and write_json_artifact_from_output(json_file, output):
+        print(f"Wrote release-review artifact from Pi output: {json_file}")
     require_files(json_file)
     data = read_json(json_file)
+    data["repo"] = repo
+    data["branch"] = branch
+    data["tag_start"] = args.release
+    data["range_start"] = range_start
+    data["head_sha"] = head
+    data = normalize_release_review_data(data)
+    validate_release_review_data(data)
+    json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     raw = json.dumps(data, indent=2)
     verdict = data.get("verdict", "")
     with connect_db(workspace) as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO release_reviews
-            (repo, branch, tag_start, head_sha, verdict, raw_output, json_path, reviewed_at, skill_version, rubric_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            DELETE FROM release_reviews
+            WHERE repo=? AND branch=? AND tag_start=? AND rubric_version=?
             """,
-            (repo, branch, args.tag, head, verdict, raw, str(json_file), now_iso(), __version__, RELEASE_RUBRIC_VERSION),
+            (repo, branch, args.release, RELEASE_RUBRIC_VERSION),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO release_reviews
+            (repo, branch, tag_start, range_start, head_sha, verdict, raw_output, json_path, reviewed_at, skill_version, rubric_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (repo, branch, args.release, range_start, head, verdict, raw, str(json_file), now_iso(), __version__, RELEASE_RUBRIC_VERSION),
         )
 
 
@@ -458,17 +817,18 @@ def cmd_announce(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    reviews = load_reviews(workspace, repo, branch, args.tag)
+    reviews = load_reviews(workspace, repo, branch, args.release)
     if not reviews:
-        raise SystemExit("No commit reviews found for that repo/branch/tag.")
+        raise SystemExit("No commit reviews found for that repo/branch/release.")
+    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
     head = head_sha(repo, workspace, branch)
-    _, markdown_file = release_artifact_paths(workspace, repo, args.tag, head, "announcement")
+    _, markdown_file = release_artifact_paths(workspace, repo, args.release, head, "announcement")
     prompt = (
         f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
-        f"Starting tag: {args.tag}\nHead SHA: {head}\n\n"
+        f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
         f"Write the Discord-friendly Markdown announcement to: {markdown_file}\n\n"
         "Stored commit reviews:\n"
-        f"{compact_reviews(reviews)}"
+        f"{compact_reviews(workspace, reviews)}"
     )
     run_pi("release-announcement", prompt, workspace)
     require_files(markdown_file)
@@ -476,11 +836,18 @@ def cmd_announce(args):
     with connect_db(workspace) as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO release_announcements
-            (repo, branch, tag_start, head_sha, raw_output, markdown_path, generated_at, skill_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            DELETE FROM release_announcements
+            WHERE repo=? AND branch=? AND tag_start=? AND skill_version=?
             """,
-            (repo, branch, args.tag, head, raw, str(markdown_file), now_iso(), ANNOUNCEMENT_VERSION),
+            (repo, branch, args.release, ANNOUNCEMENT_VERSION),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO release_announcements
+            (repo, branch, tag_start, range_start, head_sha, raw_output, markdown_path, generated_at, skill_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (repo, branch, args.release, range_start, head, raw, str(markdown_file), now_iso(), ANNOUNCEMENT_VERSION),
         )
 
 
@@ -564,6 +931,23 @@ def cmd_ui(args):
     serve(workspace, args.host, args.port, not args.no_open)
 
 
+def cmd_publish_pages(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    if args.dry_run:
+        output_dir = export_pages_preview(workspace, args.out or (workspace / CONFIG_DIR / "pages-preview"))
+        index = output_dir / "index.html"
+        print(f"Wrote static repo-manager dashboard preview to {index}")
+        if args.open:
+            webbrowser.open(index.resolve().as_uri())
+        print("Dry run only; did not fetch, commit, or push the website branch.")
+        return
+    checkout, target_rel = publish_pages_content(workspace, repo, args.website_branch, args.target_dir)
+    commit_and_push_pages(checkout, args.website_branch, target_rel, args.message)
+    print(f"Published static repo-manager dashboard to {repo}:{args.website_branch}:{target_rel.as_posix()}/")
+
+
 def print_pretty_review(data):
     print("Description")
     print(data.get("summary", ""))
@@ -630,24 +1014,29 @@ def build_parser():
     review.add_argument("commit")
     review.add_argument("--repo")
     review.add_argument("--branch")
-    review.add_argument("--tag-start", default="")
+    review.add_argument("--release", help="Release bucket to store the review under, e.g. v10.7.0 or vNext.")
+    review.add_argument("--since", default="", help="Override the inferred previous v* tag for the release range.")
+    review.add_argument("--tag-start", default="", help=argparse.SUPPRESS)
     review.set_defaults(func=cmd_review_commit)
 
-    sweep = sub.add_parser("sweep", help="Review every commit after a tag on the tracked branch.")
-    sweep.add_argument("tag")
+    sweep = sub.add_parser("sweep", help="Review every commit in a release range on the tracked branch.")
+    sweep.add_argument("release", help="Release bucket to store reviews under, e.g. v10.7.0 or vNext.")
+    sweep.add_argument("--since", help="Override the inferred previous v* tag for the release range.")
     sweep.add_argument("--repo")
     sweep.add_argument("--branch")
     sweep.add_argument("--force", action="store_true", help="Re-run reviews that already exist.")
     sweep.set_defaults(func=cmd_sweep)
 
     release = sub.add_parser("release-review", help="Run release-level review from stored commit reviews.")
-    release.add_argument("tag")
+    release.add_argument("release", help="Release bucket to review, e.g. v10.7.0 or vNext.")
+    release.add_argument("--since", help="Override the stored or inferred previous v* tag for the release range.")
     release.add_argument("--repo")
     release.add_argument("--branch")
     release.set_defaults(func=cmd_release_review)
 
     announce = sub.add_parser("announce", help="Generate a Discord-friendly release announcement.")
-    announce.add_argument("tag")
+    announce.add_argument("release", help="Release bucket to announce, e.g. v10.7.0 or vNext.")
+    announce.add_argument("--since", help="Override the stored or inferred previous v* tag for the release range.")
     announce.add_argument("--repo")
     announce.add_argument("--branch")
     announce.set_defaults(func=cmd_announce)
@@ -667,6 +1056,16 @@ def build_parser():
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser.")
     ui.set_defaults(func=cmd_ui)
+
+    publish_pages = sub.add_parser("publish-pages", help="Publish a static read-only dashboard to GitHub Pages.")
+    publish_pages.add_argument("--repo")
+    publish_pages.add_argument("--website-branch", default="website", help="Branch backing the GitHub Pages site.")
+    publish_pages.add_argument("--target-dir", default="docs/repo-manager", help="Directory to replace on the website branch.")
+    publish_pages.add_argument("--message", default="Update repo-manager dashboard", help="Commit message for the website branch.")
+    publish_pages.add_argument("--dry-run", action="store_true", help="Write a local static preview without fetching, committing, or pushing.")
+    publish_pages.add_argument("--out", help="Output directory for --dry-run. Defaults to .repo-manager/pages-preview in the workspace.")
+    publish_pages.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="Open the dry-run preview in the default browser.")
+    publish_pages.set_defaults(func=cmd_publish_pages)
     return parser
 
 

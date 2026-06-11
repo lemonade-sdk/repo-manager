@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 def connect(db_file):
     conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row
+    ensure_range_schema(conn)
     return conn
 
 
@@ -22,6 +23,16 @@ def now_iso():
 
 def db_file(workspace):
     return workspace / ".repo-manager" / "repo-manager.sqlite"
+
+
+def ensure_range_schema(conn):
+    for table in ("commit_reviews", "release_reviews", "release_announcements"):
+        try:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            continue
+        if columns and "range_start" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN range_start TEXT NOT NULL DEFAULT ''")
 
 
 def ensure_todo_schema(conn):
@@ -214,6 +225,13 @@ def format_date_range(rows):
     }
 
 
+def tag_sort_key(tag):
+    if tag == "vNext":
+        return (1, ())
+    parts = tuple(int(part) for part in re.findall(r"\d+", str(tag or "")))
+    return (0, parts)
+
+
 def commit_dates(workspace, shas):
     checkout = workspace / ".repo-manager" / "checkout"
     if not checkout.exists():
@@ -280,6 +298,7 @@ def commit_reviews(workspace):
 
 def release_reviews(workspace):
     rows = []
+    seen = set()
     with connect(db_file(workspace)) as conn:
         ensure_todo_schema(conn)
         for row in conn.execute(
@@ -290,6 +309,10 @@ def release_reviews(workspace):
             """
         ):
             item = dict(row)
+            key = (item["repo"], item["branch"], item["tag_start"], item["rubric_version"])
+            if key in seen:
+                continue
+            seen.add(key)
             data = review_data(item)
             item["details"] = data
             item["verdict_reason"] = data.get("verdict_reason", "")
@@ -297,7 +320,7 @@ def release_reviews(workspace):
             item["evidence"] = data.get("evidence", {})
             review_key = (
                 f"{item['repo']}|{item['branch']}|{item['tag_start']}|"
-                f"{item['head_sha']}|{item['rubric_version']}"
+                f"{item['rubric_version']}"
             )
             item["todo_items"] = normalize_todos(conn, "release", review_key, item["prioritized_todos"])
             item["outstanding_todos"] = sum(1 for todo in item["todo_items"] if not todo["completed"])
@@ -307,6 +330,7 @@ def release_reviews(workspace):
 
 def release_announcements(workspace):
     rows = []
+    seen = set()
     with connect(db_file(workspace)) as conn:
         for row in conn.execute(
             """
@@ -316,6 +340,10 @@ def release_announcements(workspace):
             """
         ):
             item = dict(row)
+            key = (item["repo"], item["branch"], item["tag_start"], item["skill_version"])
+            if key in seen:
+                continue
+            seen.add(key)
             item["markdown"] = read_text_file(item.get("markdown_path")) or item.get("raw_output") or ""
             rows.append(item)
     return rows
@@ -340,8 +368,18 @@ def app_data(workspace):
     announcements = release_announcements(workspace)
     authors = {normalize_handle(row.get("author")) for row in commits if normalize_handle(row.get("author"))}
     reviewers = {reviewer for row in commits for reviewer in row.get("reviewers", [])}
+    tags = sorted(
+        {
+            row.get("tag_start")
+            for row in [*commits, *releases, *announcements]
+            if row.get("tag_start")
+        },
+        key=tag_sort_key,
+        reverse=True,
+    )
     return {
         "config": load_config(workspace),
+        "tags": tags,
         "counts": {
             "commits": len(commits),
             "release_reviews": len(releases),
@@ -358,6 +396,36 @@ def app_data(workspace):
         "release_reviews": releases,
         "release_announcements": announcements,
     }
+
+
+def public_app_data(workspace):
+    data = app_data(workspace)
+    for key in ("commit_reviews", "release_reviews", "release_announcements"):
+        cleaned = []
+        for row in data.get(key, []):
+            item = dict(row)
+            for private_key in ("rowid", "raw_output", "json_path", "markdown_path"):
+                item.pop(private_key, None)
+            cleaned.append(item)
+        data[key] = cleaned
+    return data
+
+
+def static_index_html(workspace):
+    payload = json.dumps(public_app_data(workspace), ensure_ascii=False)
+    bootstrap = (
+        "<script>"
+        "window.REPO_MANAGER_STATIC = true;"
+        f"window.REPO_MANAGER_STATIC_DATA = {payload};"
+        "</script>"
+    )
+    return INDEX_HTML.replace("</head>", f"{bootstrap}\n</head>", 1)
+
+
+def export_static_site(workspace, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "index.html").write_text(static_index_html(workspace), encoding="utf-8")
 
 
 def update_todo(workspace, payload):
@@ -806,6 +874,25 @@ INDEX_HTML = r"""<!doctype html>
       margin: 4px 0;
       line-height: 1.45;
     }
+    .evidence-list {
+      display: grid;
+      gap: 10px;
+    }
+    .evidence-item {
+      border-left: 3px solid var(--line);
+      padding-left: 10px;
+    }
+    .evidence-item h4 {
+      margin: 0 0 4px;
+      color: #435366;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+    .evidence-item p {
+      margin: 0;
+      line-height: 1.5;
+    }
     .release-list {
       display: grid;
       gap: 12px;
@@ -945,6 +1032,7 @@ INDEX_HTML = r"""<!doctype html>
       <header>
         <h1 id="view-title">Commit DB</h1>
         <div class="toolbar">
+          <select class="search" id="tag-select" aria-label="Release tag"></select>
           <input class="search" id="search" placeholder="Filter commits, verdicts, authors, descriptions">
           <button class="copy hidden" id="copy-announcement">Copy announcement</button>
         </div>
@@ -1002,7 +1090,8 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <script>
-    const state = { data: null, view: "commits", selectedCommit: 0, selectedRelease: 0, selectedAnnouncement: 0, filter: "" };
+    const isStatic = Boolean(window.REPO_MANAGER_STATIC);
+    const state = { data: null, view: "commits", selectedTag: "", selectedCommit: 0, selectedRelease: 0, selectedAnnouncement: 0, filter: "" };
     const $ = (id) => document.getElementById(id);
 
     function esc(value) {
@@ -1030,6 +1119,17 @@ INDEX_HTML = r"""<!doctype html>
       }).join("")}</ul>`;
     }
 
+    function evidenceList(evidence) {
+      const entries = Object.entries(evidence || {}).filter(([, value]) => value);
+      if (!entries.length) return `<p class="muted">No evidence recorded.</p>`;
+      return `<div class="evidence-list">${entries.map(([key, value]) => `
+        <div class="evidence-item">
+          <h4>${esc(key.replaceAll("_", " "))}</h4>
+          <p>${esc(value)}</p>
+        </div>
+      `).join("")}</div>`;
+    }
+
     function todoCount(row) {
       const total = (row.todo_items || []).length;
       const completed = total - (row.outstanding_todos || 0);
@@ -1049,13 +1149,14 @@ INDEX_HTML = r"""<!doctype html>
       if (!items || !items.length) return `<p class="muted">None.</p>`;
       return `<div class="todo-list">${items.map((item) => `
         <label class="todo-item ${item.completed ? "done" : ""}">
-          <input type="checkbox" data-todo-id="${esc(item.id)}" ${item.completed ? "checked" : ""}>
+          <input type="checkbox" data-todo-id="${esc(item.id)}" ${item.completed ? "checked" : ""} ${isStatic ? "disabled" : ""}>
           <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}</span>
         </label>
       `).join("")}</div>`;
     }
 
     async function setTodo(todoId, completed) {
+      if (isStatic) return;
       const response = await fetch("/api/todo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1069,6 +1170,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function setReadState(reviewKey, isRead) {
+      if (isStatic) return;
       const response = await fetch("/api/read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1082,12 +1184,18 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function reloadData() {
+      if (isStatic) {
+        state.data = window.REPO_MANAGER_STATIC_DATA || {};
+        renderAll();
+        return;
+      }
       const response = await fetch("/api/data");
       state.data = await response.json();
       renderAll();
     }
 
     function attachTodoHandlers(root) {
+      if (isStatic) return;
       root.querySelectorAll("input[data-todo-id]").forEach((checkbox) => {
         checkbox.addEventListener("change", async () => {
           checkbox.disabled = true;
@@ -1118,26 +1226,58 @@ INDEX_HTML = r"""<!doctype html>
     function filteredCommits() {
       const rows = state.data.commit_reviews || [];
       const query = state.filter.trim().toLowerCase();
-      if (!query) return rows;
-      return rows.filter((row) => [
+      const tagged = state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+      if (!query) return tagged;
+      return tagged.filter((row) => [
         row.commit_sha, row.verdict, row.summary, row.author, row.verdict_reason, row.tag_start, row.branch
       ].join(" ").toLowerCase().includes(query));
     }
 
+    function filteredReleases() {
+      const rows = state.data.release_reviews || [];
+      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+    }
+
+    function filteredAnnouncements() {
+      const rows = state.data.release_announcements || [];
+      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+    }
+
     function renderShell() {
       const data = state.data;
+      const tags = data.tags || [];
+      if (!state.selectedTag && tags.length) {
+        state.selectedTag = tags[0];
+      }
+      $("tag-select").innerHTML = tags.length ? tags.map((tag) => `<option value="${esc(tag)}" ${tag === state.selectedTag ? "selected" : ""}>${esc(tag)}</option>`).join("") : `<option value="">No tags</option>`;
+      const commits = filteredCommits();
+      const releases = filteredReleases();
+      const announcements = filteredAnnouncements();
       $("repo-name").textContent = `${data.config.repo} · ${data.config.branch || "main"}`;
-      $("metric-commits").textContent = data.counts.commits;
-      $("metric-unread").textContent = data.counts.unread_reviews || 0;
-      $("metric-releases").textContent = data.counts.release_reviews;
-      $("metric-announcements").textContent = data.counts.announcements;
-      $("metric-todos").textContent = data.counts.outstanding_todos || 0;
-      $("stat-contributions").textContent = data.counts.commits || 0;
-      $("stat-authors").textContent = data.counts.authors || 0;
-      $("stat-reviewers").textContent = data.counts.reviewers || 0;
-      const range = data.counts.date_range || {};
+      $("metric-commits").textContent = commits.length;
+      $("metric-unread").textContent = commits.filter((row) => !row.is_read).length;
+      $("metric-releases").textContent = releases.length;
+      $("metric-announcements").textContent = announcements.length;
+      $("metric-todos").textContent = commits.reduce((sum, row) => sum + (row.outstanding_todos || 0), 0) + releases.reduce((sum, row) => sum + (row.outstanding_todos || 0), 0);
+      $("stat-contributions").textContent = commits.length;
+      $("stat-authors").textContent = new Set(commits.map((row) => row.author).filter(Boolean)).size;
+      $("stat-reviewers").textContent = new Set(commits.flatMap((row) => row.reviewers || [])).size;
+      const range = dateRange(commits);
       $("stat-days").textContent = range.start && range.end ? `${range.days} days` : "No reviews";
       $("stat-dates").textContent = range.start && range.end ? `${range.start} to ${range.end}` : "";
+    }
+
+    function dateRange(rows) {
+      const dates = rows.map((row) => row.merge_date || row.commit_date || row.reviewed_at).filter(Boolean).map((value) => new Date(value)).filter((date) => !Number.isNaN(date.getTime()));
+      if (!dates.length) return {};
+      const start = new Date(Math.min(...dates));
+      const end = new Date(Math.max(...dates));
+      const dayMs = 24 * 60 * 60 * 1000;
+      return {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10),
+        days: Math.floor((Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()) - Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate())) / dayMs) + 1
+      };
     }
 
     function renderCommits() {
@@ -1145,7 +1285,7 @@ INDEX_HTML = r"""<!doctype html>
       $("commit-count").textContent = `${rows.length} shown`;
       $("commit-rows").innerHTML = rows.map((row, index) => `
         <tr data-index="${index}" class="${index === state.selectedCommit ? "selected" : ""}">
-          <td><button class="read-toggle ${row.is_read ? "read" : "unread"}" data-review-key="${esc(row.review_key)}" data-is-read="${row.is_read ? "true" : "false"}" title="${row.is_read ? "Mark unread" : "Mark read"}" aria-label="${row.is_read ? "Mark unread" : "Mark read"}"></button></td>
+          <td><button class="read-toggle ${row.is_read ? "read" : "unread"}" data-review-key="${esc(row.review_key)}" data-is-read="${row.is_read ? "true" : "false"}" title="${row.is_read ? "Read" : "Unread"}" aria-label="${row.is_read ? "Read" : "Unread"}" ${isStatic ? "disabled" : ""}></button></td>
           <td>${index + 1}</td>
           <td class="commit-cell" title="${esc(row.commit_sha)}">${esc(shortSha(row.commit_sha))}</td>
           <td>${badge(displayVerdict(row))}</td>
@@ -1159,25 +1299,27 @@ INDEX_HTML = r"""<!doctype html>
           const index = Number(tr.dataset.index);
           state.selectedCommit = index;
           const selected = rows[index];
-          if (selected && !selected.is_read) {
+          if (!isStatic && selected && !selected.is_read) {
             await setReadState(selected.review_key, true);
             return;
           }
           renderCommits();
         });
       });
-      $("commit-rows").querySelectorAll(".read-toggle").forEach((button) => {
-        button.addEventListener("click", async (event) => {
-          event.stopPropagation();
-          button.disabled = true;
-          try {
-            await setReadState(button.dataset.reviewKey, button.dataset.isRead !== "true");
-          } catch (error) {
-            button.disabled = false;
-            alert(error.message);
-          }
+      if (!isStatic) {
+        $("commit-rows").querySelectorAll(".read-toggle").forEach((button) => {
+          button.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            button.disabled = true;
+            try {
+              await setReadState(button.dataset.reviewKey, button.dataset.isRead !== "true");
+            } catch (error) {
+              button.disabled = false;
+              alert(error.message);
+            }
+          });
         });
-      });
+      }
       const row = rows[state.selectedCommit] || rows[0];
       if (!row) {
         $("commit-detail").innerHTML = `<div class="empty">No commit reviews saved yet.</div>`;
@@ -1198,16 +1340,16 @@ INDEX_HTML = r"""<!doctype html>
         section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(row.verdict_reason || "")}</p>`),
         section("Maintainer To-Do", todoList(row.todo_items)),
         section("Shout Outs", asList(row.shout_outs)),
-        section("Evidence", Object.entries(evidence).length ? `<ul>${Object.entries(evidence).map(([key, value]) => `<li><strong>${esc(key.replaceAll("_", " "))}:</strong> ${esc(value)}</li>`).join("")}</ul>` : `<p class="muted">No evidence recorded.</p>`)
+        section("Evidence", evidenceList(evidence))
       ].join("");
       attachTodoHandlers($("commit-detail"));
     }
 
     function renderRelease() {
-      const rows = state.data.release_reviews || [];
+      const rows = filteredReleases();
       $("release-list").innerHTML = rows.length ? rows.map((row, index) => `
         <div class="release-item ${index === state.selectedRelease ? "selected" : ""}" data-index="${index}">
-          <div class="release-title"><strong>${esc(row.tag_start)}..${esc(row.branch)}</strong>${badge(displayVerdict(row))}</div>
+          <div class="release-title"><strong>${esc(row.tag_start)}</strong>${badge(displayVerdict(row))}</div>
           <div class="muted">${esc(row.reviewed_at)} · ${esc(shortSha(row.head_sha))} · ${row.outstanding_todos || 0} open to-dos</div>
         </div>
       `).join("") : `<div class="empty">No release-level reviews saved yet.</div>`;
@@ -1225,21 +1367,22 @@ INDEX_HTML = r"""<!doctype html>
       const details = row.details || {};
       $("release-detail").innerHTML = [
         field("Repo", row.repo),
-        field("Range", `${row.tag_start}..${row.branch}`),
+        field("Release", row.tag_start),
+        row.range_start ? field("Since", row.range_start) : "",
         field("Head", row.head_sha),
         field("Audited", row.reviewed_at),
         section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(details.verdict_reason || row.verdict_reason || "")}</p>`),
         section("Prioritized To-Do", todoList(row.todo_items)),
-        section("Evidence", details.evidence ? `<pre>${esc(JSON.stringify(details.evidence, null, 2))}</pre>` : `<p class="muted">No evidence recorded.</p>`)
+        section("Evidence", evidenceList(details.evidence))
       ].join("");
       attachTodoHandlers($("release-detail"));
     }
 
     function renderAnnouncement() {
-      const rows = state.data.release_announcements || [];
+      const rows = filteredAnnouncements();
       $("announcement-list").innerHTML = rows.length ? rows.map((row, index) => `
         <div class="release-item ${index === state.selectedAnnouncement ? "selected" : ""}" data-index="${index}">
-          <div class="release-title"><strong>${esc(row.tag_start)}..${esc(row.branch)}</strong><span class="muted">${esc(shortSha(row.head_sha))}</span></div>
+          <div class="release-title"><strong>${esc(row.tag_start)}</strong><span class="muted">${esc(shortSha(row.head_sha))}</span></div>
           <div class="muted">${esc(row.generated_at)}</div>
         </div>
       `).join("") : `<div class="empty">No release announcements saved yet.</div>`;
@@ -1279,6 +1422,13 @@ INDEX_HTML = r"""<!doctype html>
       state.filter = event.target.value;
       state.selectedCommit = 0;
       renderCommits();
+    });
+    $("tag-select").addEventListener("change", (event) => {
+      state.selectedTag = event.target.value;
+      state.selectedCommit = 0;
+      state.selectedRelease = 0;
+      state.selectedAnnouncement = 0;
+      renderAll();
     });
     $("copy-announcement").addEventListener("click", async () => {
       await navigator.clipboard.writeText($("announcement-markdown").textContent);

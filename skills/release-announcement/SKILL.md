@@ -5,7 +5,7 @@ description: Generate a Discord-friendly markdown release announcement from stor
 
 # Release Announcement
 
-Generate a Discord-friendly markdown announcement from commit-review records for a release range.
+Generate a Discord-friendly markdown announcement from commit-review records for a release. The release tag is the release being announced, such as `v10.7.0`; the range start tag is only the previous release boundary used to select commits.
 
 If the caller provides an output file path, write the final Discord-friendly Markdown announcement to that path before finishing.
 

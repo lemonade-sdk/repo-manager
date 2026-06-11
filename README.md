@@ -42,29 +42,41 @@ repo-manager review-commit 450bf6c
 
 Pi runs normally in your terminal. The skill writes JSON result files under `.repo-manager/reviews/`, then repo-manager reads those artifacts and saves their paths plus parsed fields to SQLite.
 
-Review every commit after a tag:
+Review every commit in a release range. The positional value is the release bucket being prepared. repo-manager automatically uses the previous `v*` tag as the lower bound:
 
 ```bash
-repo-manager sweep v10.6.0
+repo-manager sweep v10.7.0
 ```
 
 Re-run existing reviews:
 
 ```bash
-repo-manager sweep v10.6.0 --force
+repo-manager sweep v10.7.0 --force
 ```
 
 Create a release-readiness review from stored commit reviews:
 
 ```bash
-repo-manager release-review v10.6.0
+repo-manager release-review v10.7.0
 ```
 
 Generate a Discord-friendly release announcement:
 
 ```bash
-repo-manager announce v10.6.0
+repo-manager announce v10.7.0
 ```
+
+For the next unreleased train, use `vNext`:
+
+```bash
+repo-manager sweep vNext
+repo-manager release-review vNext
+repo-manager announce vNext
+```
+
+Use `--since TAG` only when you need to override the inferred previous `v*` tag.
+
+Release reviews and announcements are updated in place for a given release bucket. Re-running either command for the same release replaces the saved database row and rewrites the artifact file under `.repo-manager/reviews/releases/`.
 
 Wipe the local SQLite database:
 
@@ -86,6 +98,34 @@ repo-manager ui
 ```
 
 The UI serves the current workspace at `http://127.0.0.1:8765/` by default. Use `--no-open` to print the URL without opening a browser. Commit and release review to-dos can be checked off in the UI, and that state is persisted in SQLite.
+
+Use the tag dropdown to browse `vNext` and historical releases.
+
+## GitHub Pages Publishing
+
+repo-manager can publish a static, read-only copy of the dashboard to the target repository's GitHub Pages site. The local SQLite database remains the source of truth.
+
+```bash
+repo-manager publish-pages
+```
+
+By default this updates only `docs/repo-manager/` on the `website` branch. The existing website publisher can continue owning the normal generated docs path, while repo-manager owns its dashboard path.
+
+Useful overrides:
+
+```bash
+repo-manager publish-pages --website-branch website --target-dir docs/repo-manager
+```
+
+Preview the generated static site locally without touching the website branch:
+
+```bash
+repo-manager publish-pages --dry-run
+```
+
+The dry run writes `.repo-manager/pages-preview/index.html` and opens it in your default browser by default. Use `--no-open` to only write the files, or `--out PATH` to choose a different preview directory.
+
+The published dashboard shows the saved commit reviews, release reviews, announcements, read status, and to-do completion state as of the publish time. To-do and read-state changes should still be made in the local UI, then republished.
 
 Workspace state lives under `.repo-manager/` in the initialized folder, including `config.json`, the SQLite database, explicit review artifacts, and the reusable repo checkout.
 
