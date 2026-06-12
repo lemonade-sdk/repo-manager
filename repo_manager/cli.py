@@ -89,6 +89,31 @@ def ensure_db_schema(conn):
             continue
         if columns and "range_start" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN range_start TEXT NOT NULL DEFAULT ''")
+        if table == "release_announcements" and columns:
+            if "release_highlights_output" not in columns:
+                conn.execute(
+                    "ALTER TABLE release_announcements ADD COLUMN release_highlights_output TEXT NOT NULL DEFAULT ''"
+                )
+                if "release_notes_output" in columns:
+                    conn.execute(
+                        """
+                        UPDATE release_announcements
+                        SET release_highlights_output=release_notes_output
+                        WHERE release_highlights_output=''
+                        """
+                    )
+            if "release_highlights_path" not in columns:
+                conn.execute(
+                    "ALTER TABLE release_announcements ADD COLUMN release_highlights_path TEXT NOT NULL DEFAULT ''"
+                )
+                if "release_notes_path" in columns:
+                    conn.execute(
+                        """
+                        UPDATE release_announcements
+                        SET release_highlights_path=release_notes_path
+                        WHERE release_highlights_path=''
+                        """
+                    )
 
 
 def init_db(workspace):
@@ -262,6 +287,49 @@ def write_json_artifact_from_output(path, output):
     return True
 
 
+def validate_release_highlights_artifact(markdown):
+    text = (markdown or "").strip()
+    if not text:
+        raise SystemExit("Release highlights artifact is empty.")
+    lines = text.splitlines()
+    nonblank = [line for line in lines if line.strip()]
+    if not nonblank or nonblank[0].strip() != "## Headline":
+        raise SystemExit("Release highlights artifact must start with exactly `## Headline`.")
+
+    heading_lines = [(index, line.strip()) for index, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
+    headings = [line for _, line in heading_lines]
+    if headings != ["## Headline", "## Breaking Changes"]:
+        raise SystemExit(
+            "Release highlights artifact must contain only `## Headline` followed by `## Breaking Changes`."
+        )
+
+    breaking_index = heading_lines[1][0]
+    headline_lines = [line for line in lines[heading_lines[0][0] + 1 : breaking_index] if line.strip()]
+    breaking_lines = [line for line in lines[breaking_index + 1 :] if line.strip()]
+    headline_bullets = [line.strip() for line in headline_lines if line.strip().startswith("- ")]
+    if len(headline_bullets) != len(headline_lines):
+        raise SystemExit("Release highlights Headline section must contain only single-depth `- ` bullets.")
+    if not 3 <= len(headline_bullets) <= 5:
+        raise SystemExit("Release highlights Headline section must contain 3-5 bullets.")
+
+    casual_terms = re.compile(r"\b(finally|huge|massive|awesome|fresh|super|great)\b|glow up", re.IGNORECASE)
+    formatting_terms = re.compile(r"(\*\*|`|\[[^\]]+\]\(|https?://|@)")
+    for bullet in headline_bullets:
+        body = bullet[2:].strip()
+        if casual_terms.search(body):
+            raise SystemExit(f"Release highlights headline is too casual: {body}")
+        if formatting_terms.search(body):
+            raise SystemExit(f"Release highlights headline must not include links, handles, or special formatting: {body}")
+
+    for line in breaking_lines:
+        stripped = line.strip()
+        if not stripped.startswith(("- ", "* ")):
+            raise SystemExit("Release highlights Breaking Changes section must contain only bullets or be empty.")
+        body = stripped[2:].strip().lower().strip(".* ")
+        if body in ("none", "none this release", "no breaking changes", "no breaking changes this release"):
+            raise SystemExit("Leave `## Breaking Changes` empty when there are no breaking changes.")
+
+
 def normalize_release_priority(value):
     text = str(value or "").strip().upper()
     if text in ("P0", "BLOCKING", "BLOCKER", "HIGH"):
@@ -394,6 +462,26 @@ def release_artifact_paths(workspace, repo, tag_start, head, kind):
     return None, base / f"{safe_tag}.release-announcement.md"
 
 
+def release_announcement_artifact_paths(workspace, repo, tag_start, head):
+    base = artifact_dir(workspace, repo, "releases")
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag_start)
+    return (
+        base / f"{safe_tag}.release-highlights.md",
+        base / f"{safe_tag}.release-announcement.md",
+    )
+
+
+def pending_release_announcement_artifact_paths(workspace, repo, tag_start, head):
+    release_highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, tag_start, head)
+    pending_dir = release_highlights_file.parent / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    stamp = str(int(time.time() * 1000))
+    return (
+        pending_dir / f"{release_highlights_file.stem}.{stamp}.pending.md",
+        pending_dir / f"{markdown_file.stem}.{stamp}.pending.md",
+    )
+
+
 def read_json(path):
     with Path(path).open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -511,10 +599,31 @@ def infer_range_start(repo, workspace, release_tag):
     raise SystemExit(f"Could not infer previous v* tag for {release_tag}. Pass --since explicitly.")
 
 
+def prior_release_tags(repo, workspace, release_tag, limit=3):
+    tags = v_tags(repo, workspace)
+    if release_tag == "vNext":
+        return tags[-limit:][::-1]
+    if release_tag in tags:
+        return tags[max(0, tags.index(release_tag) - limit) : tags.index(release_tag)][::-1]
+    current_version = version_parts(release_tag)
+    older = [tag for tag in tags if version_parts(tag) < current_version]
+    return older[-limit:][::-1]
+
+
 def head_sha(repo, workspace, branch):
     checkout = clone_or_fetch(repo, workspace)
     result = run(["git", "-C", str(checkout), "rev-parse", f"origin/{branch}"])
     return result.stdout.strip()
+
+
+def release_head_sha(repo, workspace, branch, release_tag):
+    checkout = clone_or_fetch(repo, workspace)
+    if release_tag and release_tag != "vNext":
+        run(["git", "-C", str(checkout), "fetch", "origin", "--tags", "--prune"])
+        result = run(["git", "-C", str(checkout), "rev-parse", f"{release_tag}^{{}}"], check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    return head_sha(repo, workspace, branch)
 
 
 def load_reviews(workspace, repo, branch=None, release_tag=None):
@@ -622,6 +731,119 @@ def latest_announcement(workspace, repo, branch, tag_start):
             (repo, branch, tag_start, ANNOUNCEMENT_VERSION),
         ).fetchone()
     return dict(row) if row else None
+
+
+def read_announcement_markdown(row):
+    if not row:
+        return ""
+    path = row.get("markdown_path")
+    if path and Path(path).exists():
+        return Path(path).read_text(encoding="utf-8")
+    return row.get("raw_output") or ""
+
+
+def prior_announcements(workspace, repo, branch, release_tag, limit=3):
+    with connect_db(workspace) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM release_announcements
+                WHERE repo=? AND branch=? AND tag_start<>? AND skill_version=?
+                """,
+                (repo, branch, release_tag, ANNOUNCEMENT_VERSION),
+            ).fetchall()
+        ]
+    if release_tag != "vNext":
+        current_version = version_parts(release_tag)
+        rows = [row for row in rows if version_parts(row.get("tag_start")) < current_version]
+    rows.sort(key=lambda row: (version_parts(row.get("tag_start")), row.get("generated_at", "")), reverse=True)
+    return rows[:limit]
+
+
+def announcement_style_context(workspace, repo, branch, release_tag):
+    rows = prior_announcements(workspace, repo, branch, release_tag)
+    if not rows:
+        return ""
+    sections = []
+    for row in rows:
+        markdown = read_announcement_markdown(row).strip()
+        if not markdown:
+            continue
+        sections.append(f"### {row.get('tag_start')}\n\n{markdown}")
+    if not sections:
+        return ""
+    return (
+        "Use these prior release announcements as style references. Match their voice, level of detail, "
+        "section density, and Discord-friendly formatting where appropriate, but do not copy facts from them "
+        "into the new release. Do not reuse their closing sentence verbatim; vary the ending so release posts "
+        "do not become repetitive:\n\n"
+        + "\n\n---\n\n".join(sections)
+        + "\n\n"
+    )
+
+
+def fetch_github_release_body(repo, tag):
+    result = run(
+        ["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", ".body // \"\""],
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def markdown_heading_level(line):
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    if not match:
+        return None, ""
+    return len(match.group(1)), match.group(2).strip()
+
+
+def extract_release_note_sections(markdown):
+    wanted = {"headline", "breaking changes"}
+    lines = (markdown or "").splitlines()
+    sections = {}
+    current = None
+    current_level = None
+    for line in lines:
+        level, title = markdown_heading_level(line)
+        normalized = title.lower() if title else ""
+        if level is not None:
+            if normalized in wanted:
+                current = normalized
+                current_level = level
+                sections[current] = [line]
+                continue
+            if current and level <= current_level:
+                current = None
+                current_level = None
+        if current:
+            sections[current].append(line)
+    ordered = []
+    for key in ("headline", "breaking changes"):
+        text = "\n".join(sections.get(key, [])).strip()
+        if text:
+            ordered.append(text)
+    return "\n\n".join(ordered)
+
+
+def release_highlights_reference_context(workspace, repo, release_tag):
+    sections = []
+    for tag in prior_release_tags(repo, workspace, release_tag):
+        extracted = extract_release_note_sections(fetch_github_release_body(repo, tag))
+        if extracted:
+            sections.append(f"### {tag}\n\n{extracted}")
+    if not sections:
+        return ""
+    return (
+        "Use these Headline and Breaking Changes sections from the last three GitHub releases as the "
+        "style and structure reference for the new website release highlights artifact. Match their level of abstraction, "
+        "but do not copy old facts into the new release:\n\n"
+        + "\n\n---\n\n".join(sections)
+        + "\n\n"
+    )
 
 
 def github_repo_url(repo):
@@ -821,18 +1043,30 @@ def cmd_announce(args):
     if not reviews:
         raise SystemExit("No commit reviews found for that repo/branch/release.")
     range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
-    head = head_sha(repo, workspace, branch)
-    _, markdown_file = release_artifact_paths(workspace, repo, args.release, head, "announcement")
+    head = release_head_sha(repo, workspace, branch, args.release)
+    release_highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, args.release, head)
+    pending_release_highlights_file, pending_markdown_file = pending_release_announcement_artifact_paths(
+        workspace, repo, args.release, head
+    )
+    release_highlights_context = release_highlights_reference_context(workspace, repo, args.release)
+    style_context = announcement_style_context(workspace, repo, branch, args.release)
     prompt = (
         f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
         f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
-        f"Write the Discord-friendly Markdown announcement to: {markdown_file}\n\n"
+        f"Write the website release highlights Markdown to: {pending_release_highlights_file}\n"
+        f"Write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
+        f"{release_highlights_context}"
+        f"{style_context}"
         "Stored commit reviews:\n"
         f"{compact_reviews(workspace, reviews)}"
     )
     run_pi("release-announcement", prompt, workspace)
-    require_files(markdown_file)
-    raw = Path(markdown_file).read_text(encoding="utf-8")
+    require_files(pending_release_highlights_file, pending_markdown_file)
+    release_highlights_raw = Path(pending_release_highlights_file).read_text(encoding="utf-8")
+    validate_release_highlights_artifact(release_highlights_raw)
+    raw = Path(pending_markdown_file).read_text(encoding="utf-8")
+    write_text(release_highlights_file, release_highlights_raw)
+    write_text(markdown_file, raw)
     with connect_db(workspace) as conn:
         conn.execute(
             """
@@ -844,11 +1078,67 @@ def cmd_announce(args):
         conn.execute(
             """
             INSERT OR REPLACE INTO release_announcements
+            (repo, branch, tag_start, range_start, head_sha, raw_output, markdown_path,
+             release_highlights_output, release_highlights_path, generated_at, skill_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                repo,
+                branch,
+                args.release,
+                range_start,
+                head,
+                raw,
+                str(markdown_file),
+                release_highlights_raw,
+                str(release_highlights_file),
+                now_iso(),
+                ANNOUNCEMENT_VERSION,
+            ),
+        )
+
+
+def read_stdin_or_file(path):
+    if path == "-":
+        return sys.stdin.read()
+    return Path(path).read_text(encoding="utf-8")
+
+
+def store_release_announcement(workspace, repo, branch, release_tag, range_start, head, markdown):
+    _, markdown_file = release_announcement_artifact_paths(workspace, repo, release_tag, head)
+    write_text(markdown_file, markdown.rstrip() + "\n")
+    raw = Path(markdown_file).read_text(encoding="utf-8")
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            DELETE FROM release_announcements
+            WHERE repo=? AND branch=? AND tag_start=? AND skill_version=?
+            """,
+            (repo, branch, release_tag, ANNOUNCEMENT_VERSION),
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO release_announcements
             (repo, branch, tag_start, range_start, head_sha, raw_output, markdown_path, generated_at, skill_version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (repo, branch, args.release, range_start, head, raw, str(markdown_file), now_iso(), ANNOUNCEMENT_VERSION),
+            (repo, branch, release_tag, range_start, head, raw, str(markdown_file), now_iso(), ANNOUNCEMENT_VERSION),
         )
+    return markdown_file
+
+
+def cmd_override_announcement(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    branch = args.branch or config.get("branch", "main")
+    range_start = args.since or infer_range_start(repo, workspace, args.release)
+    head = args.head or release_head_sha(repo, workspace, branch, args.release)
+    markdown = read_stdin_or_file(args.file)
+    if not markdown.strip():
+        raise SystemExit("Announcement markdown is empty.")
+    markdown_file = store_release_announcement(workspace, repo, branch, args.release, range_start, head, markdown)
+    print(f"Stored announcement override for {args.release}: {markdown_file}")
 
 
 def cmd_wipe_db(args):
@@ -1040,6 +1330,15 @@ def build_parser():
     announce.add_argument("--repo")
     announce.add_argument("--branch")
     announce.set_defaults(func=cmd_announce)
+
+    override_announcement = sub.add_parser("override-announcement", help="Replace a saved release announcement from Markdown.")
+    override_announcement.add_argument("release", help="Release bucket to replace, e.g. v10.7.0 or vNext.")
+    override_announcement.add_argument("file", help="Markdown file to store, or - to read from stdin.")
+    override_announcement.add_argument("--since", help="Override the inferred previous v* tag for the release range.")
+    override_announcement.add_argument("--head", help="Override the release head SHA stored with the announcement.")
+    override_announcement.add_argument("--repo")
+    override_announcement.add_argument("--branch")
+    override_announcement.set_defaults(func=cmd_override_announcement)
 
     wipe = sub.add_parser("wipe-db", help="Delete and recreate the local SQLite database.")
     wipe.set_defaults(func=cmd_wipe_db)

@@ -66,6 +66,22 @@ Generate a Discord-friendly release announcement:
 repo-manager announce v10.7.0
 ```
 
+This writes two artifacts under `.repo-manager/reviews/releases/`: a website release-highlights markdown file containing only `## Headline` and `## Breaking Changes`, plus the Discord announcement markdown.
+
+When generating these, repo-manager fetches the last three prior GitHub releases and passes their `## Headline` / `## Breaking Changes` sections to Pi as the style reference for the website release-highlights artifact. It separately passes the last three saved local announcements as style references for the Discord announcement.
+
+Replace a saved announcement with Markdown you wrote or already posted:
+
+```bash
+repo-manager override-announcement v10.7.0 ./posted-announcement.md
+```
+
+You can also pipe Markdown through stdin:
+
+```bash
+cat posted-announcement.md | repo-manager override-announcement v10.7.0 -
+```
+
 For the next unreleased train, use `vNext`:
 
 ```bash
@@ -100,6 +116,14 @@ repo-manager ui
 The UI serves the current workspace at `http://127.0.0.1:8765/` by default. Use `--no-open` to print the URL without opening a browser. Commit and release review to-dos can be checked off in the UI, and that state is persisted in SQLite.
 
 Use the tag dropdown to browse `vNext` and historical releases.
+
+The UI keeps the URL updated as you browse, so links can be shared directly to a release bucket and selected review. Deep links use hash parameters and work in both the local and static UI:
+
+```text
+#view=commits&tag=v10.7.0&commit=COMMIT_SHA
+#view=release&tag=v10.7.0
+#view=announcement&tag=v10.7.0
+```
 
 ## GitHub Pages Publishing
 

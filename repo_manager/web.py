@@ -33,6 +33,31 @@ def ensure_range_schema(conn):
             continue
         if columns and "range_start" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN range_start TEXT NOT NULL DEFAULT ''")
+        if table == "release_announcements" and columns:
+            if "release_highlights_output" not in columns:
+                conn.execute(
+                    "ALTER TABLE release_announcements ADD COLUMN release_highlights_output TEXT NOT NULL DEFAULT ''"
+                )
+                if "release_notes_output" in columns:
+                    conn.execute(
+                        """
+                        UPDATE release_announcements
+                        SET release_highlights_output=release_notes_output
+                        WHERE release_highlights_output=''
+                        """
+                    )
+            if "release_highlights_path" not in columns:
+                conn.execute(
+                    "ALTER TABLE release_announcements ADD COLUMN release_highlights_path TEXT NOT NULL DEFAULT ''"
+                )
+                if "release_notes_path" in columns:
+                    conn.execute(
+                        """
+                        UPDATE release_announcements
+                        SET release_highlights_path=release_notes_path
+                        WHERE release_highlights_path=''
+                        """
+                    )
 
 
 def ensure_todo_schema(conn):
@@ -92,6 +117,40 @@ def read_text_file(path):
         return file_path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def markdown_heading_level(line):
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    if not match:
+        return None, ""
+    return len(match.group(1)), match.group(2).strip()
+
+
+def extract_release_note_sections(markdown):
+    wanted = {"headline", "breaking changes"}
+    sections = {}
+    current = None
+    current_level = None
+    for line in (markdown or "").splitlines():
+        level, title = markdown_heading_level(line)
+        normalized = title.lower() if title else ""
+        if level is not None:
+            if normalized in wanted:
+                current = normalized
+                current_level = level
+                sections[current] = [line]
+                continue
+            if current and level <= current_level:
+                current = None
+                current_level = None
+        if current:
+            sections[current].append(line)
+    ordered = []
+    for key in ("headline", "breaking changes"):
+        text = "\n".join(sections.get(key, [])).strip()
+        if text:
+            ordered.append(text)
+    return "\n\n".join(ordered)
 
 
 def parse_json_text(value, fallback):
@@ -345,6 +404,16 @@ def release_announcements(workspace):
                 continue
             seen.add(key)
             item["markdown"] = read_text_file(item.get("markdown_path")) or item.get("raw_output") or ""
+            release_highlights = (
+                read_text_file(item.get("release_highlights_path"))
+                or item.get("release_highlights_output")
+                or read_text_file(item.get("release_notes_path"))
+                or item.get("release_notes_output")
+                or ""
+            )
+            item["release_highlights_markdown"] = (
+                extract_release_note_sections(release_highlights) or release_highlights
+            )
             rows.append(item)
     return rows
 
@@ -404,7 +473,16 @@ def public_app_data(workspace):
         cleaned = []
         for row in data.get(key, []):
             item = dict(row)
-            for private_key in ("rowid", "raw_output", "json_path", "markdown_path"):
+            for private_key in (
+                "rowid",
+                "raw_output",
+                "json_path",
+                "markdown_path",
+                "release_highlights_output",
+                "release_highlights_path",
+                "release_notes_output",
+                "release_notes_path",
+            ):
                 item.pop(private_key, None)
             cleaned.append(item)
         data[key] = cleaned
@@ -711,6 +789,13 @@ INDEX_HTML = r"""<!doctype html>
       gap: 16px;
       align-items: stretch;
     }
+    .single {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
+    }
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -893,25 +978,6 @@ INDEX_HTML = r"""<!doctype html>
       margin: 0;
       line-height: 1.5;
     }
-    .release-list {
-      display: grid;
-      gap: 12px;
-    }
-    .release-item {
-      padding: 14px;
-      border-bottom: 1px solid var(--line);
-      cursor: pointer;
-    }
-    .release-item:hover, .release-item.selected {
-      background: #f6fafb;
-    }
-    .release-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
     .muted {
       color: var(--muted);
       font-size: 12px;
@@ -998,6 +1064,9 @@ INDEX_HTML = r"""<!doctype html>
         grid-template-columns: 1fr;
         height: auto;
       }
+      .single {
+        height: auto;
+      }
       .search {
         width: 100%;
       }
@@ -1012,8 +1081,6 @@ INDEX_HTML = r"""<!doctype html>
       <div class="metrics">
         <div class="metric"><strong id="metric-commits">0</strong><span>commit reviews</span></div>
         <div class="metric"><strong id="metric-unread">0</strong><span>unread reviews</span></div>
-        <div class="metric"><strong id="metric-releases">0</strong><span>release reviews</span></div>
-        <div class="metric"><strong id="metric-announcements">0</strong><span>announcements</span></div>
         <div class="metric"><strong id="metric-todos">0</strong><span>open to-dos</span></div>
       </div>
       <nav>
@@ -1064,25 +1131,17 @@ INDEX_HTML = r"""<!doctype html>
           </section>
         </div>
 
-        <div id="view-release" class="split hidden">
-          <section class="panel">
-            <div class="panel-head"><h2>Release Runs</h2></div>
-            <div id="release-list"></div>
-          </section>
+        <div id="view-release" class="single hidden">
           <section class="panel">
             <div class="panel-head"><h2>Release-Level Review</h2></div>
             <div class="detail" id="release-detail"></div>
           </section>
         </div>
 
-        <div id="view-announcement" class="split hidden">
+        <div id="view-announcement" class="single hidden">
           <section class="panel">
-            <div class="panel-head"><h2>Announcement Runs</h2></div>
-            <div id="announcement-list"></div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h2>Discord Markdown</h2></div>
-            <div class="detail"><pre id="announcement-markdown"></pre></div>
+            <div class="panel-head"><h2>Announcement</h2></div>
+            <div class="detail" id="announcement-detail"></div>
           </section>
         </div>
       </section>
@@ -1091,7 +1150,17 @@ INDEX_HTML = r"""<!doctype html>
 
   <script>
     const isStatic = Boolean(window.REPO_MANAGER_STATIC);
-    const state = { data: null, view: "commits", selectedTag: "", selectedCommit: 0, selectedRelease: 0, selectedAnnouncement: 0, filter: "" };
+    const state = {
+      data: null,
+      view: "commits",
+      selectedTag: "",
+      selectedCommit: 0,
+      selectedRelease: 0,
+      selectedAnnouncement: 0,
+      filter: "",
+      route: {}
+    };
+    let suppressRouteUpdate = false;
     const $ = (id) => document.getElementById(id);
 
     function esc(value) {
@@ -1107,6 +1176,76 @@ INDEX_HTML = r"""<!doctype html>
 
     function shortSha(value) {
       return String(value || "").slice(0, 10);
+    }
+
+    function parseRoute() {
+      const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+      const params = new URLSearchParams(rawHash || window.location.search.slice(1));
+      const view = params.get("view");
+      return {
+        view: ["commits", "release", "announcement"].includes(view) ? view : "",
+        tag: params.get("tag") || "",
+        commit: params.get("commit") || "",
+        releaseHead: params.get("releaseHead") || "",
+        announcementHead: params.get("announcementHead") || ""
+      };
+    }
+
+    function applyRouteFromUrl() {
+      const route = parseRoute();
+      state.route = route;
+      if (!route.view && route.commit) route.view = "commits";
+      if (!route.view && route.releaseHead) route.view = "release";
+      if (!route.view && route.announcementHead) route.view = "announcement";
+      if (state.data && route.commit && !route.tag) {
+        const row = (state.data.commit_reviews || []).find((item) => matchSha(item.commit_sha, route.commit));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (state.data && route.releaseHead && !route.tag) {
+        const row = (state.data.release_reviews || []).find((item) => matchSha(item.head_sha, route.releaseHead));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (state.data && route.announcementHead && !route.tag) {
+        const row = (state.data.release_announcements || []).find((item) => matchSha(item.head_sha, route.announcementHead));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (route.view) state.view = route.view;
+      if (route.tag) state.selectedTag = route.tag;
+    }
+
+    function updateRoute() {
+      if (suppressRouteUpdate || !state.data) return;
+      const params = new URLSearchParams();
+      params.set("view", state.view);
+      if (state.selectedTag) params.set("tag", state.selectedTag);
+      if (state.view === "commits") {
+        const row = filteredCommits()[state.selectedCommit] || filteredCommits()[0];
+        if (row && row.commit_sha) params.set("commit", row.commit_sha);
+      } else if (state.view === "release") {
+        const row = filteredReleases()[state.selectedRelease] || filteredReleases()[0];
+        if (row && row.head_sha) params.set("releaseHead", row.head_sha);
+      } else if (state.view === "announcement") {
+        const row = filteredAnnouncements()[state.selectedAnnouncement] || filteredAnnouncements()[0];
+        if (row && row.head_sha) params.set("announcementHead", row.head_sha);
+      }
+      const next = `#${params.toString()}`;
+      if (window.location.hash !== next) {
+        history.replaceState(null, "", next);
+      }
+    }
+
+    function matchSha(value, target) {
+      if (!value || !target) return false;
+      const full = String(value).toLowerCase();
+      const wanted = String(target).toLowerCase();
+      return full === wanted || full.startsWith(wanted);
+    }
+
+    function scrollSelected(root) {
+      requestAnimationFrame(() => {
+        const selected = root.querySelector(".selected");
+        if (selected) selected.scrollIntoView({ block: "nearest" });
+      });
     }
 
     function asList(items) {
@@ -1186,11 +1325,13 @@ INDEX_HTML = r"""<!doctype html>
     async function reloadData() {
       if (isStatic) {
         state.data = window.REPO_MANAGER_STATIC_DATA || {};
+        applyRouteFromUrl();
         renderAll();
         return;
       }
       const response = await fetch("/api/data");
       state.data = await response.json();
+      applyRouteFromUrl();
       renderAll();
     }
 
@@ -1246,6 +1387,9 @@ INDEX_HTML = r"""<!doctype html>
     function renderShell() {
       const data = state.data;
       const tags = data.tags || [];
+      if (state.selectedTag && !tags.includes(state.selectedTag)) {
+        state.selectedTag = "";
+      }
       if (!state.selectedTag && tags.length) {
         state.selectedTag = tags[0];
       }
@@ -1256,8 +1400,6 @@ INDEX_HTML = r"""<!doctype html>
       $("repo-name").textContent = `${data.config.repo} · ${data.config.branch || "main"}`;
       $("metric-commits").textContent = commits.length;
       $("metric-unread").textContent = commits.filter((row) => !row.is_read).length;
-      $("metric-releases").textContent = releases.length;
-      $("metric-announcements").textContent = announcements.length;
       $("metric-todos").textContent = commits.reduce((sum, row) => sum + (row.outstanding_todos || 0), 0) + releases.reduce((sum, row) => sum + (row.outstanding_todos || 0), 0);
       $("stat-contributions").textContent = commits.length;
       $("stat-authors").textContent = new Set(commits.map((row) => row.author).filter(Boolean)).size;
@@ -1282,6 +1424,15 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderCommits() {
       const rows = filteredCommits();
+      if (state.route.commit) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.commit_sha, state.route.commit));
+        if (routedIndex !== -1) {
+          state.selectedCommit = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedCommit = Math.min(state.selectedCommit, rows.length - 1);
+      }
       $("commit-count").textContent = `${rows.length} shown`;
       $("commit-rows").innerHTML = rows.map((row, index) => `
         <tr data-index="${index}" class="${index === state.selectedCommit ? "selected" : ""}">
@@ -1294,16 +1445,20 @@ INDEX_HTML = r"""<!doctype html>
           <td>${esc(row.author || "")}</td>
         </tr>
       `).join("");
+      scrollSelected($("commit-rows"));
       $("commit-rows").querySelectorAll("tr").forEach((tr) => {
         tr.addEventListener("click", async () => {
           const index = Number(tr.dataset.index);
           state.selectedCommit = index;
+          state.route = {};
           const selected = rows[index];
           if (!isStatic && selected && !selected.is_read) {
+            updateRoute();
             await setReadState(selected.review_key, true);
             return;
           }
           renderCommits();
+          updateRoute();
         });
       });
       if (!isStatic) {
@@ -1326,7 +1481,6 @@ INDEX_HTML = r"""<!doctype html>
         $("commit-selected").textContent = "";
         return;
       }
-      state.selectedCommit = Math.min(state.selectedCommit, rows.length - 1);
       $("commit-selected").textContent = shortSha(row.commit_sha);
       const evidence = row.evidence || {};
       const prUrl = row.pr_number ? `https://github.com/${state.data.config.repo}/pull/${row.pr_number}` : "";
@@ -1347,18 +1501,15 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderRelease() {
       const rows = filteredReleases();
-      $("release-list").innerHTML = rows.length ? rows.map((row, index) => `
-        <div class="release-item ${index === state.selectedRelease ? "selected" : ""}" data-index="${index}">
-          <div class="release-title"><strong>${esc(row.tag_start)}</strong>${badge(displayVerdict(row))}</div>
-          <div class="muted">${esc(row.reviewed_at)} · ${esc(shortSha(row.head_sha))} · ${row.outstanding_todos || 0} open to-dos</div>
-        </div>
-      `).join("") : `<div class="empty">No release-level reviews saved yet.</div>`;
-      $("release-list").querySelectorAll(".release-item").forEach((item) => {
-        item.addEventListener("click", () => {
-          state.selectedRelease = Number(item.dataset.index);
-          renderRelease();
-        });
-      });
+      if (state.route.releaseHead) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.releaseHead));
+        if (routedIndex !== -1) {
+          state.selectedRelease = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedRelease = Math.min(state.selectedRelease, rows.length - 1);
+      }
       const row = rows[state.selectedRelease] || rows[0];
       if (!row) {
         $("release-detail").innerHTML = `<div class="empty">Run <code>repo-manager release-review TAG</code> to create one.</div>`;
@@ -1380,20 +1531,28 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderAnnouncement() {
       const rows = filteredAnnouncements();
-      $("announcement-list").innerHTML = rows.length ? rows.map((row, index) => `
-        <div class="release-item ${index === state.selectedAnnouncement ? "selected" : ""}" data-index="${index}">
-          <div class="release-title"><strong>${esc(row.tag_start)}</strong><span class="muted">${esc(shortSha(row.head_sha))}</span></div>
-          <div class="muted">${esc(row.generated_at)}</div>
-        </div>
-      `).join("") : `<div class="empty">No release announcements saved yet.</div>`;
-      $("announcement-list").querySelectorAll(".release-item").forEach((item) => {
-        item.addEventListener("click", () => {
-          state.selectedAnnouncement = Number(item.dataset.index);
-          renderAnnouncement();
-        });
-      });
+      if (state.route.announcementHead) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.announcementHead));
+        if (routedIndex !== -1) {
+          state.selectedAnnouncement = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedAnnouncement = Math.min(state.selectedAnnouncement, rows.length - 1);
+      }
       const row = rows[state.selectedAnnouncement] || rows[0];
-      $("announcement-markdown").textContent = row ? row.markdown : "Run repo-manager announce TAG to create an announcement.";
+      if (!row) {
+        $("announcement-detail").innerHTML = `<div class="empty">Run <code>repo-manager announce TAG</code> to create an announcement.</div>`;
+        return;
+      }
+      $("announcement-detail").innerHTML = [
+        field("Release", row.tag_start),
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Head", row.head_sha),
+        field("Generated", row.generated_at),
+        section("Website Release Highlights", `<pre id="release-highlights-markdown">${esc(row.release_highlights_markdown || "No website release highlights artifact saved.")}</pre>`),
+        section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.markdown || "")}</pre>`)
+      ].join("");
     }
 
     function setView(view) {
@@ -1405,6 +1564,7 @@ INDEX_HTML = r"""<!doctype html>
       $("search").classList.toggle("hidden", view !== "commits");
       $("copy-announcement").classList.toggle("hidden", view !== "announcement");
       $("view-title").textContent = view === "commits" ? "Commit DB" : view === "release" ? "Release Review" : "Announcement";
+      updateRoute();
     }
 
     function renderAll() {
@@ -1416,24 +1576,38 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     document.querySelectorAll(".nav-button").forEach((button) => {
-      button.addEventListener("click", () => setView(button.dataset.view));
+      button.addEventListener("click", () => {
+        state.route = {};
+        setView(button.dataset.view);
+      });
     });
     $("search").addEventListener("input", (event) => {
       state.filter = event.target.value;
       state.selectedCommit = 0;
+      state.route = {};
       renderCommits();
+      updateRoute();
     });
     $("tag-select").addEventListener("change", (event) => {
       state.selectedTag = event.target.value;
       state.selectedCommit = 0;
       state.selectedRelease = 0;
       state.selectedAnnouncement = 0;
+      state.route = {};
       renderAll();
     });
     $("copy-announcement").addEventListener("click", async () => {
-      await navigator.clipboard.writeText($("announcement-markdown").textContent);
+      const markdown = $("announcement-markdown");
+      await navigator.clipboard.writeText(markdown ? markdown.textContent : "");
       $("copy-announcement").textContent = "Copied";
       setTimeout(() => $("copy-announcement").textContent = "Copy announcement", 1000);
+    });
+    window.addEventListener("hashchange", () => {
+      if (!state.data) return;
+      suppressRouteUpdate = true;
+      applyRouteFromUrl();
+      renderAll();
+      suppressRouteUpdate = false;
     });
 
     reloadData()

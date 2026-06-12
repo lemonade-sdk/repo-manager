@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS release_announcements (
   head_sha TEXT NOT NULL,
   raw_output TEXT NOT NULL,
   markdown_path TEXT NOT NULL DEFAULT '',
+  release_highlights_output TEXT NOT NULL DEFAULT '',
+  release_highlights_path TEXT NOT NULL DEFAULT '',
   generated_at TEXT NOT NULL,
   skill_version TEXT NOT NULL,
   PRIMARY KEY (repo, branch, tag_start, skill_version)
