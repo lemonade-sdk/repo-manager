@@ -619,6 +619,12 @@ def normalize_release_review_data(data):
     if not str(data.get("verdict_reason") or "").strip() and str(data.get("summary") or "").strip():
         data["verdict_reason"] = str(data["summary"]).strip()
 
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    for alias, canonical in (("commit_coverage", "coverage"), ("manual_release_testing", "manual_testing")):
+        if alias in evidence and canonical not in evidence:
+            evidence[canonical] = evidence.pop(alias)
+    data["evidence"] = evidence
+
     verdict = str(data.get("verdict") or "").strip().lower()
     if verdict == "ready":
         normalized_verdict = "Ready"
@@ -687,6 +693,13 @@ def release_review_validation_errors(data, required_triage_ids=None):
             "verdict_reason must be the one-or-two-sentence answer to 'can we ship?' — name what stands between "
             "this release and shipping; do not summarize the artifact, list to-dos, or report statistics."
         )
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    for key in ("coverage", "blockers", "manual_testing", "breaking_changes", "security"):
+        if not str(evidence.get(key, "")).strip():
+            errors.append(
+                f"evidence.{key} is required: one or two sentences of synthesis for the maintainer dashboard "
+                "(or 'none observed' when that is the honest answer)."
+            )
     if verdict not in ("Ready", "Needs Attention", "Blocked"):
         errors.append(f"Verdict must be Ready, Needs Attention, or Blocked; got {verdict!r}.")
     if not isinstance(todos, list):
