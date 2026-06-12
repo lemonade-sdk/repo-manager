@@ -62,6 +62,8 @@ Create a release-readiness review from stored commit reviews:
 repo-manager release-review v10.7.0
 ```
 
+The review is one verdict (`Ready`/`Needs Attention`/`Blocked`) plus a tight prioritized to-do list: P0 means do not ship until resolved, P1 means verify before shipping; there is no P2 and no nitpick tier. Pi receives a per-commit digest (summaries, verdicts, open to-dos, test/compatibility/security evidence) rather than the full review payload, and the result is validated (verdict/list agreement, at most 6 items, actionable phrasing) with automatic retry and resumable feedback, like `announce`.
+
 Generate a Discord-friendly release announcement:
 
 ```bash

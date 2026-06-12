@@ -1,121 +1,89 @@
 ---
 name: release-review
-description: Analyze stored commit-review results for a release range and produce a release-readiness verdict with a prioritized maintainer to-do list. Use when asked to synthesize many commit reviews into release readiness.
+description: Synthesize stored commit-review results into a release-readiness verdict and a tight, prioritized maintainer to-do list. Use when asked to judge whether a branch is ready to release.
 ---
 
 # Release Review
 
-Analyze a set of commit-review records for one repository release. The input should include the repo, branch, release tag, optional range start tag, head SHA, and stored commit-review outputs or structured summaries. The release tag is the release being prepared, such as `v10.7.0` or `vNext`; the range start tag is the previous release tag used to select commits.
+The reader is the maintainer about to press the release button. Your job is to hand them exactly what they need to make that call: one verdict, and the shortest possible list of things they would regret shipping without doing. Everything else is noise that costs them time they are spending on a release.
 
-The stored commit reviews may include `maintainer_todos`, `open_maintainer_todos`, and `completed_maintainer_todos`. Treat completed commit to-dos as resolved. Do not re-add a completed commit to-do to the release to-do list unless the completed item reveals a separate unresolved release-level risk that still needs action.
+The input includes the repo, branch, release tag, range start tag, head SHA, and a per-commit digest of stored commit reviews (summary, verdict, open to-dos, and test/compatibility/security evidence). Synthesize from this digest; do not re-review diffs unless the digest is clearly insufficient.
 
-If the caller provides an output file path, writing the artifact is mandatory. Write the artifact before finishing:
+## The inclusion test
 
-- Machine-readable JSON to the requested `.json` path.
+A to-do earns its place only if both are true:
 
-Do not rely on printing JSON to the terminal as a substitute for writing the file. The CLI reads the requested artifact path after the skill exits.
+1. **The maintainer would regret shipping without acting on it.**
+2. **Users would notice the consequence in this release** — broken behavior, a missing or untested headline feature, a surprise breaking change, a security exposure.
 
-The JSON must use this shape:
+Everything that fails the test does not get a lower priority — it gets omitted. Specifically excluded, always: code-quality follow-ups, "add tests later" debt, refactoring suggestions, review-process observations ("review was light", "approval came after the bot"), CI flakiness that does not affect shipped artifacts, documentation polish unrelated to behavior changes, and anything whose natural deadline is after the release.
+
+The test cuts both ways: a short list is a constraint, not the goal, and a missing P0/P1 is a worse failure than an extra one. Some things always pass the test when present in the range — a user-facing breaking change whose migration is not yet in the release notes, and a new headline feature with no test evidence on its advertised platforms. "Not a showstopper" does not mean "omit": anything a maintainer should do before shipping is a P1 by definition.
+
+## Priorities
+
+Exactly two priorities exist:
+
+- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped artifacts, a likely security issue, a breaking change with no migration path, or a headline feature whose release packaging/tests are failing with the cause not yet understood. Uncertainty about whether release artifacts are broken is itself P0: "we don't know if the package works" blocks a release the same way "the package is broken" does.
+- **P1 — verify before shipping.** New user-facing behavior in this release that lacks test evidence and needs a human to confirm it works: a new backend on its advertised platforms, a new command end-to-end, a breaking change's migration story actually written down where users will see it.
+
+There is no P2. If something matters for this release it is P0 or P1; if it does not, it is not in the list.
+
+## Triage first
+
+Every digest entry that has `open_todos` gets an explicit decision before anything else is written. There are exactly three decisions:
+
+- `P0` — this entry contains a do-not-ship-until-resolved issue.
+- `P1` — this entry contains something a human must verify before shipping.
+- `omit` — users would not notice; say why in one clause ("test debt", "process note", "post-release cleanup").
+
+The decisions go in the artifact's `triage` array, one entry per digest id, and they bind you: the verdict is computed from them (any P0 → `Blocked`; any P1 and no P0 → `Needs Attention`; all omitted → `Ready`), and every kept decision must be represented in `prioritized_todos`. Several kept entries usually merge into one themed to-do. The CLI rejects artifacts whose triage is incomplete or whose verdict disagrees with it.
+
+## Writing the to-dos
+
+- At most 6 items. A release with more than 6 genuine ship-blockers and verifications usually means themes were not merged.
+- Group manual verification by release-test theme, not by commit: one to-do covering the new-feature smoke matrix (naming each surface to touch) beats five one-feature to-dos.
+- Each to-do is one sentence that starts with the action, names the user-visible thing at stake, and says how to check it: "Run X on Y and confirm Z." Never "Consider...", "Note that...", or "Investigate whether..." without saying what decision the answer feeds.
+- When several commit reviews repeat the same concern (for example, the same CI test failing across multiple merges), that repetition is signal — merge it into one to-do and say it recurred.
+
+## Verdict
+
+Exactly one of:
+
+- `Ready` — the to-do list is empty.
+- `Needs Attention` — at least one P1 and no P0.
+- `Blocked` — at least one P0.
+
+The verdict and the list must agree; if the release can only ship after a check happens, that check is in the list and the verdict is not `Ready`. Never output other verdict words (`Pass`, `Conditional`, `Clean`, ...).
+
+Apply this reflexively to your own prose: if your `verdict_reason` or evidence mentions anything that should happen before shipping, the verdict is not `Ready` and each such thing is a to-do. Burying pre-release work in the reason text while reporting `Ready` is the worst possible output — the maintainer reads the verdict and ships.
+
+## JSON artifact
+
+Writing the artifact to the caller-provided `.json` path is mandatory before finishing; the CLI reads that file after the skill exits. Use exactly this shape:
 
 ```json
 {
-  "repo": "OWNER/REPO",
-  "branch": "main",
-  "tag_start": "v1.2.3",
-  "range_start": "v1.2.2",
-  "head_sha": "HEAD_SHA",
-  "verdict": "Ready",
-  "verdict_reason": "One sentence explaining the release verdict.",
+  "verdict": "Blocked",
+  "verdict_reason": "One sentence a maintainer can act on, naming the deciding factor.",
+  "triage": [
+    {"id": "c3", "decision": "P1", "why": "new backend needs platform verification"},
+    {"id": "c7", "decision": "omit", "why": "test debt, post-release"}
+  ],
   "prioritized_todos": [
-    {
-      "priority": "P1",
-      "text": "Concise release action."
-    }
+    {"priority": "P0", "text": "Resolve X so that users get Y; check by Z."},
+    {"priority": "P1", "text": "Run A on B and confirm C."}
   ],
   "evidence": {
-    "commit_coverage": "...",
-    "blockers": "...",
-    "manual_release_testing": "...",
-    "api_compatibility": "...",
-    "security": "...",
-    "documentation": "..."
+    "coverage": "What range was reviewed and anything not covered.",
+    "blockers": "Short synthesis of what drove the verdict.",
+    "manual_testing": "What human verification this release needs and why.",
+    "breaking_changes": "User-facing breaking changes and their migration story.",
+    "security": "Security-relevant observations, or 'none observed'."
   }
 }
 ```
 
-Do not add alternate top-level action fields such as `recommendations`, `open_release_risks`, or `maintainer_todos_summary` as substitutes for `prioritized_todos`. You may include extra evidence fields, but every maintainer action that affects the verdict must appear in `prioritized_todos`.
-
-Keep the JSON compact and UI-oriented. Do not include exhaustive inventories such as `summary_statistics`, `key_changes`, PR-by-PR lists, shout-out summaries, or long open-risk objects. Put short synthesized prose in `evidence` instead.
-
-## Evaluation
-
-Build a release-level judgment from the commit reviews. Do not re-review every diff unless the supplied data is clearly insufficient.
-
-Synthesize release risk. The release review is not a concatenation of commit-review to-dos. Group related risks into a small number of release-level actions, and drop nitpicks, already-resolved items, and one-off commit concerns that do not affect release quality.
-
-Use the commit-review to-do status:
-
-- Completed commit to-dos count as resolved evidence.
-- Open commit to-dos are candidates for release actions, but must be grouped by release risk.
-- If many open commit to-dos point to the same theme, create one to-do for that theme.
-- If a commit to-do is low-risk or purely local cleanup, keep it out of the release review unless it changes release readiness.
-
-Keep the release to-do list short:
-
-- Aim for 3-7 total items.
-- Do not exceed 10 total items unless there are multiple independent P0 blockers.
-- Prefer at most 5 P1 items. Coalesce platform, backend, GUI, CLI, API, documentation, and security checks by theme.
-- P2 items should be true follow-up items, not every residual concern.
-
-Prioritize maintainer action:
-
-- `P0`: Release-blocking issue. Use for likely security issues, undocumented breaking API changes, major untested shipped behavior, or unresolved `Blocker` commit reviews.
-- `P1`: Should be checked or fixed before release, but not clearly blocking. Use for unresolved `Needs Attention` findings on release-surface behavior, important manual test gaps, documentation gaps, or unclear post-approval risk.
-- `P2`: Lower-priority follow-up. Use for quality improvements, residual risks not in the release surface, or useful post-release cleanup.
-
-Manual testing should be recommended at the level of release validation themes, not as one item per feature. For example, group backend/platform smoke tests together when they can be executed as one release test matrix.
-
-Use counts carefully. Distinguish commits from PRs. Do not say "all PRs passed CI" or give precise coverage counts unless the supplied data directly supports that statement.
-
-## Verdict
-
-Return exactly one release verdict:
-
-- `Ready`: no maintainer attention required before release.
-- `Needs Attention`: at least one P1/P2 item exists, but no P0 item.
-- `Blocked`: at least one P0 item exists.
-
-If any unresolved commit review says a maintainer should check something before release, the release verdict cannot be `Ready`. Completed commit to-dos do not prevent `Ready` unless there is still a separate release-level risk.
-
-Do not output verdicts such as `Conditional Pass`, `Pass`, `Fail`, `Clean`, `Minor`, or `Blocker`. If the release can ship only after listed checks are completed, the verdict is `Needs Attention` or `Blocked`, and those checks must be in `prioritized_todos`.
-
-The verdict and to-do list must agree:
-
-- `Ready` requires `prioritized_todos: []`.
-- `Needs Attention` requires at least one P1 or P2 to-do and no P0 to-do.
-- `Blocked` requires at least one P0 to-do.
-
-## Output Format
-
-```markdown
-## Release Verdict: Ready|Needs Attention|Blocked
-
-One sentence explaining the verdict.
-
-## Prioritized To-Do
-
-- P0: ...
-- P1: ...
-- P2: ...
-
-## Evidence
-
-- Commit coverage:
-- Blockers:
-- Manual release testing:
-- API compatibility:
-- Security:
-- Documentation:
-```
-
-Omit empty priority groups. Keep the to-do list focused on release quality, not code-review nitpicks.
+- `prioritized_todos` is the only action field. Do not emit `recommendations`, `open_release_risks`, or other alternates.
+- `evidence` values are one or two sentences of synthesis each — no PR-by-PR lists, no statistics, no commit inventories, no shout-outs.
+- Counts only when the digest directly supports them; never claim "all CI passed" from absence of evidence.

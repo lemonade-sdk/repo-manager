@@ -509,6 +509,54 @@ def normalize_release_priority(value):
 
 
 def normalize_release_review_data(data):
+    if not isinstance(data.get("triage"), list):
+        for alias in ("decisions", "todo_triage"):
+            if isinstance(data.get(alias), list):
+                data["triage"] = data[alias]
+                break
+    if not isinstance(data.get("triage"), list):
+        rebuilt = []
+        for entry in data.get("omitted_todos") or []:
+            if isinstance(entry, dict) and (entry.get("commit") or entry.get("id")):
+                rebuilt.append(
+                    {
+                        "id": entry.get("commit") or entry.get("id"),
+                        "decision": "omit",
+                        "why": entry.get("reason") or entry.get("why") or "",
+                    }
+                )
+        for entry in data.get("action_items") or []:
+            if not isinstance(entry, dict):
+                continue
+            blob = " ".join(
+                str(entry.get(key, "")) for key in ("id", "commit", "commits", "description", "text", "rationale")
+            )
+            for ref in sorted(set(re.findall(r"\bc\d+\b", blob))):
+                rebuilt.append(
+                    {
+                        "id": ref,
+                        "decision": entry.get("priority") or "P1",
+                        "why": str(entry.get("description") or entry.get("text") or "")[:160],
+                    }
+                )
+        if rebuilt:
+            data["triage"] = rebuilt
+    if isinstance(data.get("triage"), list):
+        normalized_triage = []
+        for entry in data["triage"]:
+            if not isinstance(entry, dict):
+                continue
+            decision = str(entry.get("decision") or entry.get("priority") or "").strip()
+            decision = "omit" if decision.lower() in ("omit", "omitted", "drop", "skip") else decision.upper()
+            normalized_triage.append(
+                {
+                    "id": str(entry.get("id") or entry.get("commit") or "").strip(),
+                    "decision": decision,
+                    "why": str(entry.get("why") or entry.get("reason") or entry.get("rationale") or "").strip(),
+                }
+            )
+        data["triage"] = normalized_triage
+
     todos = data.get("prioritized_todos")
     if not isinstance(todos, list):
         todos = []
@@ -521,6 +569,15 @@ def normalize_release_review_data(data):
                 normalized_todos.append({"priority": normalize_release_priority(item.get("priority")), "text": str(text)})
         elif item:
             normalized_todos.append({"priority": "P1", "text": str(item)})
+
+    if not normalized_todos:
+        for item in data.get("action_items") or []:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("description") or item.get("action")
+                if text:
+                    normalized_todos.append(
+                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
+                    )
 
     if not normalized_todos:
         for item in data.get("recommendations") or []:
@@ -552,12 +609,23 @@ def normalize_release_review_data(data):
 
     data["prioritized_todos"] = normalized_todos
 
+    if not str(data.get("verdict_reason") or "").strip() and str(data.get("summary") or "").strip():
+        data["verdict_reason"] = str(data["summary"]).strip()
+
     verdict = str(data.get("verdict") or "").strip().lower()
     if verdict == "ready":
         normalized_verdict = "Ready"
     elif verdict in ("blocked", "blocker", "fail", "failed"):
         normalized_verdict = "Blocked"
-    elif verdict in ("needs attention", "conditional pass", "conditional", "pass with conditions"):
+    elif verdict in (
+        "needs attention",
+        "conditional pass",
+        "conditional",
+        "pass with conditions",
+        "release with conditions",
+        "ship with conditions",
+        "conditional release",
+    ):
         normalized_verdict = "Needs Attention"
     elif any(todo.get("priority") == "P0" for todo in normalized_todos):
         normalized_verdict = "Blocked"
@@ -574,20 +642,103 @@ def normalize_release_review_data(data):
     return data
 
 
-def validate_release_review_data(data):
+RELEASE_TODO_WEASEL_STARTS = ("consider ", "note that", "be aware", "maybe ", "possibly ", "think about")
+
+READY_CONTRADICTION_PATTERN = re.compile(
+    r"\b(?:before (?:shipping|release|releasing|tagging)|should be (?:addressed|checked|verified|fixed|resolved|"
+    r"documented|tested)|needs? (?:attention|verification|testing|fixing|documentation)|must be (?:addressed|"
+    r"checked|verified|fixed|documented|tested))\b",
+    re.IGNORECASE,
+)
+
+
+def release_review_validation_errors(data, required_triage_ids=None):
+    errors = []
     verdict = data.get("verdict")
     todos = data.get("prioritized_todos")
     if verdict not in ("Ready", "Needs Attention", "Blocked"):
-        raise SystemExit(f"Release review produced unsupported verdict: {verdict!r}")
+        errors.append(f"Verdict must be Ready, Needs Attention, or Blocked; got {verdict!r}.")
     if not isinstance(todos, list):
-        raise SystemExit("Release review did not produce prioritized_todos as a list.")
+        return errors + ["prioritized_todos must be a list (empty for Ready)."]
     if verdict in ("Needs Attention", "Blocked") and not todos:
-        raise SystemExit("Release review requires maintainer attention but produced no prioritized_todos.")
+        errors.append("Verdict requires maintainer attention but prioritized_todos is empty.")
     if verdict == "Ready" and todos:
-        raise SystemExit("Release review produced Ready verdict with non-empty prioritized_todos.")
+        errors.append("Ready requires an empty prioritized_todos list.")
+    if verdict == "Ready":
+        prose = " ".join(
+            [str(data.get("verdict_reason", ""))] + [str(value) for value in (data.get("evidence") or {}).values()]
+        )
+        contradiction = READY_CONTRADICTION_PATTERN.search(prose)
+        if contradiction:
+            errors.append(
+                f"Verdict is Ready but the prose says {contradiction.group(0)!r} — pre-release work buried in "
+                "text is the worst possible output. Either nothing needs to happen before shipping (rewrite the "
+                "prose), or it does (each item becomes a P0/P1 to-do and the verdict changes)."
+            )
+    if required_triage_ids is not None:
+        triage = data.get("triage")
+        if not isinstance(triage, list):
+            triage = []
+        decisions = {}
+        for index, entry in enumerate(triage):
+            if not isinstance(entry, dict) or not entry.get("id"):
+                errors.append(f"triage[{index}] must be an object with id, decision, and why.")
+                continue
+            decision = entry.get("decision")
+            if decision not in ("P0", "P1", "omit"):
+                errors.append(f"triage[{index}] decision must be P0, P1, or omit; got {decision!r}.")
+                continue
+            if not str(entry.get("why", "")).strip():
+                errors.append(f"triage[{index}] ({entry['id']}) needs a one-clause `why`.")
+            decisions[str(entry["id"])] = decision
+        missing = [tid for tid in required_triage_ids if tid not in decisions]
+        if missing:
+            errors.append(
+                f"Every digest entry with open_todos must be triaged; missing decisions for: {', '.join(missing)}. "
+                "Each gets P0 (do not ship until resolved), P1 (verify before shipping), or omit (with why)."
+            )
+        kept = [d for d in decisions.values() if d != "omit"]
+        expected = "Blocked" if "P0" in kept else ("Needs Attention" if kept else "Ready")
+        if verdict in ("Ready", "Needs Attention", "Blocked") and verdict != expected:
+            errors.append(
+                f"Verdict must follow from the triage decisions: {len(kept)} kept "
+                f"({sorted(set(kept)) or 'none'}) implies {expected!r}, not {verdict!r}."
+            )
+        if kept and isinstance(todos, list):
+            if "P0" in kept and not any(t.get("priority") == "P0" for t in todos if isinstance(t, dict)):
+                errors.append("Triage kept a P0 but prioritized_todos has no P0 item.")
+            if not todos:
+                errors.append("Triage kept items but prioritized_todos is empty; each kept theme needs a to-do.")
+    if len(todos) > 6:
+        errors.append(
+            f"prioritized_todos has {len(todos)} items; at most 6. Merge verification work into release-test "
+            "themes and omit anything the maintainer would not regret shipping without."
+        )
     for index, item in enumerate(todos):
-        if not isinstance(item, dict) or item.get("priority") not in ("P0", "P1", "P2") or not item.get("text"):
-            raise SystemExit(f"Release review prioritized_todos[{index}] must contain priority P0/P1/P2 and text.")
+        if not isinstance(item, dict) or not str(item.get("text", "")).strip():
+            errors.append(f"prioritized_todos[{index}] must be an object with priority and non-empty text.")
+            continue
+        priority = item.get("priority")
+        text = str(item["text"]).strip()
+        if priority not in ("P0", "P1"):
+            errors.append(
+                f"prioritized_todos[{index}] has priority {priority!r}; only P0 (do not ship until resolved) and "
+                "P1 (verify before shipping) exist. If it matters for this release it is P0 or P1; "
+                "if it does not, remove it."
+            )
+        if len(text) > 300:
+            errors.append(
+                f"prioritized_todos[{index}] is too long; one actionable sentence: action, user-visible stake, how to check."
+            )
+        lowered = text.lower()
+        for weasel in RELEASE_TODO_WEASEL_STARTS:
+            if lowered.startswith(weasel):
+                errors.append(
+                    f"prioritized_todos[{index}] starts with {weasel.strip()!r}; rewrite as a direct action "
+                    "(Run/Verify/Confirm/Fix X and check Y)."
+                )
+                break
+    return errors
 
 
 def parse_pr_number(raw):
@@ -872,6 +1023,48 @@ def compact_reviews(workspace, reviews):
             }
         )
     return json.dumps(rows, indent=2)
+
+
+RELEASE_REVIEW_EVIDENCE_KEYS = (
+    "tests",
+    "manual_release_testing",
+    "api_compatibility",
+    "security",
+    "post_approval_commits",
+    "documentation",
+)
+
+
+def release_review_context(workspace, reviews):
+    completed_ids = completed_todo_ids(workspace)
+    rows = []
+    for index, review in enumerate(reviews, start=1):
+        data = read_json(review["json_path"]) if review.get("json_path") else {}
+        review_key = f"{review['repo']}|{review['commit_sha']}|{review['rubric_version']}"
+        open_todos = []
+        completed = 0
+        for todo_index, item in enumerate(data.get("maintainer_todos", [])):
+            if todo_id("commit", review_key, todo_index, item) in completed_ids:
+                completed += 1
+            else:
+                open_todos.append(todo_display_text(item))
+        evidence = data.get("evidence") or {}
+        rows.append(
+            {
+                "id": f"c{index}",
+                "summary": data.get("summary", review["summary"]),
+                "verdict": data.get("verdict", review["verdict"]),
+                "verdict_reason": data.get("verdict_reason", review["verdict_reason"]),
+                "open_todos": open_todos,
+                "completed_todos": completed,
+                "evidence": {key: evidence[key] for key in RELEASE_REVIEW_EVIDENCE_KEYS if evidence.get(key)},
+            }
+        )
+    return json.dumps(rows, indent=2)
+
+
+def release_review_triage_ids(context_json):
+    return [row["id"] for row in json.loads(context_json) if row.get("open_todos")]
 
 
 def announcement_review_context(workspace, reviews):
@@ -1181,27 +1374,74 @@ def cmd_release_review(args):
     range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
     head = head_sha(repo, workspace, branch)
     json_file, _ = release_artifact_paths(workspace, repo, args.release, head, "review")
-    prompt = (
-        f"/skill:release-review\n\nRepo: {repo}\nBranch: {branch}\n"
-        f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
-        f"Write the machine-readable JSON result to: {json_file}\n"
-        "Each stored commit review includes maintainer_todos with completion state from the repo-manager database. "
-        "Treat completed maintainer_todos as resolved unless they reveal a broader unresolved release risk.\n"
-        "Stored commit reviews:\n"
-        f"{compact_reviews(workspace, reviews)}"
+    context_json = release_review_context(workspace, reviews)
+    triage_ids = release_review_triage_ids(context_json)
+    digest_context = (
+        "Per-commit digest of the stored commit reviews. open_todos reflect maintainer completion state in the "
+        "repo-manager database; completed_todos counts are resolved evidence:\n"
+        + context_json
+        + "\n\nFinal reminders: triage every digest entry that has open_todos "
+        f"({', '.join(triage_ids) or 'none'}) with an explicit P0/P1/omit decision and a one-clause why — "
+        "the verdict must follow from those decisions. A to-do earns its place only if the maintainer would "
+        "regret shipping without it AND users would notice the consequence; omit everything else entirely "
+        "(there is no P2). At most 6 items, each one actionable sentence with how to check; merge related "
+        "decisions into shared to-dos.\n"
     )
-    output = run_pi("release-review", prompt, workspace)
-    if not Path(json_file).exists() and write_json_artifact_from_output(json_file, output):
-        print(f"Wrote release-review artifact from Pi output: {json_file}")
-    require_files(json_file)
-    data = read_json(json_file)
+    feedback = load_release_review_feedback(workspace, repo, args.release)
+    if feedback:
+        print("Resuming with validation feedback from a previous interrupted release-review run.", flush=True)
+    pending_dir = json_file.parent / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    max_attempts = 3
+    data = None
+    for attempt in range(1, max_attempts + 1):
+        pending_json = pending_dir / f"{json_file.stem}.{int(time.time() * 1000)}.pending.json"
+        prompt = (
+            f"/skill:release-review\n\nRepo: {repo}\nBranch: {branch}\n"
+            f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
+            f"Write the machine-readable JSON result to: {pending_json}\n\n"
+            f"{feedback}"
+            f"{digest_context}"
+        )
+        try:
+            output = run_pi("release-review", prompt, workspace)
+        except SystemExit as exc:
+            if exc.code in (130, None):
+                raise
+            if attempt == max_attempts:
+                raise
+            print(f"Pi run failed (exit {exc.code}); retrying with the same instructions.", flush=True)
+            continue
+        if not pending_json.exists() and write_json_artifact_from_output(pending_json, output):
+            print(f"Wrote release-review artifact from Pi output: {pending_json}")
+        artifact_raw = ""
+        errors = []
+        candidate = None
+        if pending_json.exists():
+            artifact_raw = pending_json.read_text(encoding="utf-8")
+            candidate = extract_json_object(artifact_raw)
+            if candidate is None:
+                errors.append("Artifact file must contain a valid JSON object.")
+            else:
+                candidate = normalize_release_review_data(candidate)
+                errors.extend(release_review_validation_errors(candidate, triage_ids))
+        else:
+            errors.append(f"Expected release-review JSON file was not created: {pending_json}")
+        if not errors:
+            data = candidate
+            break
+        error_list = "\n".join(f"- {error}" for error in errors)
+        if attempt == max_attempts:
+            raise SystemExit(f"Release review failed validation after {max_attempts} attempts:\n{error_list}")
+        print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
+        save_release_review_feedback(workspace, repo, args.release, error_list, artifact_raw)
+        feedback = build_release_review_feedback(error_list, artifact_raw)
+    clear_release_review_feedback(workspace, repo, args.release)
     data["repo"] = repo
     data["branch"] = branch
     data["tag_start"] = args.release
     data["range_start"] = range_start
     data["head_sha"] = head
-    data = normalize_release_review_data(data)
-    validate_release_review_data(data)
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     raw = json.dumps(data, indent=2)
     verdict = data.get("verdict", "")
@@ -1223,12 +1463,48 @@ def cmd_release_review(args):
         )
 
 
-def announcement_feedback_file(workspace, repo, release_tag):
+def announcement_feedback_file(workspace, repo, release_tag, kind="announce"):
     base = artifact_dir(workspace, repo, "releases")
     safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", release_tag)
     pending_dir = base / ".pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
-    return pending_dir / f"{safe_tag}.announce-feedback.json"
+    return pending_dir / f"{safe_tag}.{kind}-feedback.json"
+
+
+def build_release_review_feedback(error_list, artifact_raw):
+    section = ""
+    if (artifact_raw or "").strip():
+        section = "Previous attempt:\n```json\n" + artifact_raw.strip() + "\n```\n\n"
+    return (
+        "A previous attempt at this task failed validation. Fix every problem listed below and write the "
+        "corrected JSON to the path given above.\n"
+        f"Validation problems:\n{error_list}\n\n{section}"
+    )
+
+
+def load_release_review_feedback(workspace, repo, release_tag):
+    path = announcement_feedback_file(workspace, repo, release_tag, kind="release-review")
+    if not path.exists():
+        return ""
+    try:
+        data = read_json(path)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return build_release_review_feedback(data.get("errors", ""), data.get("artifact", ""))
+
+
+def save_release_review_feedback(workspace, repo, release_tag, error_list, artifact_raw):
+    path = announcement_feedback_file(workspace, repo, release_tag, kind="release-review")
+    path.write_text(
+        json.dumps({"errors": error_list, "artifact": artifact_raw, "saved_at": now_iso()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def clear_release_review_feedback(workspace, repo, release_tag):
+    path = announcement_feedback_file(workspace, repo, release_tag, kind="release-review")
+    if path.exists():
+        path.unlink()
 
 
 def build_announcement_feedback(error_list, release_highlights_raw, raw, plan_raw=""):
