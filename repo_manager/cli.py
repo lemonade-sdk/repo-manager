@@ -564,7 +564,14 @@ def normalize_release_review_data(data):
     normalized_todos = []
     for item in todos:
         if isinstance(item, dict):
-            text = item.get("text") or item.get("action") or item.get("risk") or item.get("description")
+            text = (
+                item.get("text")
+                or item.get("todo")
+                or item.get("task")
+                or item.get("action")
+                or item.get("risk")
+                or item.get("description")
+            )
             if text:
                 normalized_todos.append({"priority": normalize_release_priority(item.get("priority")), "text": str(text)})
         elif item:
@@ -652,10 +659,34 @@ READY_CONTRADICTION_PATTERN = re.compile(
 )
 
 
+DIGEST_ID_PATTERN = re.compile(r"\bc\d+\b")
+
+
 def release_review_validation_errors(data, required_triage_ids=None):
     errors = []
     verdict = data.get("verdict")
     todos = data.get("prioritized_todos")
+    human_fields = [("verdict_reason", str(data.get("verdict_reason", "")))]
+    human_fields += [(f"evidence.{key}", str(value)) for key, value in (data.get("evidence") or {}).items()]
+    if isinstance(todos, list):
+        human_fields += [
+            (f"prioritized_todos[{index}]", str(item.get("text", "")))
+            for index, item in enumerate(todos)
+            if isinstance(item, dict)
+        ]
+    for field, text in human_fields:
+        leaked = DIGEST_ID_PATTERN.search(text)
+        if leaked:
+            errors.append(
+                f"{field} mentions digest id {leaked.group(0)!r} — ids are internal worksheet references the "
+                "maintainer has never seen; name the feature or behavior instead."
+            )
+    reason = str(data.get("verdict_reason", "")).strip()
+    if len(reason) > 350:
+        errors.append(
+            "verdict_reason must be the one-or-two-sentence answer to 'can we ship?' — name what stands between "
+            "this release and shipping; do not summarize the artifact, list to-dos, or report statistics."
+        )
     if verdict not in ("Ready", "Needs Attention", "Blocked"):
         errors.append(f"Verdict must be Ready, Needs Attention, or Blocked; got {verdict!r}.")
     if not isinstance(todos, list):
@@ -1382,10 +1413,12 @@ def cmd_release_review(args):
         + context_json
         + "\n\nFinal reminders: triage every digest entry that has open_todos "
         f"({', '.join(triage_ids) or 'none'}) with an explicit P0/P1/omit decision and a one-clause why — "
-        "the verdict must follow from those decisions. A to-do earns its place only if the maintainer would "
-        "regret shipping without it AND users would notice the consequence; omit everything else entirely "
-        "(there is no P2). At most 6 items, each one actionable sentence with how to check; merge related "
-        "decisions into shared to-dos.\n"
+        "the verdict must follow from those decisions, and merged entries keep P0/P1 (omit only means users "
+        "would not notice). A to-do earns its place only if the maintainer would regret shipping without it "
+        "AND users would notice the consequence; omit everything else entirely (there is no P2). At most 6 "
+        "items, each one actionable sentence with how to check; merge related decisions into shared to-dos. "
+        "Digest ids appear ONLY inside triage — verdict_reason, to-dos, and evidence are for a human who has "
+        "never seen the digest, and verdict_reason is just your one-or-two-sentence answer to 'can we ship?'.\n"
     )
     feedback = load_release_review_feedback(workspace, repo, args.release)
     if feedback:
