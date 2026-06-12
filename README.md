@@ -20,6 +20,8 @@ After activating the virtual environment, `repo-manager` is available directly o
 pi install /home/jfowers/lsdk/repo-manager
 ```
 
+> **Note:** Pi runs the *installed* copy of each skill, not the `SKILL.md` files in this checkout. After editing any skill under `skills/`, re-run `pi install /home/jfowers/lsdk/repo-manager` (or `repo-manager init`, which reinstalls them automatically) or your changes will not take effect.
+
 The CLI shells out to `pi`, so Pi must be installed and available on `PATH`. The bundled scripts assume `gh` is installed and authenticated with access to the target repository.
 
 ## CLI Workflow
@@ -67,6 +69,8 @@ repo-manager announce v10.7.0
 ```
 
 This writes two artifacts under `.repo-manager/reviews/releases/`: a website release-highlights markdown file containing only `## Headline` and `## Breaking Changes`, plus the Discord announcement markdown.
+
+Generation is staged: Pi first writes a story-plan JSON (3-5 stories, which ones earn sections), then derives both artifacts from it. The plan and artifacts are all validated (plan shape and story coherence, heading/plan consistency, format, voice, length, bullet limits, and an 8-word phrase-overlap check against prior announcements). The announcement prompt feeds Pi an announcement-specific projection of the commit reviews (summaries, authors, credit handles, docs) rather than the full review payload with verdicts and evidence. If validation fails, repo-manager automatically re-runs Pi with the specific errors and the failed drafts, up to 3 attempts. Validation feedback is persisted under `.repo-manager/reviews/releases/.pending/`, so if a run is interrupted, re-running `announce` resumes from the last failed attempt instead of starting over; the feedback file is cleared on success.
 
 When generating these, repo-manager fetches the last three prior GitHub releases and passes their `## Headline` / `## Breaking Changes` sections to Pi as the style reference for the website release-highlights artifact. It separately passes the last three saved local announcements as style references for the Discord announcement.
 

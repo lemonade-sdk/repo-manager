@@ -194,6 +194,7 @@ def run_pi(skill_name, prompt, cwd):
     if saw_text:
         print()
     if returncode != 0:
+        print(f"Pi exited with code {returncode} before completing the skill.", file=sys.stderr, flush=True)
         raise SystemExit(returncode)
     return "".join(assistant_text)
 
@@ -287,47 +288,213 @@ def write_json_artifact_from_output(path, output):
     return True
 
 
-def validate_release_highlights_artifact(markdown):
+def release_highlights_validation_errors(markdown):
     text = (markdown or "").strip()
     if not text:
-        raise SystemExit("Release highlights artifact is empty.")
+        return ["Release highlights artifact is empty."]
     lines = text.splitlines()
     nonblank = [line for line in lines if line.strip()]
     if not nonblank or nonblank[0].strip() != "## Headline":
-        raise SystemExit("Release highlights artifact must start with exactly `## Headline`.")
+        return ["Release highlights artifact must start with exactly `## Headline`."]
 
     heading_lines = [(index, line.strip()) for index, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
     headings = [line for _, line in heading_lines]
     if headings != ["## Headline", "## Breaking Changes"]:
-        raise SystemExit(
-            "Release highlights artifact must contain only `## Headline` followed by `## Breaking Changes`."
-        )
+        return ["Release highlights artifact must contain only `## Headline` followed by `## Breaking Changes`."]
 
+    errors = []
     breaking_index = heading_lines[1][0]
     headline_lines = [line for line in lines[heading_lines[0][0] + 1 : breaking_index] if line.strip()]
     breaking_lines = [line for line in lines[breaking_index + 1 :] if line.strip()]
     headline_bullets = [line.strip() for line in headline_lines if line.strip().startswith("- ")]
     if len(headline_bullets) != len(headline_lines):
-        raise SystemExit("Release highlights Headline section must contain only single-depth `- ` bullets.")
+        errors.append("Release highlights Headline section must contain only single-depth `- ` bullets.")
     if not 3 <= len(headline_bullets) <= 5:
-        raise SystemExit("Release highlights Headline section must contain 3-5 bullets.")
+        errors.append("Release highlights Headline section must contain 3-5 bullets.")
 
     casual_terms = re.compile(r"\b(finally|huge|massive|awesome|fresh|super|great)\b|glow up", re.IGNORECASE)
-    formatting_terms = re.compile(r"(\*\*|`|\[[^\]]+\]\(|https?://|@)")
+    # Inline code (backticks) is allowed: real Lemonade headlines use it for commands and flags.
+    formatting_terms = re.compile(r"(\*\*|\[[^\]]+\]\(|https?://|@)")
     for bullet in headline_bullets:
         body = bullet[2:].strip()
         if casual_terms.search(body):
-            raise SystemExit(f"Release highlights headline is too casual: {body}")
+            errors.append(f"Release highlights headline is too casual: {body}")
         if formatting_terms.search(body):
-            raise SystemExit(f"Release highlights headline must not include links, handles, or special formatting: {body}")
+            errors.append(
+                f"Release highlights headline must not include bold, links, or @handles (inline code is fine): {body}"
+            )
+        if len(body) > 220:
+            errors.append(f"Release highlights headline bullet must be one short sentence: {body}")
 
     for line in breaking_lines:
         stripped = line.strip()
         if not stripped.startswith(("- ", "* ")):
-            raise SystemExit("Release highlights Breaking Changes section must contain only bullets or be empty.")
+            errors.append("Release highlights Breaking Changes section must contain only bullets or be empty.")
+            continue
         body = stripped[2:].strip().lower().strip(".* ")
         if body in ("none", "none this release", "no breaking changes", "no breaking changes this release"):
-            raise SystemExit("Leave `## Breaking Changes` empty when there are no breaking changes.")
+            errors.append("Leave `## Breaking Changes` empty when there are no breaking changes.")
+    return errors
+
+
+def story_plan_validation_errors(plan_text):
+    plan = extract_json_object(plan_text or "")
+    if plan is None:
+        return ["Story plan file must contain a valid JSON object."], None
+    stories = plan.get("stories")
+    if not isinstance(stories, list) or not stories:
+        return ["Story plan must contain a non-empty `stories` list."], None
+    errors = []
+    if not 3 <= len(stories) <= 5:
+        errors.append(
+            f"Story plan has {len(stories)} stories; it must have 3-5. "
+            "Merge stories that answer the same reader question; drop ones users would not notice."
+        )
+    grab_bag_endings = ("improvements", "fixes", "updates", "miscellaneous", "misc")
+    for index, story in enumerate(stories):
+        if not isinstance(story, dict) or not str(story.get("title", "")).strip():
+            errors.append(f"Story plan stories[{index}] must be an object with a non-empty `title`.")
+            continue
+        title = str(story["title"]).strip()
+        if "&" in title or title.lower().split()[-1] in grab_bag_endings:
+            errors.append(
+                f"Story title {title!r} is a grab-bag, not a story. Each story answers one reader question; "
+                "split it into real stories or move its contents to Additional Improvements bullets."
+            )
+    if not any(isinstance(story, dict) and story.get("section") for story in stories):
+        errors.append("At least one story must have `section`: true.")
+    return errors, plan
+
+
+def normalize_heading_title(text):
+    text = re.sub(r"[^0-9A-Za-z&+./'’-]+", " ", text or "")
+    return " ".join(text.split()).lower()
+
+
+RESERVED_ANNOUNCEMENT_HEADINGS = {"breaking changes", "additional improvements", "news"}
+
+
+def announcement_plan_consistency_errors(markdown, plan):
+    if not plan:
+        return []
+    headings = []
+    for line in (markdown or "").splitlines():
+        match = re.match(r"^###\s+(.+?)\s*$", line)
+        if match:
+            normalized = normalize_heading_title(match.group(1))
+            if normalized not in RESERVED_ANNOUNCEMENT_HEADINGS:
+                headings.append((match.group(1).strip(), normalized))
+    section_titles = [
+        str(story.get("title", "")).strip()
+        for story in plan.get("stories", [])
+        if isinstance(story, dict) and story.get("section")
+    ]
+    if [normalized for _, normalized in headings] != [normalize_heading_title(title) for title in section_titles]:
+        return [
+            "Discord feature headings must be exactly the planned section-story titles, in order. "
+            f"Planned sections: {section_titles}. Found headings: {[original for original, _ in headings]}. "
+            "Fix the announcement or revise the plan so the two agree."
+        ]
+    return []
+
+
+def normalize_announcement_words(text):
+    words = []
+    for raw in (text or "").split():
+        token = raw.strip("*_`~:;,.!?()[]{}<>\"'#-—").lower()
+        if not token or token.startswith("http") or token.startswith("www."):
+            continue
+        words.append(token)
+    return words
+
+
+def repeated_prior_phrases(markdown, prior_rows, n=8, max_reports=3):
+    words = normalize_announcement_words(markdown)
+    grams = {}
+    for index in range(len(words) - n + 1):
+        grams.setdefault(tuple(words[index : index + n]), index)
+    hits = []
+    for row in prior_rows:
+        prior_words = normalize_announcement_words(read_announcement_markdown(row))
+        prior_grams = {tuple(prior_words[index : index + n]) for index in range(len(prior_words) - n + 1)}
+        matches = [gram for gram in grams if gram in prior_grams]
+        if matches:
+            earliest = min(matches, key=grams.get)
+            hits.append((row.get("tag_start"), " ".join(earliest)))
+        if len(hits) >= max_reports:
+            break
+    return hits
+
+
+ANNOUNCEMENT_CANNED_PHRASES = (
+    "let's dive in",
+    "dive in!",
+    "buckle up",
+    "without further ado",
+    "to the next level",
+    "seamlessly",
+)
+
+ANNOUNCEMENT_FILLER_PATTERN = re.compile(
+    r"\bwe(?:'re| are)\s+(?:excited|thrilled|delighted|proud|pleased)\b"
+    r"|\b(?:excited|thrilled|delighted|proud|pleased)\s+to\s+(?:introduce|announce|share|welcome)\b",
+    re.IGNORECASE,
+)
+
+
+def announcement_validation_errors(markdown, prior_rows):
+    text = (markdown or "").strip()
+    if not text:
+        return ["Discord announcement is empty."]
+    errors = []
+    nonblank = [line for line in text.splitlines() if line.strip()]
+    if not nonblank[0].strip().startswith("## Lemonade "):
+        errors.append("Discord announcement must start with a `## Lemonade <release>` title line.")
+    if text.count("**") // 2 > 6:
+        errors.append(
+            "Discord announcement uses bold too often; bold at most one or two introduced product names in the whole post."
+        )
+    if re.search(r"\*\*\s*@", text):
+        errors.append("Do not bold @handles; credit contributors inline as plain `@handle`.")
+    lowered = text.lower()
+    for phrase in ANNOUNCEMENT_CANNED_PHRASES:
+        if phrase in lowered:
+            errors.append(f"Drop the canned phrase {phrase!r}; the prior announcements never talk like that.")
+    filler = ANNOUNCEMENT_FILLER_PATTERN.search(text)
+    if filler:
+        errors.append(
+            f"Drop the marketing filler {filler.group(0)!r}; state what shipped directly, the way the prior announcements do."
+        )
+    pr_ref = re.search(r"\bPR\s*#\d+|\(#\d{2,}\)", text)
+    if pr_ref:
+        errors.append(
+            f"Remove the PR reference {pr_ref.group(0)!r}; announcements never include PR numbers — link docs or describe the user action instead."
+        )
+    if len(nonblank) > 45:
+        errors.append(
+            f"Discord announcement is too long ({len(nonblank)} non-blank lines); match the prior announcements "
+            "(roughly 15-30 non-blank lines) by tightening sections and merging minor items."
+        )
+    for tag, phrase in repeated_prior_phrases(text, prior_rows):
+        errors.append(
+            f'Reused wording from the {tag} announcement: "{phrase} ..." — rewrite so no phrase of 8+ consecutive '
+            "words repeats a prior announcement."
+        )
+    improvements_bullets = 0
+    in_improvements = False
+    for line in text.splitlines():
+        heading_match = re.match(r"^#{2,3}\s+(.+?)\s*$", line)
+        if heading_match:
+            in_improvements = normalize_heading_title(heading_match.group(1)) == "additional improvements"
+            continue
+        if in_improvements and line.strip().startswith(("- ", "* ")):
+            improvements_bullets += 1
+    if improvements_bullets > 7:
+        errors.append(
+            f"Additional Improvements has {improvements_bullets} bullets; keep it to at most 7 by merging "
+            "related work into shared bullets and omitting changes with no audience."
+        )
+    return errors
 
 
 def normalize_release_priority(value):
@@ -476,9 +643,11 @@ def pending_release_announcement_artifact_paths(workspace, repo, tag_start, head
     pending_dir = release_highlights_file.parent / ".pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     stamp = str(int(time.time() * 1000))
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag_start)
     return (
         pending_dir / f"{release_highlights_file.stem}.{stamp}.pending.md",
         pending_dir / f"{markdown_file.stem}.{stamp}.pending.md",
+        pending_dir / f"{safe_tag}.{stamp}.story-plan.json",
     )
 
 
@@ -705,6 +874,27 @@ def compact_reviews(workspace, reviews):
     return json.dumps(rows, indent=2)
 
 
+def announcement_review_context(workspace, reviews):
+    rows = []
+    for review in reviews:
+        data = read_json(review["json_path"]) if review.get("json_path") else {}
+        credits = []
+        for item in data.get("shout_outs", []):
+            handle = item.get("handle", "") if isinstance(item, dict) else str(item)
+            if handle:
+                credits.append(handle)
+        docs = truncate_pi_detail((data.get("evidence") or {}).get("documentation", ""), 200)
+        rows.append(
+            {
+                "author": data.get("author", review.get("author", "")),
+                "summary": data.get("summary", review.get("summary", "")),
+                "credits": credits,
+                "docs": docs,
+            }
+        )
+    return json.dumps(rows, indent=2)
+
+
 def latest_release_review(workspace, repo, branch, tag_start):
     with connect_db(workspace) as conn:
         row = conn.execute(
@@ -762,8 +952,7 @@ def prior_announcements(workspace, repo, branch, release_tag, limit=3):
     return rows[:limit]
 
 
-def announcement_style_context(workspace, repo, branch, release_tag):
-    rows = prior_announcements(workspace, repo, branch, release_tag)
+def announcement_style_context(rows):
     if not rows:
         return ""
     sections = []
@@ -1034,6 +1223,71 @@ def cmd_release_review(args):
         )
 
 
+def announcement_feedback_file(workspace, repo, release_tag):
+    base = artifact_dir(workspace, repo, "releases")
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", release_tag)
+    pending_dir = base / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    return pending_dir / f"{safe_tag}.announce-feedback.json"
+
+
+def build_announcement_feedback(error_list, release_highlights_raw, raw, plan_raw=""):
+    previous_sections = []
+    if (plan_raw or "").strip():
+        previous_sections.append("Previous story plan attempt:\n```json\n" + plan_raw.strip() + "\n```")
+    if (release_highlights_raw or "").strip():
+        previous_sections.append(
+            "Previous website release highlights attempt:\n```markdown\n" + release_highlights_raw.strip() + "\n```"
+        )
+    if (raw or "").strip():
+        previous_sections.append("Previous Discord announcement attempt:\n```markdown\n" + raw.strip() + "\n```")
+    return (
+        "A previous attempt at this task failed validation. Fix every problem listed below while keeping the "
+        "content accurate, then write corrected versions of ALL the files to the paths given above.\n"
+        f"Validation problems:\n{error_list}\n\n" + "\n\n".join(previous_sections) + "\n\n"
+    )
+
+
+def load_announcement_feedback(workspace, repo, release_tag):
+    path = announcement_feedback_file(workspace, repo, release_tag)
+    if not path.exists():
+        return ""
+    try:
+        data = read_json(path)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return build_announcement_feedback(
+        data.get("errors", ""),
+        data.get("release_highlights", ""),
+        data.get("announcement", ""),
+        data.get("plan", ""),
+    )
+
+
+def save_announcement_feedback(workspace, repo, release_tag, error_list, release_highlights_raw, raw, plan_raw=""):
+    path = announcement_feedback_file(workspace, repo, release_tag)
+    path.write_text(
+        json.dumps(
+            {
+                "errors": error_list,
+                "release_highlights": release_highlights_raw,
+                "announcement": raw,
+                "plan": plan_raw,
+                "saved_at": now_iso(),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def clear_announcement_feedback(workspace, repo, release_tag):
+    path = announcement_feedback_file(workspace, repo, release_tag)
+    if path.exists():
+        path.unlink()
+
+
 def cmd_announce(args):
     workspace = find_workspace()
     config = load_config(workspace)
@@ -1045,26 +1299,78 @@ def cmd_announce(args):
     range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
     head = release_head_sha(repo, workspace, branch, args.release)
     release_highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, args.release, head)
-    pending_release_highlights_file, pending_markdown_file = pending_release_announcement_artifact_paths(
-        workspace, repo, args.release, head
-    )
     release_highlights_context = release_highlights_reference_context(workspace, repo, args.release)
-    style_context = announcement_style_context(workspace, repo, branch, args.release)
-    prompt = (
-        f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
-        f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
-        f"Write the website release highlights Markdown to: {pending_release_highlights_file}\n"
-        f"Write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
-        f"{release_highlights_context}"
-        f"{style_context}"
-        "Stored commit reviews:\n"
-        f"{compact_reviews(workspace, reviews)}"
+    prior_rows = prior_announcements(workspace, repo, branch, args.release)
+    style_context = announcement_style_context(prior_rows)
+    review_context = (
+        "Commit summaries for this release (the announcement's only source material):\n"
+        + announcement_review_context(workspace, reviews)
+        + "\n\nFinal editorial reminders: tell the release as 3-5 stories, one section each; if two candidate "
+        "sections would answer the same reader question, they are one story. Describe outcomes, never the work "
+        "behind them — credit people as a clause in the feature sentence, and let enabling fixes be subsumed by "
+        "the outcome they enabled.\n"
     )
-    run_pi("release-announcement", prompt, workspace)
-    require_files(pending_release_highlights_file, pending_markdown_file)
-    release_highlights_raw = Path(pending_release_highlights_file).read_text(encoding="utf-8")
-    validate_release_highlights_artifact(release_highlights_raw)
-    raw = Path(pending_markdown_file).read_text(encoding="utf-8")
+    feedback = load_announcement_feedback(workspace, repo, args.release)
+    if feedback:
+        print("Resuming with validation feedback from a previous interrupted announce run.", flush=True)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        pending_release_highlights_file, pending_markdown_file, pending_plan_file = (
+            pending_release_announcement_artifact_paths(workspace, repo, args.release, head)
+        )
+        prompt = (
+            f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
+            f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
+            f"First write the story plan JSON to: {pending_plan_file}\n"
+            f"Then write the website release highlights Markdown to: {pending_release_highlights_file}\n"
+            f"Then write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
+            f"{release_highlights_context}"
+            f"{style_context}"
+            f"{feedback}"
+            f"{review_context}"
+        )
+        try:
+            run_pi("release-announcement", prompt, workspace)
+        except SystemExit as exc:
+            if exc.code in (130, None):
+                raise
+            if attempt == max_attempts:
+                raise
+            print(f"Pi run failed (exit {exc.code}); retrying with the same instructions.", flush=True)
+            continue
+        release_highlights_raw = ""
+        raw = ""
+        plan_raw = ""
+        plan = None
+        errors = []
+        if Path(pending_plan_file).exists():
+            plan_raw = Path(pending_plan_file).read_text(encoding="utf-8")
+            plan_errors, plan = story_plan_validation_errors(plan_raw)
+            errors.extend(plan_errors)
+        else:
+            errors.append(f"Expected story plan file was not created: {pending_plan_file}")
+        if Path(pending_release_highlights_file).exists():
+            release_highlights_raw = Path(pending_release_highlights_file).read_text(encoding="utf-8")
+            errors.extend(release_highlights_validation_errors(release_highlights_raw))
+        else:
+            errors.append(f"Expected release highlights file was not created: {pending_release_highlights_file}")
+        if Path(pending_markdown_file).exists():
+            raw = Path(pending_markdown_file).read_text(encoding="utf-8")
+            errors.extend(announcement_validation_errors(raw, prior_rows))
+            errors.extend(announcement_plan_consistency_errors(raw, plan))
+        else:
+            errors.append(f"Expected announcement file was not created: {pending_markdown_file}")
+        if not errors:
+            break
+        error_list = "\n".join(f"- {error}" for error in errors)
+        if attempt == max_attempts:
+            raise SystemExit(
+                f"Announcement failed validation after {max_attempts} attempts:\n{error_list}"
+            )
+        print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
+        save_announcement_feedback(workspace, repo, args.release, error_list, release_highlights_raw, raw, plan_raw)
+        feedback = build_announcement_feedback(error_list, release_highlights_raw, raw, plan_raw)
+    clear_announcement_feedback(workspace, repo, args.release)
     write_text(release_highlights_file, release_highlights_raw)
     write_text(markdown_file, raw)
     with connect_db(workspace) as conn:
