@@ -489,8 +489,22 @@ def public_app_data(workspace):
     return data
 
 
+def script_safe_json(value):
+    # Inside JSON text, `<` only occurs within strings, so escaping it cannot change the
+    # parsed value — but it prevents review/PR-controlled content (e.g. a literal
+    # `</script>`) from terminating the embedding <script> element. U+2028/U+2029 are
+    # valid in JSON strings but historically illegal in JS source.
+    payload = json.dumps(value, ensure_ascii=False)
+    return (
+        payload.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def static_index_html(workspace):
-    payload = json.dumps(public_app_data(workspace), ensure_ascii=False)
+    payload = script_safe_json(public_app_data(workspace))
     bootstrap = (
         "<script>"
         "window.REPO_MANAGER_STATIC = true;"
