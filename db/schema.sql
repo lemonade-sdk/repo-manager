@@ -73,3 +73,24 @@ CREATE TABLE IF NOT EXISTS review_read_states (
   is_read INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS release_review_issues (
+  review_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  tag_start TEXT NOT NULL,
+  issue_number INTEGER NOT NULL,
+  issue_url TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_announcement_issues (
+  issue_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  tag_start TEXT NOT NULL,
+  issue_kind TEXT NOT NULL,
+  issue_number INTEGER NOT NULL,
+  issue_url TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL
+);

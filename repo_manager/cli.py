@@ -114,6 +114,46 @@ def ensure_db_schema(conn):
                         WHERE release_highlights_path=''
                         """
                     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS review_todos (
+          todo_id TEXT PRIMARY KEY,
+          review_kind TEXT NOT NULL,
+          review_key TEXT NOT NULL,
+          todo_index INTEGER NOT NULL,
+          todo_text TEXT NOT NULL,
+          completed INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS release_review_issues (
+          review_key TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          tag_start TEXT NOT NULL,
+          issue_number INTEGER NOT NULL,
+          issue_url TEXT NOT NULL DEFAULT '',
+          synced_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS release_announcement_issues (
+          issue_key TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          tag_start TEXT NOT NULL,
+          issue_kind TEXT NOT NULL,
+          issue_number INTEGER NOT NULL,
+          issue_url TEXT NOT NULL DEFAULT '',
+          synced_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def init_db(workspace):
@@ -495,6 +535,17 @@ def normalize_breaking_changes(value):
     return items
 
 
+def release_review_breaking_changes(data):
+    breaking = normalize_breaking_changes(data.get("breaking_changes"))
+    if breaking:
+        return breaking
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    evidence_breaking = evidence.get("breaking_changes")
+    if isinstance(evidence_breaking, list):
+        return normalize_breaking_changes(evidence_breaking)
+    return []
+
+
 def normalize_release_review_data(data):
     """Coerce Pi's output into the single-ledger shape and derive the verdict from it.
 
@@ -511,7 +562,7 @@ def normalize_release_review_data(data):
             normalized.append({"priority": "P1", "text": str(item).strip()})
     data["prioritized_todos"] = normalized
 
-    data["breaking_changes"] = normalize_breaking_changes(data.get("breaking_changes"))
+    data["breaking_changes"] = release_review_breaking_changes(data)
 
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
 
@@ -753,6 +804,311 @@ def infer_range_start(repo, workspace, release_tag):
     raise SystemExit(f"Could not infer previous v* tag for {release_tag}. Pass --since explicitly.")
 
 
+def cmake_version_from_text(text):
+    patterns = (
+        r"\bproject\s*\([^)]*\bVERSION\s+([0-9]+(?:\.[0-9]+){1,3})",
+        r"\bCMAKE_PROJECT_VERSION\s+([0-9]+(?:\.[0-9]+){1,3})",
+        r"\bPROJECT_VERSION\s+([0-9]+(?:\.[0-9]+){1,3})",
+        r"\bVERSION\s+([0-9]+(?:\.[0-9]+){1,3})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def cmake_release_tag(repo, workspace, branch):
+    checkout = clone_or_fetch(repo, workspace)
+    run(["git", "-C", str(checkout), "fetch", "origin", branch, "--prune"], check=False)
+    result = run(["git", "-C", str(checkout), "show", f"origin/{branch}:CMakeLists.txt"], check=False)
+    if result.returncode != 0:
+        return ""
+    version = cmake_version_from_text(result.stdout)
+    return f"v{version}" if version else ""
+
+
+def remote_branch_exists(repo, workspace, branch):
+    checkout = clone_or_fetch(repo, workspace)
+    run(["git", "-C", str(checkout), "fetch", "origin", branch, "--prune"], check=False)
+    result = run(["git", "-C", str(checkout), "rev-parse", "--verify", f"origin/{branch}"], check=False)
+    return result.returncode == 0
+
+
+def migrate_release_issue_title(repo, issue_number, old_title, new_title, release_tag):
+    issue = fetch_github_issue(repo, issue_number)
+    if not issue:
+        return
+    body = (issue.get("body") or "").replace("vNext", release_tag)
+    title = new_title if issue.get("title") == old_title else issue.get("title", "").replace("vNext", release_tag)
+    if title != issue.get("title") or body != (issue.get("body") or ""):
+        update_release_issue(repo, issue_number, title, body)
+
+
+def migrate_vnext_release_state(workspace, repo, old_branch, new_branch, release_tag):
+    """Move local vNext state to the concrete release bucket and branch.
+
+    This runs before release commands read from the DB, so reviews collected while the release
+    was still tracked as vNext/main remain visible after CMake names the release and the
+    release branch appears.
+    """
+    if release_tag == "vNext":
+        return
+    new_review_key = release_review_key(repo, new_branch, release_tag)
+    completed_todo_texts = set()
+    with connect_db(workspace) as conn:
+        old_branches = {old_branch}
+        for table in ("commit_reviews", "release_reviews", "release_announcements"):
+            for row in conn.execute(
+                f"SELECT DISTINCT branch FROM {table} WHERE repo=? AND tag_start='vNext'",
+                (repo,),
+            ).fetchall():
+                if row["branch"]:
+                    old_branches.add(row["branch"])
+        for row in conn.execute(
+            "SELECT DISTINCT branch FROM release_review_issues WHERE repo=? AND tag_start='vNext'",
+            (repo,),
+        ).fetchall():
+            if row["branch"]:
+                old_branches.add(row["branch"])
+        for row in conn.execute(
+            "SELECT DISTINCT branch FROM release_announcement_issues WHERE repo=? AND tag_start='vNext'",
+            (repo,),
+        ).fetchall():
+            if row["branch"]:
+                old_branches.add(row["branch"])
+        old_review_keys = [release_review_key(repo, branch, "vNext") for branch in old_branches]
+        old_review_keys.extend(
+            release_review_key(repo, branch, release_tag)
+            for branch in old_branches
+            if branch != new_branch
+        )
+        for row in conn.execute(
+            """
+            SELECT todo_text
+            FROM review_todos
+            WHERE review_kind='release' AND completed=1
+              AND review_key IN ({})
+            """.format(",".join("?" for _ in old_review_keys)),
+            old_review_keys,
+        ).fetchall():
+            completed_todo_texts.add(normalized_todo_match_text(row["todo_text"]))
+        for table in ("commit_reviews", "release_reviews", "release_announcements"):
+            conn.execute(
+                f"""
+                UPDATE OR REPLACE {table}
+                SET tag_start=?, branch=?
+                WHERE repo=? AND tag_start='vNext'
+                """,
+                (release_tag, new_branch, repo),
+            )
+            conn.execute(
+                f"""
+                UPDATE OR REPLACE {table}
+                SET branch=?
+                WHERE repo=? AND tag_start=? AND branch<>?
+                """,
+                (new_branch, repo, release_tag, new_branch),
+            )
+        conn.execute(
+            """
+            UPDATE commit_reviews
+            SET raw_output=replace(raw_output, 'vNext', ?)
+            WHERE repo=? AND tag_start=? AND branch=?
+            """,
+            (release_tag, repo, release_tag, new_branch),
+        )
+        conn.execute(
+            """
+            UPDATE release_reviews
+            SET raw_output=replace(raw_output, 'vNext', ?)
+            WHERE repo=? AND tag_start=? AND branch=?
+            """,
+            (release_tag, repo, release_tag, new_branch),
+        )
+        conn.execute(
+            """
+            UPDATE release_announcements
+            SET raw_output=replace(raw_output, 'vNext', ?),
+                release_highlights_output=replace(release_highlights_output, 'vNext', ?)
+            WHERE repo=? AND tag_start=? AND branch=?
+            """,
+            (release_tag, release_tag, repo, release_tag, new_branch),
+        )
+        delete_keys = [*old_review_keys, new_review_key]
+        conn.execute(
+            "DELETE FROM review_todos WHERE review_kind='release' AND review_key IN ({})".format(
+                ",".join("?" for _ in delete_keys)
+            ),
+            delete_keys,
+        )
+        review_row = conn.execute(
+            """
+            SELECT raw_output
+            FROM release_reviews
+            WHERE repo=? AND branch=? AND tag_start=? AND rubric_version=?
+            """,
+            (repo, new_branch, release_tag, RELEASE_RUBRIC_VERSION),
+        ).fetchone()
+        if review_row:
+            data = extract_json_object(review_row["raw_output"] or "")
+            if data is not None:
+                data = normalize_release_review_data(data)
+                normalized = normalize_review_todos(conn, "release", new_review_key, data.get("prioritized_todos", []))
+                for todo in normalized:
+                    if normalized_todo_match_text(todo["text"]) in completed_todo_texts:
+                        conn.execute(
+                            "UPDATE review_todos SET completed=1, updated_at=? WHERE todo_id=?",
+                            (now_iso(), todo["id"]),
+                        )
+        conn.execute(
+            """
+            UPDATE OR REPLACE release_review_issues
+            SET review_key=?, branch=?, tag_start=?
+            WHERE repo=? AND (tag_start='vNext' OR tag_start=?)
+            """,
+            (new_review_key, new_branch, release_tag, repo, release_tag),
+        )
+        for issue_kind in ANNOUNCEMENT_ISSUE_KINDS:
+            new_key = announcement_issue_key(repo, new_branch, release_tag, issue_kind)
+            conn.execute(
+                """
+                UPDATE OR REPLACE release_announcement_issues
+                SET issue_key=?, branch=?, tag_start=?
+                WHERE repo=? AND (tag_start='vNext' OR tag_start=?) AND issue_kind=?
+                """,
+                (new_key, new_branch, release_tag, repo, release_tag, issue_kind),
+            )
+
+    mappings = []
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT issue_number FROM release_review_issues WHERE review_key=?",
+            (release_review_key(repo, new_branch, release_tag),),
+        ).fetchone()
+        if row:
+            mappings.append((row["issue_number"], release_issue_title("vNext"), release_issue_title(release_tag)))
+        for issue_kind in ANNOUNCEMENT_ISSUE_KINDS:
+            row = conn.execute(
+                "SELECT issue_number FROM release_announcement_issues WHERE issue_key=?",
+                (announcement_issue_key(repo, new_branch, release_tag, issue_kind),),
+            ).fetchone()
+            if row:
+                mappings.append(
+                    (
+                        row["issue_number"],
+                        announcement_issue_title("vNext", issue_kind),
+                        announcement_issue_title(release_tag, issue_kind),
+                    )
+                )
+    mapped_numbers = {issue_number for issue_number, _, _ in mappings}
+    fallback_titles = [
+        (release_issue_title("vNext"), release_issue_title(release_tag)),
+        *[
+            (announcement_issue_title("vNext", issue_kind), announcement_issue_title(release_tag, issue_kind))
+            for issue_kind in ANNOUNCEMENT_ISSUE_KINDS
+        ],
+    ]
+    for old_title, new_title in fallback_titles:
+        try:
+            issue = find_github_issue_by_title(repo, old_title)
+        except SystemExit:
+            issue = None
+        if issue and issue["number"] not in mapped_numbers:
+            mappings.append((issue["number"], old_title, new_title))
+            mapped_numbers.add(issue["number"])
+    for issue_number, old_title, new_title in mappings:
+        try:
+            migrate_release_issue_title(repo, issue_number, old_title, new_title, release_tag)
+        except SystemExit:
+            pass
+
+
+def resolve_release_state(workspace, repo, configured_branch, requested_release, explicit_branch=False):
+    info = release_lifecycle_info(workspace, repo, configured_branch, requested_release, explicit_branch)
+    release_tag = info["selected_release"]
+    branch = info["selected_branch"]
+    if requested_release == "vNext" and release_tag != "vNext":
+        migrate_vnext_release_state(workspace, repo, configured_branch, branch, release_tag)
+        if release_tag != requested_release:
+            print(f"Resolved vNext to {release_tag} on {branch}.", flush=True)
+    elif branch != configured_branch:
+        migrate_vnext_release_state(workspace, repo, configured_branch, branch, release_tag)
+    return release_tag, branch
+
+
+def release_lifecycle_info(workspace, repo, configured_branch, requested_release="vNext", explicit_branch=False):
+    cmake_tag = cmake_release_tag(repo, workspace, configured_branch)
+    tags = v_tags(repo, workspace)
+    latest_tag = tags[-1] if tags else ""
+    inferred_release = requested_release
+    if requested_release == "vNext" and cmake_tag and (not latest_tag or version_parts(cmake_tag) > version_parts(latest_tag)):
+        inferred_release = cmake_tag
+    release_branch = f"release-{inferred_release}" if inferred_release and inferred_release != "vNext" else ""
+    release_branch_exists = bool(release_branch) and remote_branch_exists(repo, workspace, release_branch)
+    selected_branch = configured_branch
+    if release_branch_exists and not explicit_branch:
+        selected_branch = release_branch
+    return {
+        "repo": repo,
+        "requested_release": requested_release,
+        "configured_branch": configured_branch,
+        "cmake_release": cmake_tag,
+        "latest_tag": latest_tag,
+        "selected_release": inferred_release,
+        "release_branch": release_branch,
+        "release_branch_exists": release_branch_exists,
+        "selected_branch": selected_branch,
+        "explicit_branch": explicit_branch,
+    }
+
+
+def lifecycle_has_release_branch(info):
+    return info["selected_release"] != "vNext" and info["release_branch_exists"]
+
+
+def release_lifecycle_counts(workspace, repo, branch, release_tag):
+    with connect_db(workspace) as conn:
+        counts = {}
+        counts["commit_reviews"] = conn.execute(
+            "SELECT COUNT(*) FROM commit_reviews WHERE repo=? AND branch=? AND tag_start=?",
+            (repo, branch, release_tag),
+        ).fetchone()[0]
+        counts["release_reviews"] = conn.execute(
+            "SELECT COUNT(*) FROM release_reviews WHERE repo=? AND branch=? AND tag_start=?",
+            (repo, branch, release_tag),
+        ).fetchone()[0]
+        counts["announcements"] = conn.execute(
+            "SELECT COUNT(*) FROM release_announcements WHERE repo=? AND branch=? AND tag_start=?",
+            (repo, branch, release_tag),
+        ).fetchone()[0]
+        counts["open_release_todos"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM review_todos
+            WHERE review_kind='release' AND review_key=? AND completed=0
+            """,
+            (release_review_key(repo, branch, release_tag),),
+        ).fetchone()[0]
+        counts["completed_release_todos"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM review_todos
+            WHERE review_kind='release' AND review_key=? AND completed=1
+            """,
+            (release_review_key(repo, branch, release_tag),),
+        ).fetchone()[0]
+        counts["checklist_issues"] = conn.execute(
+            "SELECT COUNT(*) FROM release_review_issues WHERE repo=? AND branch=? AND tag_start=?",
+            (repo, branch, release_tag),
+        ).fetchone()[0]
+        counts["announcement_issues"] = conn.execute(
+            "SELECT COUNT(*) FROM release_announcement_issues WHERE repo=? AND branch=? AND tag_start=?",
+            (repo, branch, release_tag),
+        ).fetchone()[0]
+    return counts
+
+
 def prior_release_tags(repo, workspace, release_tag, limit=3):
     tags = v_tags(repo, workspace)
     if release_tag == "vNext":
@@ -931,6 +1287,541 @@ def latest_release_review(workspace, repo, branch, tag_start):
     return dict(row) if row else None
 
 
+def release_review_key(repo, branch, release_tag):
+    return f"{repo}|{branch}|{release_tag}|{RELEASE_RUBRIC_VERSION}"
+
+
+def normalize_review_todos(conn, review_kind, review_key, todos):
+    existing = {
+        row["todo_id"]: row
+        for row in conn.execute(
+            "SELECT * FROM review_todos WHERE review_kind=? AND review_key=?",
+            (review_kind, review_key),
+        ).fetchall()
+    }
+    normalized = []
+    for index, item in enumerate(todos or []):
+        item_id = todo_id(review_kind, review_key, index, item)
+        text = todo_display_text(item)
+        priority = item.get("priority", "") if isinstance(item, dict) else ""
+        row = existing.get(item_id)
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO review_todos
+                (todo_id, review_kind, review_key, todo_index, todo_text, completed, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?)
+                """,
+                (item_id, review_kind, review_key, index, text, now_iso()),
+            )
+            completed = False
+        else:
+            completed = bool(row["completed"])
+        normalized.append({"id": item_id, "text": text, "priority": priority, "completed": completed})
+    return normalized
+
+
+def stored_release_todos(workspace, repo, branch, release_tag):
+    key = release_review_key(repo, branch, release_tag)
+    with connect_db(workspace) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM review_todos
+                WHERE review_kind='release' AND review_key=?
+                ORDER BY todo_index, updated_at
+                """,
+                (key,),
+            ).fetchall()
+        ]
+
+
+def sync_release_review_todos(workspace, repo, branch, release_tag, todos):
+    key = release_review_key(repo, branch, release_tag)
+    with connect_db(workspace) as conn:
+        return normalize_review_todos(conn, "release", key, todos)
+
+
+CHECKBOX_PATTERN = re.compile(
+    r"^\s*[-*]\s+\[(?P<mark>[ xX])\]\s+(?P<text>.*?)(?:\s*<!--\s*repo-manager:todo:(?P<id>[a-f0-9]{64})\s*-->)?\s*$"
+)
+RELEASE_ISSUE_MARKER = "<!-- repo-manager:release-review-checklist"
+
+
+def normalized_todo_match_text(text):
+    text = re.sub(r"<!--.*?-->", "", text or "")
+    text = re.sub(r"^\s*P[01]\s*:\s*", "", text, flags=re.IGNORECASE)
+    return " ".join(text.split()).strip().casefold()
+
+
+def parse_issue_checkboxes(body):
+    items = []
+    for line in (body or "").splitlines():
+        match = CHECKBOX_PATTERN.match(line)
+        if not match:
+            continue
+        items.append(
+            {
+                "id": match.group("id") or "",
+                "text": re.sub(r"\s*<!--.*?-->\s*$", "", match.group("text")).strip(),
+                "completed": match.group("mark").lower() == "x",
+            }
+        )
+    return items
+
+
+def gh_json(args, check=True):
+    if not shutil.which("gh"):
+        if check:
+            raise SystemExit("`gh` was not found on PATH; install and authenticate GitHub CLI to sync issues.")
+        return None
+    result = run(["gh", "api", *args], check=check)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"GitHub API returned invalid JSON for {' '.join(args)}: {exc}")
+
+
+def release_issue_title(release_tag):
+    return f"Release {release_tag} final checklist"
+
+
+def find_github_issue_by_title(repo, title):
+    query = f'repo:{repo} is:issue in:title "{title}"'
+    data = gh_json(["--method", "GET", "search/issues", "-f", f"q={query}", "-f", "per_page=10"], check=False)
+    for item in (data or {}).get("items", []):
+        if item.get("title") == title:
+            return fetch_github_issue(repo, item["number"])
+    return None
+
+
+def find_release_issue(repo, release_tag):
+    return find_github_issue_by_title(repo, release_issue_title(release_tag))
+
+
+def fetch_github_issue(repo, issue_number):
+    return gh_json(["-H", "Accept: application/vnd.github+json", f"repos/{repo}/issues/{issue_number}"])
+
+
+def fetch_release_issue_comments(repo, issue_number):
+    data = gh_json(
+        [
+            "-H",
+            "Accept: application/vnd.github+json",
+            "--method",
+            "GET",
+            f"repos/{repo}/issues/{issue_number}/comments",
+            "-f",
+            "per_page=100",
+        ],
+        check=False,
+    )
+    return data if isinstance(data, list) else []
+
+
+def release_issue_mapping(workspace, review_key):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT * FROM release_review_issues WHERE review_key=?",
+            (review_key,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_release_issue_mapping(workspace, repo, branch, release_tag, issue):
+    key = release_review_key(repo, branch, release_tag)
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            INSERT INTO release_review_issues
+            (review_key, repo, branch, tag_start, issue_number, issue_url, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(review_key) DO UPDATE SET
+              issue_number=excluded.issue_number,
+              issue_url=excluded.issue_url,
+              synced_at=excluded.synced_at
+            """,
+            (
+                key,
+                repo,
+                branch,
+                release_tag,
+                issue["number"],
+                issue.get("html_url", ""),
+                now_iso(),
+            ),
+        )
+
+
+def load_release_issue(workspace, repo, branch, release_tag):
+    key = release_review_key(repo, branch, release_tag)
+    mapping = release_issue_mapping(workspace, key)
+    issue = None
+    if mapping:
+        issue = fetch_github_issue(repo, mapping["issue_number"])
+    if not issue:
+        issue = find_release_issue(repo, release_tag)
+    if issue:
+        save_release_issue_mapping(workspace, repo, branch, release_tag, issue)
+    return issue
+
+
+def sync_issue_checks_to_db(workspace, repo, branch, release_tag, issue_body):
+    issue_items = parse_issue_checkboxes(issue_body)
+    if not issue_items:
+        return 0
+    key = release_review_key(repo, branch, release_tag)
+    stored = stored_release_todos(workspace, repo, branch, release_tag)
+    by_id = {row["todo_id"]: row for row in stored}
+    by_text = {normalized_todo_match_text(row["todo_text"]): row for row in stored}
+    completed = []
+    for item in issue_items:
+        if not item["completed"]:
+            continue
+        row = by_id.get(item["id"]) or by_text.get(normalized_todo_match_text(item["text"]))
+        if row:
+            completed.append(row["todo_id"])
+    if not completed:
+        return 0
+    with connect_db(workspace) as conn:
+        for item_id in sorted(set(completed)):
+            conn.execute(
+                "UPDATE review_todos SET completed=1, updated_at=? WHERE todo_id=?",
+                (now_iso(), item_id),
+            )
+    return len(set(completed))
+
+
+def release_issue_context(workspace, repo, branch, release_tag):
+    try:
+        issue = load_release_issue(workspace, repo, branch, release_tag)
+    except SystemExit:
+        return ""
+    if not issue:
+        return ""
+    sync_issue_checks_to_db(workspace, repo, branch, release_tag, issue.get("body") or "")
+    comments = fetch_release_issue_comments(repo, issue["number"])
+    checkboxes = parse_issue_checkboxes(issue.get("body") or "")
+    feedback = []
+    if checkboxes:
+        feedback.append(
+            "Existing GitHub checklist state:\n"
+            + "\n".join(
+                f"- [{'x' if item['completed'] else ' '}] {item['text']}"
+                for item in checkboxes
+            )
+        )
+    if comments:
+        rendered = []
+        for comment in comments[-20:]:
+            body = " ".join((comment.get("body") or "").split())
+            if body:
+                rendered.append(f"- @{comment.get('user', {}).get('login', 'unknown')}: {truncate_pi_detail(body, 500)}")
+        if rendered:
+            feedback.append("Issue comments from maintainers:\n" + "\n".join(rendered))
+    if not feedback:
+        return ""
+    return (
+        "GitHub release checklist feedback exists for this release. Treat checked checklist items as resolved, "
+        "and treat definitive maintainer comments as authoritative release-review input. For example, if a "
+        "comment says a concern is not a problem because of specific evidence, do not re-add it unless newer "
+        "digest evidence contradicts that; if a comment says the checklist is missing a real release blocker "
+        "or verification item, include that item when it passes the release-review inclusion test.\n"
+        + "\n\n".join(feedback)
+        + "\n\n"
+    )
+
+
+def existing_release_review_context(workspace, repo, branch, release_tag):
+    row = latest_release_review(workspace, repo, branch, release_tag)
+    if not row:
+        return ""
+    parsed = extract_json_object(row.get("raw_output") or "")
+    if parsed is None and row.get("json_path") and Path(row["json_path"]).exists():
+        parsed = extract_json_object(Path(row["json_path"]).read_text(encoding="utf-8"))
+    if parsed is None:
+        return ""
+    parsed = normalize_release_review_data(parsed)
+    todos = sync_release_review_todos(workspace, repo, branch, release_tag, parsed.get("prioritized_todos", []))
+    prior = {
+        "verdict": parsed.get("verdict", ""),
+        "verdict_reason": parsed.get("verdict_reason", ""),
+        "prioritized_todos": [
+            {
+                "priority": todo.get("priority", ""),
+                "text": todo.get("text", ""),
+                "completed": bool(todo.get("completed")),
+            }
+            for todo in todos
+        ],
+        "breaking_changes": parsed.get("breaking_changes", []),
+        "evidence": parsed.get("evidence", {}),
+    }
+    return (
+        "Existing release review for this release. Use it as the continuity baseline for this regeneration: "
+        "do not create a second wording of the same checklist item; preserve checked/completed items as resolved "
+        "unless new evidence clearly reopens them; keep unresolved items stable when they are still valid; and "
+        "only add genuinely new P0/P1 work that passes the inclusion test.\n"
+        + json.dumps(prior, indent=2)
+        + "\n\n"
+    )
+
+
+def render_release_issue_body(repo, branch, release_tag, review_row, todos):
+    key = release_review_key(repo, branch, release_tag)
+    marker_payload = json.dumps(
+        {"repo": repo, "branch": branch, "release": release_tag, "review_key": key},
+        sort_keys=True,
+    )
+    lines = [
+        f"{RELEASE_ISSUE_MARKER} {marker_payload} -->",
+        "",
+        f"Synced from repo-manager release review for `{repo}` `{branch}` `{release_tag}`.",
+        "",
+        f"Verdict: `{review_row.get('verdict') or ''}`",
+        f"Reviewed: `{review_row.get('reviewed_at') or ''}`",
+        f"Head: `{review_row.get('head_sha') or ''}`",
+        "",
+        "## Checklist",
+        "",
+    ]
+    if todos:
+        for todo in todos:
+            mark = "x" if todo.get("completed") else " "
+            text = todo.get("text") or todo.get("todo_text") or ""
+            priority = todo.get("priority") or ""
+            prefix = f"{priority}: " if priority else ""
+            lines.append(f"- [{mark}] {prefix}{text} <!-- repo-manager:todo:{todo['id']} -->")
+    else:
+        lines.append("No open release-review to-dos.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def merge_issue_and_review_todos(issue_body, review_todos):
+    completed_ids = set()
+    completed_texts = set()
+    for item in parse_issue_checkboxes(issue_body):
+        if not item["completed"]:
+            continue
+        if item["id"]:
+            completed_ids.add(item["id"])
+        text = normalized_todo_match_text(item["text"])
+        if text:
+            completed_texts.add(text)
+    merged = []
+    for todo in review_todos:
+        completed = (
+            bool(todo.get("completed"))
+            or todo.get("id") in completed_ids
+            or normalized_todo_match_text(todo.get("text", "")) in completed_texts
+        )
+        merged.append({**todo, "completed": completed})
+    return merged
+
+
+def create_release_issue(repo, title, body):
+    return gh_json(
+        ["-H", "Accept: application/vnd.github+json", f"repos/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
+    )
+
+
+def update_release_issue(repo, issue_number, title, body):
+    return gh_json(
+        [
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-X",
+            "PATCH",
+            f"repos/{repo}/issues/{issue_number}",
+            "-f",
+            f"title={title}",
+            "-f",
+            f"body={body}",
+        ]
+    )
+
+
+ANNOUNCEMENT_ISSUE_KINDS = {
+    "release_notes": {
+        "title_suffix": "release notes",
+        "label": "release notes",
+        "column": "release_highlights_output",
+        "path_column": "release_highlights_path",
+    },
+    "announcement": {
+        "title_suffix": "announcement",
+        "label": "announcement",
+        "column": "raw_output",
+        "path_column": "markdown_path",
+    },
+}
+
+
+def announcement_issue_key(repo, branch, release_tag, issue_kind):
+    return f"{repo}|{branch}|{release_tag}|{issue_kind}|{ANNOUNCEMENT_VERSION}"
+
+
+def announcement_issue_title(release_tag, issue_kind):
+    return f"{release_tag} {ANNOUNCEMENT_ISSUE_KINDS[issue_kind]['title_suffix']}"
+
+
+def announcement_issue_mapping(workspace, issue_key):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT * FROM release_announcement_issues WHERE issue_key=?",
+            (issue_key,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_announcement_issue_mapping(workspace, repo, branch, release_tag, issue_kind, issue):
+    key = announcement_issue_key(repo, branch, release_tag, issue_kind)
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            INSERT INTO release_announcement_issues
+            (issue_key, repo, branch, tag_start, issue_kind, issue_number, issue_url, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(issue_key) DO UPDATE SET
+              issue_number=excluded.issue_number,
+              issue_url=excluded.issue_url,
+              synced_at=excluded.synced_at
+            """,
+            (
+                key,
+                repo,
+                branch,
+                release_tag,
+                issue_kind,
+                issue["number"],
+                issue.get("html_url", ""),
+                now_iso(),
+            ),
+        )
+
+
+def load_announcement_issue(workspace, repo, branch, release_tag, issue_kind):
+    key = announcement_issue_key(repo, branch, release_tag, issue_kind)
+    mapping = announcement_issue_mapping(workspace, key)
+    issue = None
+    if mapping:
+        issue = fetch_github_issue(repo, mapping["issue_number"])
+    if not issue:
+        issue = find_github_issue_by_title(repo, announcement_issue_title(release_tag, issue_kind))
+    if issue:
+        save_announcement_issue_mapping(workspace, repo, branch, release_tag, issue_kind, issue)
+    return issue
+
+
+def render_issue_comments(repo, issue):
+    comments = fetch_release_issue_comments(repo, issue["number"])
+    rendered = []
+    for comment in comments[-20:]:
+        body = " ".join((comment.get("body") or "").split())
+        if body:
+            rendered.append(f"- @{comment.get('user', {}).get('login', 'unknown')}: {truncate_pi_detail(body, 500)}")
+    return rendered
+
+
+def announcement_issues_context(workspace, repo, branch, release_tag):
+    sections = []
+    try:
+        for issue_kind, meta in ANNOUNCEMENT_ISSUE_KINDS.items():
+            issue = load_announcement_issue(workspace, repo, branch, release_tag, issue_kind)
+            if not issue:
+                continue
+            comments = render_issue_comments(repo, issue)
+            if comments:
+                sections.append(
+                    f"Comments on the GitHub {meta['label']} issue `{issue.get('title', '')}`:\n"
+                    + "\n".join(comments)
+                )
+    except SystemExit:
+        return ""
+    if not sections:
+        return ""
+    return (
+        "GitHub announcement artifact feedback exists for this release. Treat maintainer comments on these "
+        "issues as editorial and factual input when regenerating the corresponding artifact, while still obeying "
+        "the release-announcement skill contract and the commit-review evidence. If comments request missing "
+        "coverage, clearer wording, or removal of an inaccurate claim, incorporate that feedback when supported "
+        "by the source material.\n"
+        + "\n\n".join(sections)
+        + "\n\n"
+    )
+
+
+def announcement_artifact_content(row, issue_kind):
+    meta = ANNOUNCEMENT_ISSUE_KINDS[issue_kind]
+    content = row.get(meta["column"]) or ""
+    path = row.get(meta["path_column"]) or ""
+    if not content and path and Path(path).exists():
+        content = Path(path).read_text(encoding="utf-8")
+    return content.rstrip() + "\n" if content.strip() else ""
+
+
+def existing_announcement_context(workspace, repo, branch, release_tag):
+    row = latest_announcement(workspace, repo, branch, release_tag)
+    if not row:
+        return ""
+    sections = []
+    release_notes = announcement_artifact_content(row, "release_notes")
+    if release_notes:
+        sections.append("Existing release notes artifact:\n```markdown\n" + release_notes.rstrip() + "\n```")
+    announcement = announcement_artifact_content(row, "announcement")
+    if announcement:
+        sections.append("Existing announcement artifact:\n```markdown\n" + announcement.rstrip() + "\n```")
+    if not sections:
+        return ""
+    return (
+        "Existing announcement artifacts for this same release. Use these as the continuity baseline: preserve "
+        "accepted structure, story grouping, and wording when still accurate; change content only to incorporate "
+        "new commit-review evidence, required validation fixes, or maintainer feedback from the GitHub artifact "
+        "issues. Do not rewrite purely for novelty.\n"
+        + "\n\n".join(sections)
+        + "\n\n"
+    )
+
+
+def render_announcement_issue_body(repo, branch, release_tag, issue_kind, row, content):
+    key = announcement_issue_key(repo, branch, release_tag, issue_kind)
+    marker_payload = json.dumps(
+        {"repo": repo, "branch": branch, "release": release_tag, "issue_key": key, "kind": issue_kind},
+        sort_keys=True,
+    )
+    meta = ANNOUNCEMENT_ISSUE_KINDS[issue_kind]
+    return (
+        f"<!-- repo-manager:{issue_kind} {marker_payload} -->\n\n"
+        f"Synced from repo-manager {meta['label']} artifact for `{repo}` `{branch}` `{release_tag}`.\n\n"
+        f"Generated: `{row.get('generated_at') or ''}`\n"
+        f"Head: `{row.get('head_sha') or ''}`\n\n"
+        "## Content\n\n"
+        f"{content.rstrip()}\n"
+    )
+
+
+def sync_announcement_issue(workspace, repo, branch, release_tag, row, issue_kind):
+    content = announcement_artifact_content(row, issue_kind)
+    if not content:
+        return None
+    title = announcement_issue_title(release_tag, issue_kind)
+    issue = load_announcement_issue(workspace, repo, branch, release_tag, issue_kind)
+    body = render_announcement_issue_body(repo, branch, release_tag, issue_kind, row, content)
+    if issue:
+        issue = update_release_issue(repo, issue["number"], title, body)
+        action = "Updated"
+    else:
+        issue = create_release_issue(repo, title, body)
+        action = "Created"
+    save_announcement_issue_mapping(workspace, repo, branch, release_tag, issue_kind, issue)
+    print(f"{action} {ANNOUNCEMENT_ISSUE_KINDS[issue_kind]['label']} issue: {issue.get('html_url', '')}")
+    return issue
+
+
 def review_breaking_changes(review_row):
     """Canonical breaking-change list from a stored release-review row, or None if no review.
 
@@ -947,7 +1838,7 @@ def review_breaking_changes(review_row):
             parsed = extract_json_object(Path(path).read_text(encoding="utf-8"))
     if parsed is None:
         return None
-    return normalize_breaking_changes(parsed.get("breaking_changes"))
+    return release_review_breaking_changes(parsed)
 
 
 def latest_announcement(workspace, repo, branch, tag_start):
@@ -1173,6 +2064,9 @@ def cmd_review_commit(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
+    release_tag = args.release or args.tag_start or ""
+    if release_tag:
+        release_tag, branch = resolve_release_state(workspace, repo, branch, release_tag, args.branch is not None)
     json_file = commit_artifact_paths(workspace, repo, args.commit)
     prompt = (
         f"/skill:commit-review {repo} {args.commit}\n\n"
@@ -1181,7 +2075,6 @@ def cmd_review_commit(args):
     )
     run_pi("commit-review", prompt, workspace)
     require_files(json_file)
-    release_tag = args.release or args.tag_start or ""
     range_start = args.since or (infer_range_start(repo, workspace, release_tag) if release_tag else "")
     store_commit_review(workspace, repo, branch, release_tag, range_start, args.commit, json_file)
 
@@ -1191,9 +2084,10 @@ def cmd_sweep(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    range_start = args.since or infer_range_start(repo, workspace, args.release)
+    release_tag, branch = resolve_release_state(workspace, repo, branch, args.release, args.branch is not None)
+    range_start = args.since or infer_range_start(repo, workspace, release_tag)
     commits = list_commits(repo, workspace, branch, range_start)
-    print(f"Found {len(commits)} commits in {range_start}..origin/{branch} for {args.release}")
+    print(f"Found {len(commits)} commits in {range_start}..origin/{branch} for {release_tag}")
     for commit in commits:
         if review_exists(workspace, repo, commit) and not args.force:
             print(f"Skipping existing review for {commit}")
@@ -1202,13 +2096,13 @@ def cmd_sweep(args):
         json_file = commit_artifact_paths(workspace, repo, commit)
         prompt = (
         f"/skill:commit-review {repo} {commit}\n\n"
-            f"This commit is part of release {args.release}, covering range {range_start}..{branch}.\n"
+            f"This commit is part of release {release_tag}, covering range {range_start}..{branch}.\n"
             f"Write the machine-readable JSON result to: {json_file}\n"
             "The JSON must match the schema required by the skill."
         )
         run_pi("commit-review", prompt, workspace)
         require_files(json_file)
-        store_commit_review(workspace, repo, branch, args.release, range_start, commit, json_file)
+        store_commit_review(workspace, repo, branch, release_tag, range_start, commit, json_file)
 
 
 def cmd_release_review(args):
@@ -1216,13 +2110,16 @@ def cmd_release_review(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    reviews = load_reviews(workspace, repo, branch, args.release)
+    release_tag, branch = resolve_release_state(workspace, repo, branch, args.release, args.branch is not None)
+    reviews = load_reviews(workspace, repo, branch, release_tag)
     if not reviews:
         raise SystemExit("No commit reviews found for that repo/branch/release.")
-    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
+    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, release_tag)
     head = head_sha(repo, workspace, branch)
-    json_file, _ = release_artifact_paths(workspace, repo, args.release, head, "review")
+    json_file, _ = release_artifact_paths(workspace, repo, release_tag, head, "review")
     context_json = release_review_context(workspace, reviews)
+    github_context = release_issue_context(workspace, repo, branch, release_tag)
+    prior_review_context = existing_release_review_context(workspace, repo, branch, release_tag)
     digest_context = (
         "Per-commit digest of the stored commit reviews. open_todos reflect maintainer completion state in the "
         "repo-manager database; completed_todos counts are resolved evidence:\n"
@@ -1235,7 +2132,7 @@ def cmd_release_review(args):
         "for a human who has never seen this digest: name the feature or behavior, and let verdict_reason be "
         "just your one-or-two-sentence answer to 'can we ship?'.\n"
     )
-    feedback = load_release_review_feedback(workspace, repo, args.release)
+    feedback = load_release_review_feedback(workspace, repo, release_tag)
     if feedback:
         print("Resuming with validation feedback from a previous interrupted release-review run.", flush=True)
     pending_dir = json_file.parent / ".pending"
@@ -1246,9 +2143,11 @@ def cmd_release_review(args):
         pending_json = pending_dir / f"{json_file.stem}.{int(time.time() * 1000)}.pending.json"
         prompt = (
             f"/skill:release-review\n\nRepo: {repo}\nBranch: {branch}\n"
-            f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
+            f"Release: {release_tag}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
             f"Write the machine-readable JSON result to: {pending_json}\n\n"
             f"{feedback}"
+            f"{github_context}"
+            f"{prior_review_context}"
             f"{digest_context}"
         )
         try:
@@ -1282,12 +2181,12 @@ def cmd_release_review(args):
         if attempt == max_attempts:
             raise SystemExit(f"Release review failed validation after {max_attempts} attempts:\n{error_list}")
         print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
-        save_release_review_feedback(workspace, repo, args.release, error_list, artifact_raw)
+        save_release_review_feedback(workspace, repo, release_tag, error_list, artifact_raw)
         feedback = build_release_review_feedback(error_list, artifact_raw)
-    clear_release_review_feedback(workspace, repo, args.release)
+    clear_release_review_feedback(workspace, repo, release_tag)
     data["repo"] = repo
     data["branch"] = branch
-    data["tag_start"] = args.release
+    data["tag_start"] = release_tag
     data["range_start"] = range_start
     data["head_sha"] = head
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -1299,7 +2198,7 @@ def cmd_release_review(args):
             DELETE FROM release_reviews
             WHERE repo=? AND branch=? AND tag_start=? AND rubric_version=?
             """,
-            (repo, branch, args.release, RELEASE_RUBRIC_VERSION),
+            (repo, branch, release_tag, RELEASE_RUBRIC_VERSION),
         )
         conn.execute(
             """
@@ -1307,7 +2206,60 @@ def cmd_release_review(args):
             (repo, branch, tag_start, range_start, head_sha, verdict, raw_output, json_path, reviewed_at, skill_version, rubric_version)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (repo, branch, args.release, range_start, head, verdict, raw, str(json_file), now_iso(), __version__, RELEASE_RUBRIC_VERSION),
+            (repo, branch, release_tag, range_start, head, verdict, raw, str(json_file), now_iso(), __version__, RELEASE_RUBRIC_VERSION),
+        )
+        normalize_review_todos(conn, "release", release_review_key(repo, branch, release_tag), data.get("prioritized_todos", []))
+
+
+def cmd_sync_release_review_issue(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    branch = args.branch or config.get("branch", "main")
+    release_tag, branch = resolve_release_state(workspace, repo, branch, args.release, args.branch is not None)
+    synced = False
+
+    review_row = latest_release_review(workspace, repo, branch, release_tag)
+    if review_row:
+        data = extract_json_object(review_row.get("raw_output") or "")
+        if data is None and review_row.get("json_path") and Path(review_row["json_path"]).exists():
+            data = extract_json_object(Path(review_row["json_path"]).read_text(encoding="utf-8"))
+        if data is None:
+            raise SystemExit("Stored release review does not contain valid JSON.")
+        data = normalize_release_review_data(data)
+        review_todos = sync_release_review_todos(workspace, repo, branch, release_tag, data.get("prioritized_todos", []))
+        title = release_issue_title(release_tag)
+        issue = load_release_issue(workspace, repo, branch, release_tag)
+        existing_body = (issue.get("body") or "") if issue else ""
+        if issue:
+            checked = sync_issue_checks_to_db(workspace, repo, branch, release_tag, existing_body)
+            if checked:
+                review_todos = sync_release_review_todos(
+                    workspace, repo, branch, release_tag, data.get("prioritized_todos", [])
+                )
+                print(f"Marked {checked} release-review to-do(s) complete from the GitHub issue.")
+        merged_todos = merge_issue_and_review_todos(existing_body, review_todos)
+        body = render_release_issue_body(repo, branch, release_tag, review_row, merged_todos)
+        if issue:
+            issue = update_release_issue(repo, issue["number"], title, body)
+            action = "Updated"
+        else:
+            issue = create_release_issue(repo, title, body)
+            action = "Created"
+        save_release_issue_mapping(workspace, repo, branch, release_tag, issue)
+        print(f"{action} release checklist issue: {issue.get('html_url', '')}")
+        synced = True
+
+    announcement_row = latest_announcement(workspace, repo, branch, release_tag)
+    if announcement_row:
+        for issue_kind in ANNOUNCEMENT_ISSUE_KINDS:
+            if sync_announcement_issue(workspace, repo, branch, release_tag, announcement_row, issue_kind):
+                synced = True
+
+    if not synced:
+        raise SystemExit(
+            f"No stored release review or announcement found for {repo} {branch} {release_tag}. "
+            "Run `repo-manager release-review` or `repo-manager announce` first."
         )
 
 
@@ -1413,17 +2365,18 @@ def cmd_announce(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    reviews = load_reviews(workspace, repo, branch, args.release)
+    release_tag, branch = resolve_release_state(workspace, repo, branch, args.release, args.branch is not None)
+    reviews = load_reviews(workspace, repo, branch, release_tag)
     if not reviews:
         raise SystemExit("No commit reviews found for that repo/branch/release.")
-    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, args.release)
-    head = release_head_sha(repo, workspace, branch, args.release)
-    release_highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, args.release, head)
-    release_highlights_context = release_highlights_reference_context(workspace, repo, args.release)
-    prior_rows = prior_announcements(workspace, repo, branch, args.release)
+    range_start = args.since or common_range_start(reviews) or infer_range_start(repo, workspace, release_tag)
+    head = release_head_sha(repo, workspace, branch, release_tag)
+    release_highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, release_tag, head)
+    release_highlights_context = release_highlights_reference_context(workspace, repo, release_tag)
+    prior_rows = prior_announcements(workspace, repo, branch, release_tag)
     style_context = announcement_style_context(prior_rows)
     canonical_breaking = review_breaking_changes(
-        latest_release_review(workspace, repo, branch, args.release)
+        latest_release_review(workspace, repo, branch, release_tag)
     )
     if canonical_breaking is None:
         print(
@@ -1432,6 +2385,8 @@ def cmd_announce(args):
             flush=True,
         )
     breaking_context = canonical_breaking_changes_context(canonical_breaking)
+    issue_feedback = announcement_issues_context(workspace, repo, branch, release_tag)
+    continuity_context = existing_announcement_context(workspace, repo, branch, release_tag)
     review_context = (
         "Commit summaries for this release (the announcement's only source material):\n"
         + announcement_review_context(workspace, reviews)
@@ -1441,23 +2396,25 @@ def cmd_announce(args):
         "credit people as a clause in the feature sentence, and let enabling fixes be subsumed by the outcome "
         "they enabled.\n"
     )
-    feedback = load_announcement_feedback(workspace, repo, args.release)
+    feedback = load_announcement_feedback(workspace, repo, release_tag)
     if feedback:
         print("Resuming with validation feedback from a previous interrupted announce run.", flush=True)
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         pending_release_highlights_file, pending_markdown_file = (
-            pending_release_announcement_artifact_paths(workspace, repo, args.release, head)
+            pending_release_announcement_artifact_paths(workspace, repo, release_tag, head)
         )
         prompt = (
             f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
-            f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
+            f"Release: {release_tag}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
             f"Write the website release highlights Markdown to: {pending_release_highlights_file}\n"
             f"Then write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
             f"{release_highlights_context}"
             f"{style_context}"
             f"{breaking_context}"
             f"{feedback}"
+            f"{issue_feedback}"
+            f"{continuity_context}"
             f"{review_context}"
         )
         try:
@@ -1491,9 +2448,9 @@ def cmd_announce(args):
                 f"Announcement failed validation after {max_attempts} attempts:\n{error_list}"
             )
         print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
-        save_announcement_feedback(workspace, repo, args.release, error_list, release_highlights_raw, raw)
+        save_announcement_feedback(workspace, repo, release_tag, error_list, release_highlights_raw, raw)
         feedback = build_announcement_feedback(error_list, release_highlights_raw, raw)
-    clear_announcement_feedback(workspace, repo, args.release)
+    clear_announcement_feedback(workspace, repo, release_tag)
     write_text(release_highlights_file, release_highlights_raw)
     write_text(markdown_file, raw)
     with connect_db(workspace) as conn:
@@ -1502,7 +2459,7 @@ def cmd_announce(args):
             DELETE FROM release_announcements
             WHERE repo=? AND branch=? AND tag_start=? AND skill_version=?
             """,
-            (repo, branch, args.release, ANNOUNCEMENT_VERSION),
+            (repo, branch, release_tag, ANNOUNCEMENT_VERSION),
         )
         conn.execute(
             """
@@ -1514,7 +2471,7 @@ def cmd_announce(args):
             (
                 repo,
                 branch,
-                args.release,
+                release_tag,
                 range_start,
                 head,
                 raw,
@@ -1561,13 +2518,49 @@ def cmd_override_announcement(args):
     config = load_config(workspace)
     repo = resolve_repo(args, config)
     branch = args.branch or config.get("branch", "main")
-    range_start = args.since or infer_range_start(repo, workspace, args.release)
-    head = args.head or release_head_sha(repo, workspace, branch, args.release)
+    release_tag, branch = resolve_release_state(workspace, repo, branch, args.release, args.branch is not None)
+    range_start = args.since or infer_range_start(repo, workspace, release_tag)
+    head = args.head or release_head_sha(repo, workspace, branch, release_tag)
     markdown = read_stdin_or_file(args.file)
     if not markdown.strip():
         raise SystemExit("Announcement markdown is empty.")
-    markdown_file = store_release_announcement(workspace, repo, branch, args.release, range_start, head, markdown)
-    print(f"Stored announcement override for {args.release}: {markdown_file}")
+    markdown_file = store_release_announcement(workspace, repo, branch, release_tag, range_start, head, markdown)
+    print(f"Stored announcement override for {release_tag}: {markdown_file}")
+
+
+def cmd_status(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    configured_branch = args.branch or config.get("branch", "main")
+    info = release_lifecycle_info(workspace, repo, configured_branch, args.release, args.branch is not None)
+    counts = release_lifecycle_counts(workspace, repo, info["selected_branch"], info["selected_release"])
+    phase = "next development"
+    if info["selected_release"] != "vNext":
+        phase = "release branch" if info["release_branch_exists"] else "pre-branch release prep"
+
+    print("Release Lifecycle")
+    print(f"Repo: {info['repo']}")
+    print(f"Requested release: {info['requested_release']}")
+    print(f"CMake release: {info['cmake_release'] or 'unknown'}")
+    print(f"Latest v* tag: {info['latest_tag'] or 'none'}")
+    print(f"Selected release: {info['selected_release']}")
+    print(f"Configured branch: {info['configured_branch']}")
+    if info["release_branch"]:
+        exists = "yes" if info["release_branch_exists"] else "no"
+        print(f"Release branch: {info['release_branch']} ({exists})")
+    else:
+        print("Release branch: none")
+    print(f"Selected branch: {info['selected_branch']}")
+    print(f"Lifecycle phase: {phase}")
+    print()
+    print("Local State")
+    print(f"Commit reviews: {counts['commit_reviews']}")
+    print(f"Release reviews: {counts['release_reviews']}")
+    print(f"Announcements: {counts['announcements']}")
+    print(f"Release to-dos: {counts['open_release_todos']} open, {counts['completed_release_todos']} completed")
+    print(f"Checklist issues mapped: {counts['checklist_issues']}")
+    print(f"Announcement issues mapped: {counts['announcement_issues']}")
 
 
 def cmd_wipe_db(args):
@@ -1668,12 +2661,33 @@ def cmd_publish_pages(args):
 
 
 def cmd_all(args):
-    steps = (
-        ("sweep", cmd_sweep),
-        ("release-review", cmd_release_review),
-        ("announce", cmd_announce),
-        ("publish-pages", cmd_publish_pages),
-    )
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    configured_branch = args.branch or config.get("branch", "main")
+    lifecycle = release_lifecycle_info(workspace, repo, configured_branch, args.release, args.branch is not None)
+    release_steps_ready = lifecycle_has_release_branch(lifecycle)
+    if release_steps_ready:
+        steps = (
+            ("sweep", cmd_sweep),
+            ("release-review", cmd_release_review),
+            ("announce", cmd_announce),
+            ("sync", cmd_sync_release_review_issue),
+            ("publish-pages", cmd_publish_pages),
+        )
+    else:
+        reason = "no concrete release branch exists"
+        if lifecycle["selected_release"] == "vNext":
+            reason = "CMake has not advanced past the latest v* tag"
+        print(
+            f"Skipping release-review, announce, and sync: {reason}. "
+            "publish-pages will still run.",
+            flush=True,
+        )
+        steps = (
+            ("sweep", cmd_sweep),
+            ("publish-pages", cmd_publish_pages),
+        )
     for index, (name, func) in enumerate(steps, start=1):
         print(f"\n=== [{index}/{len(steps)}] {name} ===\n", flush=True)
         func(args)
@@ -1752,7 +2766,12 @@ def build_parser():
     review.set_defaults(func=cmd_review_commit)
 
     sweep = sub.add_parser("sweep", help="Review every commit in a release range on the tracked branch.")
-    sweep.add_argument("release", help="Release bucket to store reviews under, e.g. v10.7.0 or vNext.")
+    sweep.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to store reviews under, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
     sweep.add_argument("--since", help="Override the inferred previous v* tag for the release range.")
     sweep.add_argument("--repo")
     sweep.add_argument("--branch")
@@ -1760,14 +2779,38 @@ def build_parser():
     sweep.set_defaults(func=cmd_sweep)
 
     release = sub.add_parser("release-review", help="Run release-level review from stored commit reviews.")
-    release.add_argument("release", help="Release bucket to review, e.g. v10.7.0 or vNext.")
+    release.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to review, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
     release.add_argument("--since", help="Override the stored or inferred previous v* tag for the release range.")
     release.add_argument("--repo")
     release.add_argument("--branch")
     release.set_defaults(func=cmd_release_review)
 
+    sync_release_issue = sub.add_parser(
+        "sync",
+        help="Create or update GitHub issues for stored release artifacts.",
+    )
+    sync_release_issue.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to sync, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
+    sync_release_issue.add_argument("--repo")
+    sync_release_issue.add_argument("--branch")
+    sync_release_issue.set_defaults(func=cmd_sync_release_review_issue)
+
     announce = sub.add_parser("announce", help="Generate a Discord-friendly release announcement.")
-    announce.add_argument("release", help="Release bucket to announce, e.g. v10.7.0 or vNext.")
+    announce.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to announce, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
     announce.add_argument("--since", help="Override the stored or inferred previous v* tag for the release range.")
     announce.add_argument("--repo")
     announce.add_argument("--branch")
@@ -1784,9 +2827,14 @@ def build_parser():
 
     all_cmd = sub.add_parser(
         "all",
-        help="Run sweep, release-review, announce, and publish-pages in order for one release.",
+        help="Run sweep, release-review, announce, sync, and publish-pages in order for one release.",
     )
-    all_cmd.add_argument("release", help="Release bucket to process, e.g. v10.7.0 or vNext.")
+    all_cmd.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to process, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
     all_cmd.add_argument("--since", help="Override the inferred previous v* tag for the release range.")
     all_cmd.add_argument("--repo")
     all_cmd.add_argument("--branch")
@@ -1798,6 +2846,17 @@ def build_parser():
     all_cmd.add_argument("--out", help="Output directory for --dry-run. Defaults to .repo-manager/pages-preview in the workspace.")
     all_cmd.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="Open the dry-run preview in the default browser.")
     all_cmd.set_defaults(func=cmd_all)
+
+    status = sub.add_parser("status", help="Print inferred release lifecycle state.")
+    status.add_argument(
+        "release",
+        nargs="?",
+        default="vNext",
+        help="Release bucket to inspect, e.g. v10.7.0 or vNext. Defaults to inferred current release.",
+    )
+    status.add_argument("--repo")
+    status.add_argument("--branch")
+    status.set_defaults(func=cmd_status)
 
     wipe = sub.add_parser("wipe-db", help="Delete and recreate the local SQLite database.")
     wipe.set_defaults(func=cmd_wipe_db)

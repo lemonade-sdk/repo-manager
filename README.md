@@ -47,27 +47,35 @@ Pi runs normally in your terminal. The skill writes JSON result files under `.re
 Review every commit in a release range. The positional value is the release bucket being prepared. repo-manager automatically uses the previous `v*` tag as the lower bound:
 
 ```bash
-repo-manager sweep v10.7.0
+repo-manager sweep
 ```
 
-Re-run existing reviews:
+Re-run existing reviews for the inferred release:
 
 ```bash
-repo-manager sweep v10.7.0 --force
+repo-manager sweep --force
 ```
 
 Create a release-readiness review from stored commit reviews:
 
 ```bash
-repo-manager release-review v10.7.0
+repo-manager release-review
 ```
 
 The review is one verdict (`Ready`/`Needs Attention`/`Blocked`) plus a tight prioritized to-do list: P0 means do not ship until resolved, P1 means verify before shipping; there is no P2 and no nitpick tier. Pi receives a per-commit digest (summaries, verdicts, open to-dos, test/compatibility/security evidence) rather than the full review payload, and the result is validated (verdict/list agreement, at most 6 items, actionable phrasing) with automatic retry and resumable feedback, like `announce`.
 
+Sync the saved release artifacts to GitHub issues:
+
+```bash
+repo-manager sync
+```
+
+This creates or updates `Release v10.7.0 final checklist`, `v10.7.0 release notes`, and `v10.7.0 announcement` when their source artifacts exist locally. New release-review to-dos are appended as checkboxes, existing checklist items are preserved, and checked items on the checklist issue are marked complete in the local repo-manager database. When `release-review` runs again, it looks for the checklist issue and passes checked items plus maintainer issue comments back into the release-review prompt, so definitive notes like "this is not a problem because..." or "the checklist is missing..." can affect the regenerated review. When `announce` runs again, it looks for the release notes and announcement issues and passes maintainer comments on those issues back into the announcement prompt.
+
 Generate a Discord-friendly release announcement:
 
 ```bash
-repo-manager announce v10.7.0
+repo-manager announce
 ```
 
 This writes two artifacts under `.repo-manager/reviews/releases/`: a website release-highlights markdown file containing only `## Headline` and `## Breaking Changes`, plus the Discord announcement markdown.
@@ -88,25 +96,32 @@ You can also pipe Markdown through stdin:
 cat posted-announcement.md | repo-manager override-announcement v10.7.0 -
 ```
 
-For the next unreleased train, use `vNext`:
+By default, release pipeline commands infer the current release:
 
 ```bash
-repo-manager sweep vNext
-repo-manager release-review vNext
-repo-manager announce vNext
+repo-manager status
+repo-manager sweep
+repo-manager release-review
+repo-manager announce
 ```
+
+This follows the `vNext` resolution rules. When the tracked repo's `CMakeLists.txt` advances past the latest `v*` tag, repo-manager resolves the current release to that concrete tag. For example, if CMake moves from `10.7.0` to `10.8.0`, the inferred release becomes `v10.8.0`; local database rows, saved release to-dos, issue mappings, and synced GitHub issue titles/bodies are migrated from `vNext` to `v10.8.0`. If a matching release branch such as `release-v10.8.0` exists, release commands use that branch instead of the configured default branch unless `--branch` is passed explicitly. Once `v10.8.0` is tagged, inference returns to `vNext` on the configured default branch until CMake advances past the latest tag again.
+
+`status` prints the lifecycle inputs and selected state: CMake release, latest `v*` tag, selected release bucket, release branch presence, selected branch, local review counts, to-do counts, and mapped issue counts.
 
 Use `--since TAG` only when you need to override the inferred previous `v*` tag.
 
-Run the whole pipeline — `sweep`, `release-review`, `announce`, then `publish-pages` — for one release in a single command:
+You can still pass an explicit release bucket, such as `repo-manager all v10.8.0`, when you need to override inference.
+
+Run the whole pipeline — `sweep`, `release-review`, `announce`, `sync`, then `publish-pages` — for one release in a single command:
 
 ```bash
-repo-manager all v10.7.0
+repo-manager all
 ```
 
-`all` accepts the union of the underlying flags: `--repo`, `--branch`, and `--since` apply to the review/announce steps; `--force` re-runs existing commit reviews in the sweep step; and `--website-branch`, `--target-dir`, `--message`, `--dry-run`, and `--out` are passed through to the publish step. Each step prints its own progress, and the run stops at the first failing step.
+`all` always runs `sweep` and `publish-pages`. It runs `release-review`, `announce`, and `sync` only after the inferred concrete release branch exists, so release-level artifacts are generated against the branch that will ship rather than a still-moving default branch. `all` accepts the union of the underlying flags: `--repo`, `--branch`, and `--since` apply to the review/announce steps; `--force` re-runs existing commit reviews in the sweep step; and `--website-branch`, `--target-dir`, `--message`, `--dry-run`, and `--out` are passed through to the publish step. Each step prints its own progress, and the run stops at the first failing step.
 
-Release reviews and announcements are updated in place for a given release bucket. Re-running either command for the same release replaces the saved database row and rewrites the artifact file under `.repo-manager/reviews/releases/`.
+Release reviews and announcements are updated in place for a given release bucket. Re-running `release-review` for the same release includes the existing release review, to-do completion state, checklist issue state, and issue comments in the prompt so equivalent to-dos are kept stable instead of duplicated. Re-running `announce` includes the existing release notes and announcement artifacts as continuity baselines, plus artifact issue comments, so accepted wording and structure stay stable unless new evidence or maintainer feedback requires a change. `sync` overwrites the generated GitHub issue descriptions from the current saved artifacts while preserving checkbox completion for matching current to-dos.
 
 Wipe the local SQLite database:
 
