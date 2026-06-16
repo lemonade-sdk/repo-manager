@@ -339,6 +339,96 @@ def announcement_nonempty_errors(markdown):
     return []
 
 
+MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+")
+BREAKING_HEADING = re.compile(r"^#{1,6}\s+.*breaking\s+changes", re.IGNORECASE)
+
+
+def count_breaking_change_bullets(markdown):
+    """Count the bullets under a `Breaking Changes` heading at any heading depth.
+
+    Both artifacts label the section "Breaking Changes" — the website highlights at `##`, the
+    Discord post often at `###` — so match the heading by its text and count `-`/`*` bullets
+    until the next heading. Returns -1 when no such section exists, so callers can tell an absent
+    section from a present-but-empty one.
+    """
+    in_section = False
+    found = False
+    count = 0
+    for line in (markdown or "").splitlines():
+        if MARKDOWN_HEADING.match(line):
+            if BREAKING_HEADING.match(line):
+                in_section = True
+                found = True
+            elif in_section:
+                break
+        elif in_section and line.strip().startswith(("- ", "* ")):
+            count += 1
+    return count if found else -1
+
+
+def canonical_breaking_changes_context(canonical):
+    """Prompt block that hands the announcement its breaking changes from the release review."""
+    if canonical is None:
+        return ""
+    if not canonical:
+        return (
+            "Breaking changes (from the release review, the source of truth): none. Leave the website "
+            "highlights `## Breaking Changes` section present with no bullets, and omit the Discord "
+            "Breaking Changes section entirely.\n\n"
+        )
+    bullets = "\n".join(f"- {item}" for item in canonical)
+    return (
+        f"Breaking changes (from the release review, the source of truth): exactly {len(canonical)} "
+        f"user-facing breaking change(s) ship in this release:\n{bullets}\n\n"
+        "Surface every one of them in BOTH artifacts — one bullet each in the website highlights "
+        "`## Breaking Changes` section and one bullet each in the Discord `Breaking Changes` section. "
+        "Reword them in the right register, but do not drop, merge, or invent any: each section's bullet "
+        "count must equal the number above.\n\n"
+    )
+
+
+def announcement_breaking_changes_errors(release_highlights_markdown, discord_markdown, canonical):
+    """Reconcile both artifacts against the release review's canonical breaking-change set.
+
+    The release review is the single source of truth for what counts as a breaking change. When a
+    review exists, the website highlights and the Discord post must each surface exactly that set —
+    one bullet per change — so a dropped or merged breaking change can no longer slip through. When
+    no review is available (`canonical is None`) there is nothing to reconcile against, so skip.
+    """
+    if canonical is None:
+        return []
+    errors = []
+    expected = len(canonical)
+    highlights_count = count_breaking_change_bullets(release_highlights_markdown)
+    highlights_bullets = max(highlights_count, 0)
+    if highlights_bullets != expected:
+        if expected:
+            errors.append(
+                f"Website highlights Breaking Changes section has {highlights_bullets} bullet(s) but the "
+                f"release review identified {expected} breaking change(s); cover exactly these, one bullet "
+                "each: " + "; ".join(canonical)
+            )
+        else:
+            errors.append(
+                f"Website highlights Breaking Changes section has {highlights_bullets} bullet(s) but the "
+                "release review identified no breaking changes; the section must be present with no bullets."
+            )
+    if expected:
+        discord_count = count_breaking_change_bullets(discord_markdown)
+        if discord_count == -1:
+            errors.append(
+                f"Discord announcement is missing a Breaking Changes section; the release review identified "
+                f"{expected} breaking change(s) that must appear, one bullet each: " + "; ".join(canonical)
+            )
+        elif discord_count != expected:
+            errors.append(
+                f"Discord announcement Breaking Changes section has {discord_count} bullet(s) but the release "
+                f"review identified {expected} breaking change(s); cover exactly these, one bullet each: "
+                + "; ".join(canonical)
+            )
+    return errors
+
+
 def normalize_release_priority(value):
     text = str(value or "").strip().upper()
     if text in ("P0", "BLOCKING", "BLOCKER", "HIGH"):
@@ -373,6 +463,38 @@ def todo_text_value(item):
     return ""
 
 
+def normalize_breaking_changes(value):
+    """Coerce Pi's `breaking_changes` field into a clean list of one-line statements.
+
+    This list is the canonical record of user-facing breaking changes for the release; the
+    announcement step reads it and must surface every entry. Pi files each entry as either a
+    bare string or a small object, so read both shapes liberally and fold any migration pointer
+    into the sentence so a single string fully describes the change.
+    """
+    items = []
+    if isinstance(value, list):
+        entries = value
+    elif isinstance(value, str):
+        entries = [value]
+    else:
+        entries = []
+    for entry in entries:
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, dict):
+            text = str(
+                entry.get("change") or entry.get("text") or entry.get("summary") or entry.get("description") or ""
+            ).strip()
+            migration = str(entry.get("migration") or entry.get("action") or "").strip()
+            if text and migration and migration.lower() not in text.lower():
+                text = f"{text} — {migration}"
+        else:
+            text = str(entry).strip()
+        if text:
+            items.append(text)
+    return items
+
+
 def normalize_release_review_data(data):
     """Coerce Pi's output into the single-ledger shape and derive the verdict from it.
 
@@ -389,6 +511,8 @@ def normalize_release_review_data(data):
             normalized.append({"priority": "P1", "text": str(item).strip()})
     data["prioritized_todos"] = normalized
 
+    data["breaking_changes"] = normalize_breaking_changes(data.get("breaking_changes"))
+
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
 
     if any(todo["priority"] == "P0" for todo in normalized):
@@ -402,6 +526,15 @@ def normalize_release_review_data(data):
 
 FALSE_GREEN_PATTERN = re.compile(
     r"\bP[01]\b|\bblock(?:s|er|ers|ing)?\b|before (?:shipping|release|releasing|tagging)",
+    re.IGNORECASE,
+)
+
+# Mirrors the false-green guard above, for the canonical breaking-changes list. The list is the
+# source of truth the announcement reconciles against, so an empty list whose prose still
+# describes breaking changes is a silent under-count waiting to happen downstream.
+HAS_BREAKING_PATTERN = re.compile(r"breaking change", re.IGNORECASE)
+NO_BREAKING_PATTERN = re.compile(
+    r"\b(no|none|zero|without|not any|aren['’]?t any|no user-facing)\b[^.]{0,40}breaking change",
     re.IGNORECASE,
 )
 
@@ -427,6 +560,14 @@ def release_review_validation_errors(data):
     if not str(data.get("verdict_reason", "")).strip():
         errors.append("verdict_reason is required: one or two sentences answering 'can we ship?'.")
     evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    breaking = data.get("breaking_changes")
+    breaking_prose = f"{evidence.get('breaking_changes', '')} {data.get('verdict_reason', '')}"
+    if isinstance(breaking, list) and not breaking and HAS_BREAKING_PATTERN.search(breaking_prose) and not NO_BREAKING_PATTERN.search(breaking_prose):
+        errors.append(
+            "breaking_changes is empty but the evidence or verdict_reason describes breaking changes — "
+            "enumerate every user-facing breaking change in the breaking_changes list (one entry each, with "
+            "its migration), since the announcement is reconciled against it."
+        )
     for key in ("coverage", "blockers", "manual_testing", "breaking_changes", "security"):
         if not str(evidence.get(key, "")).strip():
             errors.append(
@@ -788,6 +929,25 @@ def latest_release_review(workspace, repo, branch, tag_start):
             (repo, branch, tag_start, RELEASE_RUBRIC_VERSION),
         ).fetchone()
     return dict(row) if row else None
+
+
+def review_breaking_changes(review_row):
+    """Canonical breaking-change list from a stored release-review row, or None if no review.
+
+    Returns None when no release review exists for the release (nothing to reconcile against),
+    and a list (possibly empty) when one does. The row stores the full artifact JSON in
+    raw_output; fall back to the on-disk artifact if that is somehow unparseable.
+    """
+    if not review_row:
+        return None
+    parsed = extract_json_object(review_row.get("raw_output") or "")
+    if parsed is None:
+        path = review_row.get("json_path")
+        if path and Path(path).exists():
+            parsed = extract_json_object(Path(path).read_text(encoding="utf-8"))
+    if parsed is None:
+        return None
+    return normalize_breaking_changes(parsed.get("breaking_changes"))
 
 
 def latest_announcement(workspace, repo, branch, tag_start):
@@ -1262,6 +1422,16 @@ def cmd_announce(args):
     release_highlights_context = release_highlights_reference_context(workspace, repo, args.release)
     prior_rows = prior_announcements(workspace, repo, branch, args.release)
     style_context = announcement_style_context(prior_rows)
+    canonical_breaking = review_breaking_changes(
+        latest_release_review(workspace, repo, branch, args.release)
+    )
+    if canonical_breaking is None:
+        print(
+            "Warning: no release review found for this release; skipping breaking-change reconciliation. "
+            "Run `release-review` first so the announcement's breaking changes are checked against it.",
+            flush=True,
+        )
+    breaking_context = canonical_breaking_changes_context(canonical_breaking)
     review_context = (
         "Commit summaries for this release (the announcement's only source material):\n"
         + announcement_review_context(workspace, reviews)
@@ -1286,6 +1456,7 @@ def cmd_announce(args):
             f"Then write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
             f"{release_highlights_context}"
             f"{style_context}"
+            f"{breaking_context}"
             f"{feedback}"
             f"{review_context}"
         )
@@ -1311,6 +1482,7 @@ def cmd_announce(args):
             errors.extend(announcement_nonempty_errors(raw))
         else:
             errors.append(f"Expected announcement file was not created: {pending_markdown_file}")
+        errors.extend(announcement_breaking_changes_errors(release_highlights_raw, raw, canonical_breaking))
         if not errors:
             break
         error_list = "\n".join(f"- {error}" for error in errors)

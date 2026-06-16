@@ -50,7 +50,7 @@ Shape the post like the references, scaled to the release:
 - Title: `## Lemonade <release>` (use the release bucket name, e.g. `## Lemonade vNext`).
 - A one-or-two-sentence `@everyone` opener that names what makes this release worth reading, written fresh each time. A quick patch can say so ("a quick release today to cover two important things"); a flagship release can be loud about it.
 - An optional `News` section for meta announcements (meetings, roadmap, cadence) only when the commit reviews or caller supply such news.
-- A `Breaking Changes` section, only when real user-facing breaking changes exist, placed right after the opener (or News). One bullet per change with what users must do.
+- A `Breaking Changes` section, present exactly when the caller's canonical breaking-changes list (taken from the release review) is non-empty, placed right after the opener (or News). The release review is the source of truth: surface every entry from that list, one bullet each — never drop, merge, or add one — saying what users must do. Reword each in this post's voice, but the bullet count must equal the list's. When the list is empty, omit this section.
 - One `### heading` per story, not per deliverable. When several changes advance the same theme — GPU support landing for two vendors, several backends arriving on a new OS — they share one section with one name, the way the references roll separate CUDA, Vulkan, and ARM64 work into a single "Cross-Vendor Support" section. Short, concrete names ("Omni Models", "Fedora 43 is back!"). A Discord emoji prefix on a heading or two is welcome when it fits; most headings have none. Hold a high bar: a section is for stories enthusiasts will want to read a paragraph about or try today. Three or four sections is typical; one is fine for a small release. Never pad.
 - A `### Additional Improvements` section of compact bullets for everything else worth mentioning. Bullets follow the same one-story-one-bullet rule: all the CI work is one bullet, a handful of small fixes in one area is one bullet, with shared credit ("A trio of fixes for Linux by @handle, one for macOS by @handle..."). Infrastructure work that helps users or contributors earns its bullet by stating the benefit ("CI system overhaul by myself and @handle to make contributing more fun"); changes with no audience at all are simply omitted.
 - A closing line that links the full release notes, worded differently from every prior post, optionally inviting feedback or teasing a screenshot.
@@ -88,8 +88,8 @@ Headline rules:
 
 Breaking Changes rules:
 
-- One concise bullet per actual user-relevant breaking change, with the migration action when known.
-- If there are no breaking changes, leave the section heading present with no bullets. Do not write "None".
+- One concise bullet per entry in the caller's canonical breaking-changes list (from the release review), with the migration action when known. Cover every entry, one bullet each — the bullet count must equal the list's; do not drop, merge, or add changes.
+- If the list is empty, leave the section heading present with no bullets. Do not write "None".
 
 ## Validation
 

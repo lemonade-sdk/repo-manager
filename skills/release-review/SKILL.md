@@ -18,18 +18,20 @@ A to-do earns its place only if both are true:
 
 Everything that fails the test does not get a lower priority — it gets omitted. Specifically excluded, always: code-quality follow-ups, "add tests later" debt, refactoring suggestions, review-process observations ("review was light", "approval came after the bot"), CI flakiness that does not affect shipped artifacts, documentation polish unrelated to behavior changes, and anything whose natural deadline is after the release.
 
-The test cuts both ways: a short list is a constraint, not the goal, and a missing P0/P1 is a worse failure than an extra one. Some things always pass the test when present in the range — a user-facing breaking change whose migration is not yet in the release notes, and a new headline feature with no test evidence on its advertised platforms. "Not a showstopper" does not mean "omit": anything a maintainer should do before shipping is a P1 by definition.
+**Documenting breaking changes is never a to-do.** Capture every user-facing breaking change in the `breaking_changes` field instead; the release-announcement step reads that list and documents each one with migration guidance under an enforced coverage check, so "write the migration note for X" is already done by the pipeline and the maintainer has nothing to act on. The only time a breaking change becomes a to-do is when the break itself is *unintended* — a regression that should be fixed or reverted before shipping, not a deliberate change that merely needs writing up. A deliberate breaking change, however large, goes in `breaking_changes` and nowhere in the to-do list.
+
+The test cuts both ways: a short list is a constraint, not the goal, and a missing P0/P1 is a worse failure than an extra one. Some things always pass the test when present in the range — a new headline feature with no test evidence on its advertised platforms. "Not a showstopper" does not mean "omit": anything a maintainer should do before shipping is a P1 by definition.
 
 ## Priorities
 
 Exactly two priorities exist:
 
-- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped artifacts, a likely security issue, a breaking change with no migration path, or a headline feature whose release packaging/tests are failing with the cause not yet understood. Uncertainty about whether release artifacts are broken is itself P0: "we don't know if the package works" blocks a release the same way "the package is broken" does. A new *shipping surface* this release is exactly that kind of unknown: when this release adds something users install or download — a new OS or distro target (a new Debian/Ubuntu/Fedora package), an installer, a container image, a wheel for a new platform — and nothing shows the built artifact actually installs and runs there, it is P0 until verified. An untested package is indistinguishable from a broken one and gates every user on that platform at the door; the larger the new surface, the less a passing CI build alone settles it.
-- **P1 — verify before shipping.** New user-facing behavior, on a surface that already ships, that lacks test evidence and needs a human to confirm it works: a new backend on platforms Lemonade already supports, a new command end-to-end, a breaking change's migration story actually written down where users will see it. The dividing line from P0 is blast radius: if what is unverified is one feature on familiar ground, P1; if it is the shipped artifact's basic integrity on new ground, escalate to P0.
+- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped artifacts, a likely security issue, an *unintended* breaking change (a regression that slipped in, as opposed to a deliberate one — deliberate breaks belong in `breaking_changes`, never here), or a headline feature whose release packaging/tests are failing with the cause not yet understood. Uncertainty about whether release artifacts are broken is itself P0: "we don't know if the package works" blocks a release the same way "the package is broken" does. A new *shipping surface* this release is exactly that kind of unknown: when this release adds something users install or download — a new OS or distro target (a new Debian/Ubuntu/Fedora package), an installer, a container image, a wheel for a new platform — and nothing shows the built artifact actually installs and runs there, it is P0 until verified. An untested package is indistinguishable from a broken one and gates every user on that platform at the door; the larger the new surface, the less a passing CI build alone settles it.
+- **P1 — verify before shipping.** New user-facing behavior, on a surface that already ships, that lacks test evidence and needs a human to confirm it works: a new backend on platforms Lemonade already supports, a new command end-to-end. The dividing line from P0 is blast radius: if what is unverified is one feature on familiar ground, P1; if it is the shipped artifact's basic integrity on new ground, escalate to P0.
 
 There is no P2. If something matters for this release it is P0 or P1; if it does not, it is not in the list.
 
-Work directly from the digest: for each entry that has `open_todos`, decide whether it is a P0, a P1, or omitted, then write only the kept ones into `prioritized_todos`. Several entries usually merge into one themed to-do. The to-do list is the whole worksheet — it is also written for a human who has never seen the digest, so name the feature or behavior ("the Moonshine backend", "the pi agent integration", "the env var removal"), never a digest id.
+Work directly from the digest: for each entry that has `open_todos`, decide whether it is a P0, a P1, or omitted, then write only the kept ones into `prioritized_todos`. Several entries usually merge into one themed to-do. The to-do list is the whole worksheet — it is also written for a human who has never seen the digest, so name the feature or behavior ("the Moonshine backend", "the pi agent integration", "the backend watchdog"), never a digest id.
 
 ## Writing the to-dos
 
@@ -62,6 +64,10 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
     {"priority": "P0", "text": "Resolve X so that users get Y; check by Z."},
     {"priority": "P1", "text": "Run A on B and confirm C."}
   ],
+  "breaking_changes": [
+    "Removed the --foo flag; pass --bar instead.",
+    "Renamed the baz model id to baz-v2; old id no longer resolves."
+  ],
   "evidence": {
     "coverage": "What range was reviewed and anything not covered.",
     "blockers": "Short synthesis of what drove the verdict.",
@@ -73,5 +79,6 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
 ```
 
 - `prioritized_todos` is the only action field. Do not emit `recommendations`, `open_release_risks`, or other alternates.
+- `breaking_changes` is the canonical, deduplicated list of every user-facing breaking change shipping in this release — one entry per distinct change, each a single sentence naming the change and its migration ("Removed X; use Y instead."). This list is the source of truth: the release-announcement step reads it and must surface every entry, so it must be complete and must not merge two real breaking changes into one entry or list a non-breaking change. Use `[]` when there are none. It must agree with `evidence.breaking_changes`: the prose summarizes the same set this list enumerates. A change that appears here must **not** also appear as a to-do: documenting it is the announcement step's job, enforced automatically, so a deliberate breaking change is captured here and adds nothing to `prioritized_todos`.
 - `evidence` values are one or two sentences of synthesis each — no PR-by-PR lists, no statistics, no commit inventories, no shout-outs.
 - Counts only when the digest directly supports them; never claim "all CI passed" from absence of evidence.
