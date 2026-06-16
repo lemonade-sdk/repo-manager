@@ -17,29 +17,17 @@ The caller may provide two kinds of references:
 - Up to three prior GitHub `## Headline` and `## Breaking Changes` sections. These set the style for the website release highlights artifact.
 - Up to three prior Discord release announcements, written by the maintainer personally. These set the voice for the Discord announcement.
 
-Use references for style and voice only. Never copy facts, shout outs, migration notes, or sentences from them; every claim in the new artifacts must come from the current commit-review records.
+Use references for style and voice only. Never copy their facts, shout outs, migration notes, or sentences into the new post; every claim here must come from the current commit-review records. They do carry one substantive signal: the prior-release headlines are the record of what already shipped — use them to tell a debut from a refinement (see the section bar below).
 
-## Story Plan
+## Shaping the release into stories
 
-Write the story plan first, as a JSON file at the plan path the caller provides:
+Before writing, decide the handful of stories this release tells. This shaping drives both artifacts — the website headline bullets are the stories in order, the Discord `###` feature headings are the same stories — so the two artifacts stay in step because they came from the same shaping, not because a checker forced them to.
 
-```json
-{
-  "stories": [
-    {"title": "Omni Models", "section": true, "covers": "what this story includes, briefly"},
-    {"title": "Faster Downloads", "section": false, "covers": "..."}
-  ],
-  "breaking_changes": ["concise user-facing breaking change"]
-}
-```
-
-- 3-5 stories, ordered by importance. A story is a theme, not a commit: several changes that advance the same outcome — support for more platforms, faster models, a smoother app — are one story told together, however many PRs or authors it took. If two candidate stories would answer the same reader question ("does it run on my hardware?", "what's new for images?"), merge them.
-- Each story answers exactly one reader question. A title that needs an "&" or "Improvements" to hold its contents together ("Configuration & CLI Improvements") is not a story — it is either two stories or a handful of `Additional Improvements` bullets. An exciting new capability must never be buried as a bullet inside a catch-all story.
+- Aim for 3-5 stories, ordered by importance. A story is a theme, not a commit: several changes that advance the same outcome — support for more platforms, faster models, a smoother app — are one story told together, however many PRs or authors it took. If two candidate stories would answer the same reader question ("does it run on my hardware?", "what's new for images?"), merge them.
+- Each story answers exactly one reader question. A title that needs an "&" or "Improvements" to hold its contents together ("Configuration & CLI Improvements") is not a story — it is either two real stories or a handful of `Additional Improvements` bullets. An exciting new capability must never be buried as a bullet inside a catch-all story, and a pile of unrelated leftovers must never be dressed up as a feature section.
 - Work aimed at contributors rather than users — CI, internal refactors, test infrastructure — is never a story and never appears inside a feature section. At most it earns one aggregated `Additional Improvements` bullet framed by its benefit; otherwise omit it.
-- `section: true` marks stories that earn a `###` section in the Discord post — something enthusiasts will want to read a paragraph about or try today. `section: false` stories become prominent bullets under `Additional Improvements`. At least one section; three or four is typical.
-- `breaking_changes` lists actual user-facing breaking changes, or stays empty.
-
-The plan is the single source of truth for both artifacts: the headline bullets are the stories in order, the Discord feature headings are exactly the section-stories' titles (the CLI rejects mismatches), and each story is told exactly once — a breaking change covered in `Breaking Changes` does not also get a feature section, and a change mentioned in a feature section does not reappear as a bullet.
+- A `###` section announces a capability that *debuts in this release*. Check every candidate against the prior-release headlines above: if the capability already appears there, this release only refined it — auto-detecting it, speeding it up, hardening it — and a refinement is an `Additional Improvements` bullet, never a section, however big the payoff sounds. Do not borrow the underlying feature's glory to earn the section: "MTP, now auto-detected — up to 2x performance!" is a bullet, because MTP and its 2x shipped already; the only new thing is that you no longer set a flag. Judge the section on the delta this release introduces, not on the impressiveness of what it touches. The section count is a ceiling that falls out of how many changes clear that bar, never a quota — four real debuts plus a weaker fifth is four sections, not five. At least one; three or four is typical.
+- Tell each story exactly once: a breaking change covered in `Breaking Changes` does not also get a feature section, and a change mentioned in a feature section does not reappear as a bullet.
 
 ## The Voice
 
@@ -105,4 +93,4 @@ Breaking Changes rules:
 
 ## Validation
 
-The CLI validates both artifacts and will return errors for: malformed highlights structure, formatting or casual wording in headline bullets, bolded @handles, marketing filler phrases, announcements over 45 non-blank lines, and any phrase of 8 or more consecutive words reused from a prior announcement (openers and closings included). If you receive validation feedback, fix the listed problems and rewrite both files.
+The CLI enforces only the website highlights' machine-readable structure: exactly `## Headline` then `## Breaking Changes`, single-depth `-` bullets, and 3-5 headline bullets. It does not police the Discord post — its voice, length, credits, story shaping, and freedom from filler, canned phrases, PR numbers, and reused wording are yours to get right by following this skill. Hold yourself to that bar as if a checker were watching; nothing else will. If you receive validation feedback, fix the listed problems and rewrite both files.

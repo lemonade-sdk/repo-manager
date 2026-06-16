@@ -24,22 +24,12 @@ The test cuts both ways: a short list is a constraint, not the goal, and a missi
 
 Exactly two priorities exist:
 
-- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped artifacts, a likely security issue, a breaking change with no migration path, or a headline feature whose release packaging/tests are failing with the cause not yet understood. Uncertainty about whether release artifacts are broken is itself P0: "we don't know if the package works" blocks a release the same way "the package is broken" does.
-- **P1 — verify before shipping.** New user-facing behavior in this release that lacks test evidence and needs a human to confirm it works: a new backend on its advertised platforms, a new command end-to-end, a breaking change's migration story actually written down where users will see it.
+- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped artifacts, a likely security issue, a breaking change with no migration path, or a headline feature whose release packaging/tests are failing with the cause not yet understood. Uncertainty about whether release artifacts are broken is itself P0: "we don't know if the package works" blocks a release the same way "the package is broken" does. A new *shipping surface* this release is exactly that kind of unknown: when this release adds something users install or download — a new OS or distro target (a new Debian/Ubuntu/Fedora package), an installer, a container image, a wheel for a new platform — and nothing shows the built artifact actually installs and runs there, it is P0 until verified. An untested package is indistinguishable from a broken one and gates every user on that platform at the door; the larger the new surface, the less a passing CI build alone settles it.
+- **P1 — verify before shipping.** New user-facing behavior, on a surface that already ships, that lacks test evidence and needs a human to confirm it works: a new backend on platforms Lemonade already supports, a new command end-to-end, a breaking change's migration story actually written down where users will see it. The dividing line from P0 is blast radius: if what is unverified is one feature on familiar ground, P1; if it is the shipped artifact's basic integrity on new ground, escalate to P0.
 
 There is no P2. If something matters for this release it is P0 or P1; if it does not, it is not in the list.
 
-## Triage first
-
-Every digest entry that has `open_todos` gets an explicit decision before anything else is written. There are exactly three decisions:
-
-- `P0` — this entry contains a do-not-ship-until-resolved issue.
-- `P1` — this entry contains something a human must verify before shipping.
-- `omit` — users would not notice; say why in one clause ("test debt", "process note", "post-release cleanup").
-
-The decisions go in the artifact's `triage` array, one entry per digest id, and they bind you: the verdict is computed from them (any P0 → `Blocked`; any P1 and no P0 → `Needs Attention`; all omitted → `Ready`), and every kept decision must be represented in `prioritized_todos`. Several kept entries usually merge into one themed to-do — merged entries keep their P0/P1 decision; `omit` only ever means "users would not notice", never "covered elsewhere". The CLI rejects artifacts whose triage is incomplete or whose verdict disagrees with it.
-
-The triage is your worksheet, not the maintainer's reading material. Digest ids like `c5` exist only inside `triage`. Everything else in the artifact — `verdict_reason`, `prioritized_todos`, `evidence` — is written for a human who has never seen the digest: name the feature or behavior ("the Moonshine backend", "the pi agent integration", "the env var removal"), never an id. The CLI rejects digest ids in human-facing fields.
+Work directly from the digest: for each entry that has `open_todos`, decide whether it is a P0, a P1, or omitted, then write only the kept ones into `prioritized_todos`. Several entries usually merge into one themed to-do. The to-do list is the whole worksheet — it is also written for a human who has never seen the digest, so name the feature or behavior ("the Moonshine backend", "the pi agent integration", "the env var removal"), never a digest id.
 
 ## Writing the to-dos
 
@@ -50,30 +40,24 @@ The triage is your worksheet, not the maintainer's reading material. Digest ids 
 
 ## Verdict
 
-Exactly one of:
+The verdict is computed from your to-do list, so you cannot contradict it:
 
-- `Ready` — the to-do list is empty.
+- `Ready` — the list is empty.
 - `Needs Attention` — at least one P1 and no P0.
 - `Blocked` — at least one P0.
 
-The verdict and the list must agree; if the release can only ship after a check happens, that check is in the list and the verdict is not `Ready`. Never output other verdict words (`Pass`, `Conditional`, `Clean`, ...).
-
-Apply this reflexively to your own prose: if your `verdict_reason` or evidence mentions anything that should happen before shipping, the verdict is not `Ready` and each such thing is a to-do. Burying pre-release work in the reason text while reporting `Ready` is the worst possible output — the maintainer reads the verdict and ships.
+The list *is* the verdict: if the release can only ship after a check happens, that check is a to-do. Apply this to your prose too — if `verdict_reason` or evidence mentions anything that should happen before shipping, it is a to-do, not a sentence. Burying pre-release work in prose while the list is empty is the worst possible output: the maintainer reads `Ready` and ships.
 
 ## JSON artifact
 
 Writing the artifact to the caller-provided `.json` path is mandatory before finishing; the CLI reads that file after the skill exits. Use exactly this shape:
 
-`verdict_reason` is your answer if the maintainer asked you "can we ship?" in person: one or two sentences that name what matters in this release and exactly what stands between it and shipping. It is not a summary of the artifact — no commit statistics, no triage accounting, no restating the to-do list, no digest ids. "Two breaking changes still need release-note coverage and the new Moonshine backend hasn't been verified on its advertised platforms; nothing else blocks the release." is the register to hit.
+`verdict_reason` is your answer if the maintainer asked you "can we ship?" in person: one or two sentences that name what matters in this release and exactly what stands between it and shipping. It is not a summary of the artifact — no commit statistics, no restating the to-do list, no digest ids. "Two breaking changes still need release-note coverage and the new Moonshine backend hasn't been verified on its advertised platforms; nothing else blocks the release." is the register to hit.
 
 ```json
 {
   "verdict": "Blocked",
   "verdict_reason": "Nothing ships until X is fixed: users hit Y on Z. Everything else is release-note coverage.",
-  "triage": [
-    {"id": "c3", "decision": "P1", "why": "new backend needs platform verification"},
-    {"id": "c7", "decision": "omit", "why": "test debt, post-release"}
-  ],
   "prioritized_todos": [
     {"priority": "P0", "text": "Resolve X so that users get Y; check by Z."},
     {"priority": "P1", "text": "Run A on B and confirm C."}

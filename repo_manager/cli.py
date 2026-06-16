@@ -288,411 +288,144 @@ def write_json_artifact_from_output(path, output):
     return True
 
 
+HIGHLIGHTS_HORIZONTAL_RULE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
+
+
 def release_highlights_validation_errors(markdown):
+    """Structural contract for the machine-parsed website highlights artifact — nothing more.
+
+    lemonade-server.ai parses this file by its `## Headline` and `## Breaking Changes` sections,
+    so the real contract is: those two `##` sections, 3-5 single-depth headline bullets, and
+    breaking changes as bullets or empty. Be liberal about cosmetic noise the parser ignores —
+    a stray document title or a `---` separator — and enforce only what the parser needs. Wording
+    and casualness are the skill's job, not a hard gate.
+    """
     text = (markdown or "").strip()
     if not text:
         return ["Release highlights artifact is empty."]
-    lines = text.splitlines()
-    nonblank = [line for line in lines if line.strip()]
-    if not nonblank or nonblank[0].strip() != "## Headline":
-        return ["Release highlights artifact must start with exactly `## Headline`."]
-
-    heading_lines = [(index, line.strip()) for index, line in enumerate(lines) if re.match(r"^#{1,6}\s+", line)]
-    headings = [line for _, line in heading_lines]
-    if headings != ["## Headline", "## Breaking Changes"]:
-        return ["Release highlights artifact must contain only `## Headline` followed by `## Breaking Changes`."]
+    lines = [line for line in text.splitlines() if not HIGHLIGHTS_HORIZONTAL_RULE.match(line)]
+    section_headings = [(index, line.strip()) for index, line in enumerate(lines) if re.match(r"^##\s+", line)]
+    if [title for _, title in section_headings] != ["## Headline", "## Breaking Changes"]:
+        return [
+            "Release highlights artifact must contain exactly `## Headline` then `## Breaking Changes` "
+            "as its only `##` sections, and nothing else but their bullets."
+        ]
 
     errors = []
-    breaking_index = heading_lines[1][0]
-    headline_lines = [line for line in lines[heading_lines[0][0] + 1 : breaking_index] if line.strip()]
+    headline_index, breaking_index = section_headings[0][0], section_headings[1][0]
+    headline_lines = [line for line in lines[headline_index + 1 : breaking_index] if line.strip()]
     breaking_lines = [line for line in lines[breaking_index + 1 :] if line.strip()]
-    headline_bullets = [line.strip() for line in headline_lines if line.strip().startswith("- ")]
+    headline_bullets = [line for line in headline_lines if line.strip().startswith(("- ", "* "))]
     if len(headline_bullets) != len(headline_lines):
-        errors.append("Release highlights Headline section must contain only single-depth `- ` bullets.")
+        errors.append("Release highlights Headline section must contain only single-depth bullets.")
     if not 3 <= len(headline_bullets) <= 5:
         errors.append("Release highlights Headline section must contain 3-5 bullets.")
 
-    casual_terms = re.compile(r"\b(finally|huge|massive|awesome|fresh|super|great)\b|glow up", re.IGNORECASE)
-    # Inline code (backticks) is allowed: real Lemonade headlines use it for commands and flags.
-    formatting_terms = re.compile(r"(\*\*|\[[^\]]+\]\(|https?://|@)")
-    for bullet in headline_bullets:
-        body = bullet[2:].strip()
-        if casual_terms.search(body):
-            errors.append(f"Release highlights headline is too casual: {body}")
-        if formatting_terms.search(body):
-            errors.append(
-                f"Release highlights headline must not include bold, links, or @handles (inline code is fine): {body}"
-            )
-        if len(body) > 220:
-            errors.append(f"Release highlights headline bullet must be one short sentence: {body}")
-
     for line in breaking_lines:
-        stripped = line.strip()
-        if not stripped.startswith(("- ", "* ")):
+        if not line.strip().startswith(("- ", "* ")):
             errors.append("Release highlights Breaking Changes section must contain only bullets or be empty.")
-            continue
-        body = stripped[2:].strip().lower().strip(".* ")
-        if body in ("none", "none this release", "no breaking changes", "no breaking changes this release"):
-            errors.append("Leave `## Breaking Changes` empty when there are no breaking changes.")
     return errors
 
 
-def story_plan_validation_errors(plan_text):
-    plan = extract_json_object(plan_text or "")
-    if plan is None:
-        return ["Story plan file must contain a valid JSON object."], None
-    stories = plan.get("stories")
-    if not isinstance(stories, list) or not stories:
-        return ["Story plan must contain a non-empty `stories` list."], None
-    errors = []
-    if not 3 <= len(stories) <= 5:
-        errors.append(
-            f"Story plan has {len(stories)} stories; it must have 3-5. "
-            "Merge stories that answer the same reader question; drop ones users would not notice."
-        )
-    grab_bag_endings = ("improvements", "fixes", "updates", "miscellaneous", "misc")
-    for index, story in enumerate(stories):
-        if not isinstance(story, dict) or not str(story.get("title", "")).strip():
-            errors.append(f"Story plan stories[{index}] must be an object with a non-empty `title`.")
-            continue
-        title = str(story["title"]).strip()
-        if "&" in title or title.lower().split()[-1] in grab_bag_endings:
-            errors.append(
-                f"Story title {title!r} is a grab-bag, not a story. Each story answers one reader question; "
-                "split it into real stories or move its contents to Additional Improvements bullets."
-            )
-    if not any(isinstance(story, dict) and story.get("section") for story in stories):
-        errors.append("At least one story must have `section`: true.")
-    return errors, plan
+def announcement_nonempty_errors(markdown):
+    """The Discord post is prose for humans; the only hard requirement is that it exists.
 
-
-def normalize_heading_title(text):
-    text = re.sub(r"[^0-9A-Za-z&+./'’-]+", " ", text or "")
-    return " ".join(text.split()).lower()
-
-
-RESERVED_ANNOUNCEMENT_HEADINGS = {"breaking changes", "additional improvements", "news"}
-
-
-def announcement_plan_consistency_errors(markdown, plan):
-    if not plan:
-        return []
-    headings = []
-    for line in (markdown or "").splitlines():
-        match = re.match(r"^###\s+(.+?)\s*$", line)
-        if match:
-            normalized = normalize_heading_title(match.group(1))
-            if normalized not in RESERVED_ANNOUNCEMENT_HEADINGS:
-                headings.append((match.group(1).strip(), normalized))
-    section_titles = [
-        str(story.get("title", "")).strip()
-        for story in plan.get("stories", [])
-        if isinstance(story, dict) and story.get("section")
-    ]
-    if [normalized for _, normalized in headings] != [normalize_heading_title(title) for title in section_titles]:
-        return [
-            "Discord feature headings must be exactly the planned section-story titles, in order. "
-            f"Planned sections: {section_titles}. Found headings: {[original for original, _ in headings]}. "
-            "Fix the announcement or revise the plan so the two agree."
-        ]
-    return []
-
-
-def normalize_announcement_words(text):
-    words = []
-    for raw in (text or "").split():
-        token = raw.strip("*_`~:;,.!?()[]{}<>\"'#-—").lower()
-        if not token or token.startswith("http") or token.startswith("www."):
-            continue
-        words.append(token)
-    return words
-
-
-def repeated_prior_phrases(markdown, prior_rows, n=8, max_reports=3):
-    words = normalize_announcement_words(markdown)
-    grams = {}
-    for index in range(len(words) - n + 1):
-        grams.setdefault(tuple(words[index : index + n]), index)
-    hits = []
-    for row in prior_rows:
-        prior_words = normalize_announcement_words(read_announcement_markdown(row))
-        prior_grams = {tuple(prior_words[index : index + n]) for index in range(len(prior_words) - n + 1)}
-        matches = [gram for gram in grams if gram in prior_grams]
-        if matches:
-            earliest = min(matches, key=grams.get)
-            hits.append((row.get("tag_start"), " ".join(earliest)))
-        if len(hits) >= max_reports:
-            break
-    return hits
-
-
-ANNOUNCEMENT_CANNED_PHRASES = (
-    "let's dive in",
-    "dive in!",
-    "buckle up",
-    "without further ado",
-    "to the next level",
-    "seamlessly",
-)
-
-ANNOUNCEMENT_FILLER_PATTERN = re.compile(
-    r"\bwe(?:'re| are)\s+(?:excited|thrilled|delighted|proud|pleased)\b"
-    r"|\b(?:excited|thrilled|delighted|proud|pleased)\s+to\s+(?:introduce|announce|share|welcome)\b",
-    re.IGNORECASE,
-)
-
-
-def announcement_validation_errors(markdown, prior_rows):
-    text = (markdown or "").strip()
-    if not text:
+    Voice, length, credits, no-PR-numbers, no-canned-phrases — all of it lives in the skill,
+    which teaches it far better than a regex can police it. A style regex must never be able to
+    block a postable announcement.
+    """
+    if not (markdown or "").strip():
         return ["Discord announcement is empty."]
-    errors = []
-    nonblank = [line for line in text.splitlines() if line.strip()]
-    if not nonblank[0].strip().startswith("## Lemonade "):
-        errors.append("Discord announcement must start with a `## Lemonade <release>` title line.")
-    if text.count("**") // 2 > 6:
-        errors.append(
-            "Discord announcement uses bold too often; bold at most one or two introduced product names in the whole post."
-        )
-    if re.search(r"\*\*\s*@", text):
-        errors.append("Do not bold @handles; credit contributors inline as plain `@handle`.")
-    lowered = text.lower()
-    for phrase in ANNOUNCEMENT_CANNED_PHRASES:
-        if phrase in lowered:
-            errors.append(f"Drop the canned phrase {phrase!r}; the prior announcements never talk like that.")
-    filler = ANNOUNCEMENT_FILLER_PATTERN.search(text)
-    if filler:
-        errors.append(
-            f"Drop the marketing filler {filler.group(0)!r}; state what shipped directly, the way the prior announcements do."
-        )
-    pr_ref = re.search(r"\bPR\s*#\d+|\(#\d{2,}\)", text)
-    if pr_ref:
-        errors.append(
-            f"Remove the PR reference {pr_ref.group(0)!r}; announcements never include PR numbers — link docs or describe the user action instead."
-        )
-    if len(nonblank) > 45:
-        errors.append(
-            f"Discord announcement is too long ({len(nonblank)} non-blank lines); match the prior announcements "
-            "(roughly 15-30 non-blank lines) by tightening sections and merging minor items."
-        )
-    for tag, phrase in repeated_prior_phrases(text, prior_rows):
-        errors.append(
-            f'Reused wording from the {tag} announcement: "{phrase} ..." — rewrite so no phrase of 8+ consecutive '
-            "words repeats a prior announcement."
-        )
-    improvements_bullets = 0
-    in_improvements = False
-    for line in text.splitlines():
-        heading_match = re.match(r"^#{2,3}\s+(.+?)\s*$", line)
-        if heading_match:
-            in_improvements = normalize_heading_title(heading_match.group(1)) == "additional improvements"
-            continue
-        if in_improvements and line.strip().startswith(("- ", "* ")):
-            improvements_bullets += 1
-    if improvements_bullets > 7:
-        errors.append(
-            f"Additional Improvements has {improvements_bullets} bullets; keep it to at most 7 by merging "
-            "related work into shared bullets and omitting changes with no audience."
-        )
-    return errors
+    return []
 
 
 def normalize_release_priority(value):
     text = str(value or "").strip().upper()
     if text in ("P0", "BLOCKING", "BLOCKER", "HIGH"):
-        return "P0" if text in ("P0", "BLOCKING", "BLOCKER") else "P1"
-    if text in ("P1", "RECOMMENDED", "MEDIUM"):
-        return "P1"
-    if text in ("P2", "FUTURE", "LOW"):
-        return "P2"
+        return "P0"
     return "P1"
 
 
+# Pi does not reliably emit the documented `prioritized_todos`/`text` keys: across runs it has
+# filed the same list under `open_todos` (text under `text`) and under `todos` (text under `todo`).
+# Rather than chase an ever-growing allowlist, recognize the to-do list by what its key name
+# implies and read each item's text liberally. The verdict is derived from that list, so a
+# misnamed-but-present list can never silently collapse into a false "Ready".
+TODO_LIST_KEY_HINTS = ("todo", "action", "risk", "recommend", "blocker", "attention")
+TODO_TEXT_KEYS = ("text", "todo", "task", "action", "description", "item")
+
+
+def extract_todo_list(data):
+    documented = data.get("prioritized_todos")
+    if isinstance(documented, list) and documented:
+        return documented
+    for key, value in data.items():
+        if isinstance(value, list) and value and any(hint in key.lower() for hint in TODO_LIST_KEY_HINTS):
+            return value
+    return documented if isinstance(documented, list) else []
+
+
+def todo_text_value(item):
+    for key in TODO_TEXT_KEYS:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def normalize_release_review_data(data):
-    if not isinstance(data.get("triage"), list):
-        for alias in ("decisions", "todo_triage"):
-            if isinstance(data.get(alias), list):
-                data["triage"] = data[alias]
-                break
-    if not isinstance(data.get("triage"), list):
-        rebuilt = []
-        for entry in data.get("omitted_todos") or []:
-            if isinstance(entry, dict) and (entry.get("commit") or entry.get("id")):
-                rebuilt.append(
-                    {
-                        "id": entry.get("commit") or entry.get("id"),
-                        "decision": "omit",
-                        "why": entry.get("reason") or entry.get("why") or "",
-                    }
-                )
-        for entry in data.get("action_items") or []:
-            if not isinstance(entry, dict):
-                continue
-            blob = " ".join(
-                str(entry.get(key, "")) for key in ("id", "commit", "commits", "description", "text", "rationale")
-            )
-            for ref in sorted(set(re.findall(r"\bc\d+\b", blob))):
-                rebuilt.append(
-                    {
-                        "id": ref,
-                        "decision": entry.get("priority") or "P1",
-                        "why": str(entry.get("description") or entry.get("text") or "")[:160],
-                    }
-                )
-        if rebuilt:
-            data["triage"] = rebuilt
-    if isinstance(data.get("triage"), list):
-        normalized_triage = []
-        for entry in data["triage"]:
-            if not isinstance(entry, dict):
-                continue
-            decision = str(entry.get("decision") or entry.get("priority") or "").strip()
-            decision = "omit" if decision.lower() in ("omit", "omitted", "drop", "skip") else decision.upper()
-            normalized_triage.append(
-                {
-                    "id": str(entry.get("id") or entry.get("commit") or "").strip(),
-                    "decision": decision,
-                    "why": str(entry.get("why") or entry.get("reason") or entry.get("rationale") or "").strip(),
-                }
-            )
-        data["triage"] = normalized_triage
+    """Coerce Pi's output into the single-ledger shape and derive the verdict from it.
 
-    todos = data.get("prioritized_todos")
-    if not isinstance(todos, list):
-        todos = []
-
-    normalized_todos = []
-    for item in todos:
+    The to-do list is the only source of truth. The verdict is computed from it here, so the
+    two can never disagree — there is no separate triage ledger to reconcile against.
+    """
+    normalized = []
+    for item in extract_todo_list(data):
         if isinstance(item, dict):
-            text = (
-                item.get("text")
-                or item.get("todo")
-                or item.get("task")
-                or item.get("action")
-                or item.get("risk")
-                or item.get("description")
-            )
+            text = todo_text_value(item)
             if text:
-                normalized_todos.append({"priority": normalize_release_priority(item.get("priority")), "text": str(text)})
-        elif item:
-            normalized_todos.append({"priority": "P1", "text": str(item)})
+                normalized.append({"priority": normalize_release_priority(item.get("priority")), "text": text})
+        elif str(item).strip():
+            normalized.append({"priority": "P1", "text": str(item).strip()})
+    data["prioritized_todos"] = normalized
 
-    if not normalized_todos:
-        for item in data.get("action_items") or []:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("description") or item.get("action")
-                if text:
-                    normalized_todos.append(
-                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
-                    )
+    data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
 
-    if not normalized_todos:
-        for item in data.get("recommendations") or []:
-            if isinstance(item, dict):
-                text = item.get("action") or item.get("text")
-                if text:
-                    normalized_todos.append(
-                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
-                    )
-
-    if not normalized_todos:
-        open_items = ((data.get("maintainer_todos_summary") or {}).get("open_items") or [])
-        for item in open_items:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("reason")
-                if text:
-                    normalized_todos.append(
-                        {"priority": normalize_release_priority(item.get("priority")), "text": str(text)}
-                    )
-
-    if not normalized_todos:
-        for item in data.get("open_release_risks") or []:
-            if isinstance(item, dict):
-                text = item.get("risk") or item.get("description")
-                if text:
-                    normalized_todos.append(
-                        {"priority": normalize_release_priority(item.get("severity")), "text": str(text)}
-                    )
-
-    data["prioritized_todos"] = normalized_todos
-
-    if not str(data.get("verdict_reason") or "").strip() and str(data.get("summary") or "").strip():
-        data["verdict_reason"] = str(data["summary"]).strip()
-
-    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    for alias, canonical in (("commit_coverage", "coverage"), ("manual_release_testing", "manual_testing")):
-        if alias in evidence and canonical not in evidence:
-            evidence[canonical] = evidence.pop(alias)
-    data["evidence"] = evidence
-
-    verdict = str(data.get("verdict") or "").strip().lower()
-    if verdict == "ready":
-        normalized_verdict = "Ready"
-    elif verdict in ("blocked", "blocker", "fail", "failed"):
-        normalized_verdict = "Blocked"
-    elif verdict in (
-        "needs attention",
-        "conditional pass",
-        "conditional",
-        "pass with conditions",
-        "release with conditions",
-        "ship with conditions",
-        "conditional release",
-    ):
-        normalized_verdict = "Needs Attention"
-    elif any(todo.get("priority") == "P0" for todo in normalized_todos):
-        normalized_verdict = "Blocked"
-    elif normalized_todos:
-        normalized_verdict = "Needs Attention"
+    if any(todo["priority"] == "P0" for todo in normalized):
+        data["verdict"] = "Blocked"
+    elif normalized:
+        data["verdict"] = "Needs Attention"
     else:
-        normalized_verdict = "Ready"
-
-    if normalized_verdict == "Ready" and normalized_todos:
-        normalized_verdict = "Needs Attention"
-    if normalized_verdict == "Needs Attention" and any(todo.get("priority") == "P0" for todo in normalized_todos):
-        normalized_verdict = "Blocked"
-    data["verdict"] = normalized_verdict
+        data["verdict"] = "Ready"
     return data
 
 
-RELEASE_TODO_WEASEL_STARTS = ("consider ", "note that", "be aware", "maybe ", "possibly ", "think about")
-
-READY_CONTRADICTION_PATTERN = re.compile(
-    r"\b(?:before (?:shipping|release|releasing|tagging)|should be (?:addressed|checked|verified|fixed|resolved|"
-    r"documented|tested)|needs? (?:attention|verification|testing|fixing|documentation)|must be (?:addressed|"
-    r"checked|verified|fixed|documented|tested))\b",
+FALSE_GREEN_PATTERN = re.compile(
+    r"\bP[01]\b|\bblock(?:s|er|ers|ing)?\b|before (?:shipping|release|releasing|tagging)",
     re.IGNORECASE,
 )
 
 
-DIGEST_ID_PATTERN = re.compile(r"\bc\d+\b")
+def release_review_validation_errors(data):
+    """Structural checks that protect the three maintainer-facing panels — nothing more.
 
-
-def release_review_validation_errors(data, required_triage_ids=None):
+    The verdict and the to-do priorities are guaranteed by normalize_release_review_data, so
+    the only things that can be missing are the human-facing prose fields. Style, length, and
+    word choice are the skill's job, not a hard gate that can deadlock a release review. The one
+    exception is a false green: an empty list whose reason still describes blocking work is the
+    worst possible output, so that single contradiction is caught here.
+    """
     errors = []
-    verdict = data.get("verdict")
     todos = data.get("prioritized_todos")
-    human_fields = [("verdict_reason", str(data.get("verdict_reason", "")))]
-    human_fields += [(f"evidence.{key}", str(value)) for key, value in (data.get("evidence") or {}).items()]
-    if isinstance(todos, list):
-        human_fields += [
-            (f"prioritized_todos[{index}]", str(item.get("text", "")))
-            for index, item in enumerate(todos)
-            if isinstance(item, dict)
-        ]
-    for field, text in human_fields:
-        leaked = DIGEST_ID_PATTERN.search(text)
-        if leaked:
-            errors.append(
-                f"{field} mentions digest id {leaked.group(0)!r} — ids are internal worksheet references the "
-                "maintainer has never seen; name the feature or behavior instead."
-            )
-    reason = str(data.get("verdict_reason", "")).strip()
-    if len(reason) > 350:
+    if not isinstance(todos, list):
+        errors.append("prioritized_todos must be a list (empty for Ready).")
+    elif not todos and FALSE_GREEN_PATTERN.search(str(data.get("verdict_reason", ""))):
         errors.append(
-            "verdict_reason must be the one-or-two-sentence answer to 'can we ship?' — name what stands between "
-            "this release and shipping; do not summarize the artifact, list to-dos, or report statistics."
+            "prioritized_todos is empty but verdict_reason still describes blocking or to-verify work — "
+            "put each such item in prioritized_todos so the verdict reflects it."
         )
+    if not str(data.get("verdict_reason", "")).strip():
+        errors.append("verdict_reason is required: one or two sentences answering 'can we ship?'.")
     evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
     for key in ("coverage", "blockers", "manual_testing", "breaking_changes", "security"):
         if not str(evidence.get(key, "")).strip():
@@ -700,88 +433,6 @@ def release_review_validation_errors(data, required_triage_ids=None):
                 f"evidence.{key} is required: one or two sentences of synthesis for the maintainer dashboard "
                 "(or 'none observed' when that is the honest answer)."
             )
-    if verdict not in ("Ready", "Needs Attention", "Blocked"):
-        errors.append(f"Verdict must be Ready, Needs Attention, or Blocked; got {verdict!r}.")
-    if not isinstance(todos, list):
-        return errors + ["prioritized_todos must be a list (empty for Ready)."]
-    if verdict in ("Needs Attention", "Blocked") and not todos:
-        errors.append("Verdict requires maintainer attention but prioritized_todos is empty.")
-    if verdict == "Ready" and todos:
-        errors.append("Ready requires an empty prioritized_todos list.")
-    if verdict == "Ready":
-        prose = " ".join(
-            [str(data.get("verdict_reason", ""))] + [str(value) for value in (data.get("evidence") or {}).values()]
-        )
-        contradiction = READY_CONTRADICTION_PATTERN.search(prose)
-        if contradiction:
-            errors.append(
-                f"Verdict is Ready but the prose says {contradiction.group(0)!r} — pre-release work buried in "
-                "text is the worst possible output. Either nothing needs to happen before shipping (rewrite the "
-                "prose), or it does (each item becomes a P0/P1 to-do and the verdict changes)."
-            )
-    if required_triage_ids is not None:
-        triage = data.get("triage")
-        if not isinstance(triage, list):
-            triage = []
-        decisions = {}
-        for index, entry in enumerate(triage):
-            if not isinstance(entry, dict) or not entry.get("id"):
-                errors.append(f"triage[{index}] must be an object with id, decision, and why.")
-                continue
-            decision = entry.get("decision")
-            if decision not in ("P0", "P1", "omit"):
-                errors.append(f"triage[{index}] decision must be P0, P1, or omit; got {decision!r}.")
-                continue
-            if not str(entry.get("why", "")).strip():
-                errors.append(f"triage[{index}] ({entry['id']}) needs a one-clause `why`.")
-            decisions[str(entry["id"])] = decision
-        missing = [tid for tid in required_triage_ids if tid not in decisions]
-        if missing:
-            errors.append(
-                f"Every digest entry with open_todos must be triaged; missing decisions for: {', '.join(missing)}. "
-                "Each gets P0 (do not ship until resolved), P1 (verify before shipping), or omit (with why)."
-            )
-        kept = [d for d in decisions.values() if d != "omit"]
-        expected = "Blocked" if "P0" in kept else ("Needs Attention" if kept else "Ready")
-        if verdict in ("Ready", "Needs Attention", "Blocked") and verdict != expected:
-            errors.append(
-                f"Verdict must follow from the triage decisions: {len(kept)} kept "
-                f"({sorted(set(kept)) or 'none'}) implies {expected!r}, not {verdict!r}."
-            )
-        if kept and isinstance(todos, list):
-            if "P0" in kept and not any(t.get("priority") == "P0" for t in todos if isinstance(t, dict)):
-                errors.append("Triage kept a P0 but prioritized_todos has no P0 item.")
-            if not todos:
-                errors.append("Triage kept items but prioritized_todos is empty; each kept theme needs a to-do.")
-    if len(todos) > 6:
-        errors.append(
-            f"prioritized_todos has {len(todos)} items; at most 6. Merge verification work into release-test "
-            "themes and omit anything the maintainer would not regret shipping without."
-        )
-    for index, item in enumerate(todos):
-        if not isinstance(item, dict) or not str(item.get("text", "")).strip():
-            errors.append(f"prioritized_todos[{index}] must be an object with priority and non-empty text.")
-            continue
-        priority = item.get("priority")
-        text = str(item["text"]).strip()
-        if priority not in ("P0", "P1"):
-            errors.append(
-                f"prioritized_todos[{index}] has priority {priority!r}; only P0 (do not ship until resolved) and "
-                "P1 (verify before shipping) exist. If it matters for this release it is P0 or P1; "
-                "if it does not, remove it."
-            )
-        if len(text) > 300:
-            errors.append(
-                f"prioritized_todos[{index}] is too long; one actionable sentence: action, user-visible stake, how to check."
-            )
-        lowered = text.lower()
-        for weasel in RELEASE_TODO_WEASEL_STARTS:
-            if lowered.startswith(weasel):
-                errors.append(
-                    f"prioritized_todos[{index}] starts with {weasel.strip()!r}; rewrite as a direct action "
-                    "(Run/Verify/Confirm/Fix X and check Y)."
-                )
-                break
     return errors
 
 
@@ -838,11 +489,9 @@ def pending_release_announcement_artifact_paths(workspace, repo, tag_start, head
     pending_dir = release_highlights_file.parent / ".pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
     stamp = str(int(time.time() * 1000))
-    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag_start)
     return (
         pending_dir / f"{release_highlights_file.stem}.{stamp}.pending.md",
         pending_dir / f"{markdown_file.stem}.{stamp}.pending.md",
-        pending_dir / f"{safe_tag}.{stamp}.story-plan.json",
     )
 
 
@@ -1082,7 +731,7 @@ RELEASE_REVIEW_EVIDENCE_KEYS = (
 def release_review_context(workspace, reviews):
     completed_ids = completed_todo_ids(workspace)
     rows = []
-    for index, review in enumerate(reviews, start=1):
+    for review in reviews:
         data = read_json(review["json_path"]) if review.get("json_path") else {}
         review_key = f"{review['repo']}|{review['commit_sha']}|{review['rubric_version']}"
         open_todos = []
@@ -1095,7 +744,6 @@ def release_review_context(workspace, reviews):
         evidence = data.get("evidence") or {}
         rows.append(
             {
-                "id": f"c{index}",
                 "summary": data.get("summary", review["summary"]),
                 "verdict": data.get("verdict", review["verdict"]),
                 "verdict_reason": data.get("verdict_reason", review["verdict_reason"]),
@@ -1105,10 +753,6 @@ def release_review_context(workspace, reviews):
             }
         )
     return json.dumps(rows, indent=2)
-
-
-def release_review_triage_ids(context_json):
-    return [row["id"] for row in json.loads(context_json) if row.get("open_todos")]
 
 
 def announcement_review_context(workspace, reviews):
@@ -1419,19 +1063,17 @@ def cmd_release_review(args):
     head = head_sha(repo, workspace, branch)
     json_file, _ = release_artifact_paths(workspace, repo, args.release, head, "review")
     context_json = release_review_context(workspace, reviews)
-    triage_ids = release_review_triage_ids(context_json)
     digest_context = (
         "Per-commit digest of the stored commit reviews. open_todos reflect maintainer completion state in the "
         "repo-manager database; completed_todos counts are resolved evidence:\n"
         + context_json
-        + "\n\nFinal reminders: triage every digest entry that has open_todos "
-        f"({', '.join(triage_ids) or 'none'}) with an explicit P0/P1/omit decision and a one-clause why — "
-        "the verdict must follow from those decisions, and merged entries keep P0/P1 (omit only means users "
-        "would not notice). A to-do earns its place only if the maintainer would regret shipping without it "
-        "AND users would notice the consequence; omit everything else entirely (there is no P2). At most 6 "
-        "items, each one actionable sentence with how to check; merge related decisions into shared to-dos. "
-        "Digest ids appear ONLY inside triage — verdict_reason, to-dos, and evidence are for a human who has "
-        "never seen the digest, and verdict_reason is just your one-or-two-sentence answer to 'can we ship?'.\n"
+        + "\n\nFinal reminders: a to-do earns its place only if the maintainer would regret shipping without it "
+        "AND users would notice the consequence; omit everything else entirely (there is no P2). Each to-do is "
+        "one actionable sentence — action, user-visible stake, how to check — marked P0 (do not ship until "
+        "resolved) or P1 (verify before shipping); merge related concerns into shared to-dos. The verdict is "
+        "computed from your to-do list, so you cannot contradict it. verdict_reason, to-dos, and evidence are "
+        "for a human who has never seen this digest: name the feature or behavior, and let verdict_reason be "
+        "just your one-or-two-sentence answer to 'can we ship?'.\n"
     )
     feedback = load_release_review_feedback(workspace, repo, args.release)
     if feedback:
@@ -1470,7 +1112,7 @@ def cmd_release_review(args):
                 errors.append("Artifact file must contain a valid JSON object.")
             else:
                 candidate = normalize_release_review_data(candidate)
-                errors.extend(release_review_validation_errors(candidate, triage_ids))
+                errors.extend(release_review_validation_errors(candidate))
         else:
             errors.append(f"Expected release-review JSON file was not created: {pending_json}")
         if not errors:
@@ -1553,10 +1195,8 @@ def clear_release_review_feedback(workspace, repo, release_tag):
         path.unlink()
 
 
-def build_announcement_feedback(error_list, release_highlights_raw, raw, plan_raw=""):
+def build_announcement_feedback(error_list, release_highlights_raw, raw):
     previous_sections = []
-    if (plan_raw or "").strip():
-        previous_sections.append("Previous story plan attempt:\n```json\n" + plan_raw.strip() + "\n```")
     if (release_highlights_raw or "").strip():
         previous_sections.append(
             "Previous website release highlights attempt:\n```markdown\n" + release_highlights_raw.strip() + "\n```"
@@ -1565,7 +1205,7 @@ def build_announcement_feedback(error_list, release_highlights_raw, raw, plan_ra
         previous_sections.append("Previous Discord announcement attempt:\n```markdown\n" + raw.strip() + "\n```")
     return (
         "A previous attempt at this task failed validation. Fix every problem listed below while keeping the "
-        "content accurate, then write corrected versions of ALL the files to the paths given above.\n"
+        "content accurate, then write corrected versions of both files to the paths given above.\n"
         f"Validation problems:\n{error_list}\n\n" + "\n\n".join(previous_sections) + "\n\n"
     )
 
@@ -1582,11 +1222,10 @@ def load_announcement_feedback(workspace, repo, release_tag):
         data.get("errors", ""),
         data.get("release_highlights", ""),
         data.get("announcement", ""),
-        data.get("plan", ""),
     )
 
 
-def save_announcement_feedback(workspace, repo, release_tag, error_list, release_highlights_raw, raw, plan_raw=""):
+def save_announcement_feedback(workspace, repo, release_tag, error_list, release_highlights_raw, raw):
     path = announcement_feedback_file(workspace, repo, release_tag)
     path.write_text(
         json.dumps(
@@ -1594,7 +1233,6 @@ def save_announcement_feedback(workspace, repo, release_tag, error_list, release
                 "errors": error_list,
                 "release_highlights": release_highlights_raw,
                 "announcement": raw,
-                "plan": plan_raw,
                 "saved_at": now_iso(),
             },
             indent=2,
@@ -1627,24 +1265,24 @@ def cmd_announce(args):
     review_context = (
         "Commit summaries for this release (the announcement's only source material):\n"
         + announcement_review_context(workspace, reviews)
-        + "\n\nFinal editorial reminders: tell the release as 3-5 stories, one section each; if two candidate "
-        "sections would answer the same reader question, they are one story. Describe outcomes, never the work "
-        "behind them — credit people as a clause in the feature sentence, and let enabling fixes be subsumed by "
-        "the outcome they enabled.\n"
+        + "\n\nFinal editorial reminders: tell the release as 3-5 stories, one Discord section each; if two "
+        "candidate sections would answer the same reader question, they are one story, and leftover changes that "
+        "are not a story become Additional Improvements bullets. Describe outcomes, never the work behind them — "
+        "credit people as a clause in the feature sentence, and let enabling fixes be subsumed by the outcome "
+        "they enabled.\n"
     )
     feedback = load_announcement_feedback(workspace, repo, args.release)
     if feedback:
         print("Resuming with validation feedback from a previous interrupted announce run.", flush=True)
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
-        pending_release_highlights_file, pending_markdown_file, pending_plan_file = (
+        pending_release_highlights_file, pending_markdown_file = (
             pending_release_announcement_artifact_paths(workspace, repo, args.release, head)
         )
         prompt = (
             f"/skill:release-announcement\n\nRepo: {repo}\nBranch: {branch}\n"
             f"Release: {args.release}\nRange start: {range_start or 'unknown'}\nHead SHA: {head}\n\n"
-            f"First write the story plan JSON to: {pending_plan_file}\n"
-            f"Then write the website release highlights Markdown to: {pending_release_highlights_file}\n"
+            f"Write the website release highlights Markdown to: {pending_release_highlights_file}\n"
             f"Then write the Discord-friendly Markdown announcement to: {pending_markdown_file}\n\n"
             f"{release_highlights_context}"
             f"{style_context}"
@@ -1662,15 +1300,7 @@ def cmd_announce(args):
             continue
         release_highlights_raw = ""
         raw = ""
-        plan_raw = ""
-        plan = None
         errors = []
-        if Path(pending_plan_file).exists():
-            plan_raw = Path(pending_plan_file).read_text(encoding="utf-8")
-            plan_errors, plan = story_plan_validation_errors(plan_raw)
-            errors.extend(plan_errors)
-        else:
-            errors.append(f"Expected story plan file was not created: {pending_plan_file}")
         if Path(pending_release_highlights_file).exists():
             release_highlights_raw = Path(pending_release_highlights_file).read_text(encoding="utf-8")
             errors.extend(release_highlights_validation_errors(release_highlights_raw))
@@ -1678,8 +1308,7 @@ def cmd_announce(args):
             errors.append(f"Expected release highlights file was not created: {pending_release_highlights_file}")
         if Path(pending_markdown_file).exists():
             raw = Path(pending_markdown_file).read_text(encoding="utf-8")
-            errors.extend(announcement_validation_errors(raw, prior_rows))
-            errors.extend(announcement_plan_consistency_errors(raw, plan))
+            errors.extend(announcement_nonempty_errors(raw))
         else:
             errors.append(f"Expected announcement file was not created: {pending_markdown_file}")
         if not errors:
@@ -1690,8 +1319,8 @@ def cmd_announce(args):
                 f"Announcement failed validation after {max_attempts} attempts:\n{error_list}"
             )
         print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
-        save_announcement_feedback(workspace, repo, args.release, error_list, release_highlights_raw, raw, plan_raw)
-        feedback = build_announcement_feedback(error_list, release_highlights_raw, raw, plan_raw)
+        save_announcement_feedback(workspace, repo, args.release, error_list, release_highlights_raw, raw)
+        feedback = build_announcement_feedback(error_list, release_highlights_raw, raw)
     clear_announcement_feedback(workspace, repo, args.release)
     write_text(release_highlights_file, release_highlights_raw)
     write_text(markdown_file, raw)
@@ -1866,6 +1495,19 @@ def cmd_publish_pages(args):
     print(f"Published static repo-manager dashboard to {repo}:{args.website_branch}:{target_rel.as_posix()}/")
 
 
+def cmd_all(args):
+    steps = (
+        ("sweep", cmd_sweep),
+        ("release-review", cmd_release_review),
+        ("announce", cmd_announce),
+        ("publish-pages", cmd_publish_pages),
+    )
+    for index, (name, func) in enumerate(steps, start=1):
+        print(f"\n=== [{index}/{len(steps)}] {name} ===\n", flush=True)
+        func(args)
+    print(f"\nCompleted all {len(steps)} steps for {args.release}.", flush=True)
+
+
 def print_pretty_review(data):
     print("Description")
     print(data.get("summary", ""))
@@ -1967,6 +1609,23 @@ def build_parser():
     override_announcement.add_argument("--repo")
     override_announcement.add_argument("--branch")
     override_announcement.set_defaults(func=cmd_override_announcement)
+
+    all_cmd = sub.add_parser(
+        "all",
+        help="Run sweep, release-review, announce, and publish-pages in order for one release.",
+    )
+    all_cmd.add_argument("release", help="Release bucket to process, e.g. v10.7.0 or vNext.")
+    all_cmd.add_argument("--since", help="Override the inferred previous v* tag for the release range.")
+    all_cmd.add_argument("--repo")
+    all_cmd.add_argument("--branch")
+    all_cmd.add_argument("--force", action="store_true", help="Re-run commit reviews that already exist (sweep step).")
+    all_cmd.add_argument("--website-branch", default="website", help="Branch backing the GitHub Pages site.")
+    all_cmd.add_argument("--target-dir", default="docs/repo-manager", help="Directory to replace on the website branch.")
+    all_cmd.add_argument("--message", default="Update repo-manager dashboard", help="Commit message for the website branch.")
+    all_cmd.add_argument("--dry-run", action="store_true", help="Write a local static preview instead of pushing the website branch (publish step).")
+    all_cmd.add_argument("--out", help="Output directory for --dry-run. Defaults to .repo-manager/pages-preview in the workspace.")
+    all_cmd.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="Open the dry-run preview in the default browser.")
+    all_cmd.set_defaults(func=cmd_all)
 
     wipe = sub.add_parser("wipe-db", help="Delete and recreate the local SQLite database.")
     wipe.set_defaults(func=cmd_wipe_db)

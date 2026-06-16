@@ -98,6 +98,14 @@ repo-manager announce vNext
 
 Use `--since TAG` only when you need to override the inferred previous `v*` tag.
 
+Run the whole pipeline — `sweep`, `release-review`, `announce`, then `publish-pages` — for one release in a single command:
+
+```bash
+repo-manager all v10.7.0
+```
+
+`all` accepts the union of the underlying flags: `--repo`, `--branch`, and `--since` apply to the review/announce steps; `--force` re-runs existing commit reviews in the sweep step; and `--website-branch`, `--target-dir`, `--message`, `--dry-run`, and `--out` are passed through to the publish step. Each step prints its own progress, and the run stops at the first failing step.
+
 Release reviews and announcements are updated in place for a given release bucket. Re-running either command for the same release replaces the saved database row and rewrites the artifact file under `.repo-manager/reviews/releases/`.
 
 Wipe the local SQLite database:
