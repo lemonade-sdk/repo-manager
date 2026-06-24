@@ -1241,6 +1241,8 @@ def release_review_context(workspace, reviews):
         evidence = data.get("evidence") or {}
         rows.append(
             {
+                "pr_number": review["pr_number"],
+                "author": data.get("author", review["author"]),
                 "summary": data.get("summary", review["summary"]),
                 "verdict": data.get("verdict", review["verdict"]),
                 "verdict_reason": data.get("verdict_reason", review["verdict_reason"]),
@@ -2274,7 +2276,9 @@ def cmd_release_review(args):
         + "\n\nFinal reminders: a to-do earns its place only if the maintainer would regret shipping without it "
         "AND users would notice the consequence; omit everything else entirely (there is no P2). Each to-do is "
         "one actionable sentence — action, user-visible stake, how to check — marked P0 (do not ship until "
-        "resolved) or P1 (verify before shipping); merge related concerns into shared to-dos. The verdict is "
+        "resolved) or P1 (verify before shipping); merge related concerns into shared to-dos. End each to-do "
+        "with an attribution tag naming who to ask and the source PR(s), pulled from the digest pr_number/author "
+        "fields: '(#1234, @author)'. The verdict is "
         "computed from your to-do list, so you cannot contradict it. verdict_reason, to-dos, and evidence are "
         "for a human who has never seen this digest: name the feature or behavior, and let verdict_reason be "
         "just your one-or-two-sentence answer to 'can we ship?'.\n"

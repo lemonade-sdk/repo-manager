@@ -7,7 +7,7 @@ description: Synthesize stored commit-review results into a release-readiness ve
 
 The reader is the maintainer about to press the release button. Your job is to hand them exactly what they need to make that call: one verdict, and the shortest possible list of things they would regret shipping without doing. Everything else is noise that costs them time they are spending on a release.
 
-The input includes the repo, branch, release tag, range start tag, head SHA, and a per-commit digest of stored commit reviews (summary, verdict, open to-dos, and test/compatibility/security evidence). Synthesize from this digest; do not re-review diffs unless the digest is clearly insufficient.
+The input includes the repo, branch, release tag, range start tag, head SHA, and a per-commit digest of stored commit reviews. Each digest entry carries `pr_number` and `author` alongside the summary, verdict, open to-dos, and test/compatibility/security evidence. Synthesize from this digest; do not re-review diffs unless the digest is clearly insufficient. The `pr_number` and `author` are what let you tell the maintainer who to ask about each to-do — carry them through (see "Writing the to-dos").
 
 ## The inclusion test
 
@@ -38,7 +38,8 @@ Work directly from the digest: for each entry that has `open_todos`, decide whet
 - At most 6 items. A release with more than 6 genuine ship-blockers and verifications usually means themes were not merged.
 - Group manual verification by release-test theme, not by commit: one to-do covering the new-feature smoke matrix (naming each surface to touch) beats five one-feature to-dos.
 - Each to-do is one sentence that starts with the action, names the user-visible thing at stake, and says how to check it: "Run X on Y and confirm Z." Never "Consider...", "Note that...", or "Investigate whether..." without saying what decision the answer feeds.
-- When several commit reviews repeat the same concern (for example, the same CI test failing across multiple merges), that repetition is signal — merge it into one to-do and say it recurred.
+- **End every to-do with an attribution tag naming who to ask and the PR(s) it came from**, so the maintainer knows who to chase: `(#1234, @author)`. Pull `pr_number` and `author` straight from the digest entries the to-do is built from — the PR number renders as a clickable link in the GitHub checklist, and the handle is the person closest to the change. When a themed to-do merges several commits, list each contributing PR and its author: `(#1234 @alice, #1240 @bob)`. Drop only the missing half of a tag if the digest lacks it (no `pr_number` → `(@author)`; no `author` → `(#1234)`); never invent either, and never omit the tag entirely when the digest has the data. The action sentence still leads — the tag is a suffix, e.g. "Run Whisper on Metal and confirm transcription works (#1234, @geramyl)."
+- When several commit reviews repeat the same concern (for example, the same CI test failing across multiple merges), that repetition is signal — merge it into one to-do, say it recurred, and tag every PR involved.
 
 ## Verdict
 
@@ -61,8 +62,8 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
   "verdict": "Blocked",
   "verdict_reason": "Nothing ships until X is fixed: users hit Y on Z. Everything else is release-note coverage.",
   "prioritized_todos": [
-    {"priority": "P0", "text": "Resolve X so that users get Y; check by Z."},
-    {"priority": "P1", "text": "Run A on B and confirm C."}
+    {"priority": "P0", "text": "Resolve X so that users get Y; check by Z (#1234, @author)."},
+    {"priority": "P1", "text": "Run A on B and confirm C (#1240, @author)."}
   ],
   "breaking_changes": [
     "Removed the --foo flag; pass --bar instead.",
