@@ -135,13 +135,13 @@ Use `--since TAG` only when you need to override the inferred previous `v*` tag.
 
 You can still pass an explicit release bucket, such as `repo-manager all v10.8.0`, when you need to override inference.
 
-Run the whole pipeline — `sweep`, `release-review`, `announce`, `sync`, then `publish-pages` — for one release in a single command:
+Run the whole pipeline — `pull`, `sweep`, `release-review`, `announce`, `sync`, then `publish-pages` — for one release in a single command:
 
 ```bash
 repo-manager all
 ```
 
-`all` always runs `sweep` and `publish-pages`. It runs `release-review`, `announce`, and `sync` only after the inferred concrete release branch exists, so release-level artifacts are generated against the branch that will ship rather than a still-moving default branch. `all` accepts the union of the underlying flags: `--repo`, `--branch`, and `--since` apply to the review/announce steps; `--force` re-runs existing commit reviews in the sweep step; and `--website-branch`, `--target-dir`, `--message`, `--dry-run`, and `--out` are passed through to the publish step. Each step prints its own progress, and the run stops at the first failing step.
+`all` starts by [pulling](#onboarding-to-a-repo-that-already-uses-repo-manager) the published database into local, so it is safe to run from any machine without overwriting newer online state when it publishes at the end. Pass `--no-pull` to skip that step. It then always runs `sweep` and `publish-pages`, and runs `release-review`, `announce`, and `sync` only after the inferred concrete release branch exists, so release-level artifacts are generated against the branch that will ship rather than a still-moving default branch. `all` accepts the union of the underlying flags: `--repo`, `--branch`, and `--since` apply to the review/announce steps; `--force` re-runs existing commit reviews in the sweep step; `--wiki-page` applies to the pull step; and `--website-branch`, `--target-dir`, `--message`, `--dry-run`, and `--out` are passed through to the publish step. Each step prints its own progress, and the run stops at the first failing step.
 
 Release reviews and announcements are updated in place for a given release bucket. Re-running `release-review` for the same release includes the existing release review, to-do completion state, checklist issue state, and issue comments in the prompt so equivalent to-dos are kept stable instead of duplicated. Re-running `announce` includes the existing release notes and announcement artifacts as continuity baselines, plus artifact issue comments, so accepted wording and structure stay stable unless new evidence or maintainer feedback requires a change. `sync` overwrites the generated GitHub issue descriptions from the current saved artifacts while preserving checkbox completion for matching current to-dos.
 

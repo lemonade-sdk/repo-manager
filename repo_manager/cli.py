@@ -2831,8 +2831,11 @@ def cmd_all(args):
     configured_branch = args.branch or config.get("branch", "main")
     lifecycle = release_lifecycle_info(workspace, repo, configured_branch, args.release, args.branch is not None)
     release_steps_ready = lifecycle_has_release_branch(lifecycle)
+    # Pull the published database into local first so `all` is safe to run from
+    # any machine without clobbering newer online state when it publishes.
+    pull_steps = () if args.no_pull else (("pull", cmd_pull),)
     if release_steps_ready:
-        steps = (
+        steps = pull_steps + (
             ("sweep", cmd_sweep),
             ("release-review", cmd_release_review),
             ("announce", cmd_announce),
@@ -2848,7 +2851,7 @@ def cmd_all(args):
             "publish-pages will still run.",
             flush=True,
         )
-        steps = (
+        steps = pull_steps + (
             ("sweep", cmd_sweep),
             ("publish-pages", cmd_publish_pages),
         )
@@ -2995,7 +2998,7 @@ def build_parser():
 
     all_cmd = sub.add_parser(
         "all",
-        help="Run sweep, release-review, announce, sync, and publish-pages in order for one release.",
+        help="Run pull, sweep, release-review, announce, sync, and publish-pages in order for one release.",
     )
     all_cmd.add_argument(
         "release",
@@ -3013,6 +3016,8 @@ def build_parser():
     all_cmd.add_argument("--dry-run", action="store_true", help="Write a local static preview instead of pushing the website branch (publish step).")
     all_cmd.add_argument("--out", help="Output directory for --dry-run. Defaults to .repo-manager/pages-preview in the workspace.")
     all_cmd.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="Open the dry-run preview in the default browser.")
+    all_cmd.add_argument("--wiki-page", default="Release-Announcements", help="Wiki page holding real release announcements (pull step).")
+    all_cmd.add_argument("--no-pull", action="store_true", help="Skip syncing the published database into local before running.")
     all_cmd.set_defaults(func=cmd_all)
 
     status = sub.add_parser("status", help="Print inferred release lifecycle state.")
