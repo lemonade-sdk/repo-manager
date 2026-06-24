@@ -1994,6 +1994,140 @@ def ensure_pages_checkout(workspace, repo, branch):
     return path
 
 
+def ensure_wiki_checkout(workspace, repo):
+    """Clone or refresh the target repo's GitHub wiki into .repo-manager/wiki.
+
+    Returns the checkout path, or None if the wiki is unavailable (no wiki, no
+    auth, or offline) so callers can fall back to the proposed announcements.
+    """
+    path = workspace / CONFIG_DIR / "wiki"
+    url = f"https://github.com/{repo}.wiki.git"
+    if (path / ".git").exists():
+        run(["git", "-C", str(path), "pull", "--ff-only"], check=False)
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    result = run(["git", "clone", "--depth", "1", url, str(path)], check=False)
+    if result.returncode != 0:
+        return None
+    return path
+
+
+def write_release_announcement_row(
+    conn, workspace, repo, branch, release_tag, range_start, head, discord_markdown, highlights_markdown
+):
+    """Write announcement artifact files and upsert the row using an open connection.
+
+    Unlike store_release_announcement, this also persists the website highlights,
+    so the Discord text (from the wiki) and the Headline/Breaking Changes (from
+    the GitHub release page) can be saved together.
+    """
+    highlights_file, markdown_file = release_announcement_artifact_paths(workspace, repo, release_tag, head)
+    write_text(markdown_file, discord_markdown.rstrip() + "\n")
+    raw = Path(markdown_file).read_text(encoding="utf-8")
+    highlights_raw = ""
+    highlights_path = ""
+    if highlights_markdown and highlights_markdown.strip():
+        write_text(highlights_file, highlights_markdown.rstrip() + "\n")
+        highlights_raw = Path(highlights_file).read_text(encoding="utf-8")
+        highlights_path = str(highlights_file)
+    conn.execute(
+        """
+        DELETE FROM release_announcements
+        WHERE repo=? AND branch=? AND tag_start=? AND skill_version=?
+        """,
+        (repo, branch, release_tag, ANNOUNCEMENT_VERSION),
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO release_announcements
+        (repo, branch, tag_start, range_start, head_sha, raw_output, markdown_path,
+         release_highlights_output, release_highlights_path, generated_at, skill_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            repo,
+            branch,
+            release_tag,
+            range_start,
+            head,
+            raw,
+            str(markdown_file),
+            highlights_raw,
+            highlights_path,
+            now_iso(),
+            ANNOUNCEMENT_VERSION,
+        ),
+    )
+    return markdown_file
+
+
+def override_announcements_from_sources(workspace, repo, branch, conn, published_announcements, wiki_page):
+    """Replace proposed announcements with authoritative online copies.
+
+    Discord text comes from the wiki page; the website highlights come from each
+    version's GitHub release page body. Metadata (range_start/head_sha/branch) is
+    reused from the published announcement row when available, so no local git
+    checkout is required.
+    """
+    from repo_manager import sync_down
+
+    wiki = ensure_wiki_checkout(workspace, repo)
+    if wiki is None:
+        print("Wiki unavailable; keeping proposed announcements.")
+        return 0
+    page = wiki / f"{wiki_page}.md"
+    if not page.exists():
+        print(f"Wiki page {wiki_page}.md not found; keeping proposed announcements.")
+        return 0
+    wiki_announcements = sync_down.parse_wiki_announcements(page.read_text(encoding="utf-8"))
+    meta = sync_down.announcement_metadata(published_announcements)
+    count = 0
+    for tag, discord_markdown in wiki_announcements.items():
+        if not discord_markdown.strip():
+            continue
+        info = meta.get(tag, {})
+        tag_branch = info.get("branch") or branch
+        range_start = info.get("range_start") or ""
+        head = info.get("head_sha") or ""
+        highlights = extract_release_note_sections(fetch_github_release_body(repo, tag))
+        write_release_announcement_row(
+            conn, workspace, repo, tag_branch, tag, range_start, head, discord_markdown, highlights
+        )
+        count += 1
+    return count
+
+
+def import_published_data(workspace, repo, branch, website_branch, target_dir, wiki_page):
+    """Sync the published dashboard back into the local DB (merge/upsert)."""
+    from repo_manager import sync_down
+
+    checkout = ensure_pages_checkout(workspace, repo, website_branch)
+    target_rel = Path(target_dir)
+    if target_rel.is_absolute() or ".." in target_rel.parts:
+        raise SystemExit("--target-dir must be a relative path inside the website branch checkout.")
+    index_path = checkout / target_rel / "index.html"
+    if not index_path.exists():
+        raise SystemExit(
+            f"No published dashboard found at {website_branch}:{target_rel.as_posix()}/index.html. "
+            "Has publish-pages run for this repo?"
+        )
+    data = sync_down.extract_static_data(index_path.read_text(encoding="utf-8"))
+    published_announcements = data.get("release_announcements", [])
+    with connect_db(workspace) as conn:
+        commits = sync_down.upsert_commit_reviews(conn, data.get("commit_reviews", []))
+        releases = sync_down.upsert_release_reviews(conn, data.get("release_reviews", []))
+        announcements = sync_down.upsert_release_announcements(conn, published_announcements)
+        overridden = override_announcements_from_sources(
+            workspace, repo, branch, conn, published_announcements, wiki_page
+        )
+    return {
+        "commit_reviews": commits,
+        "release_reviews": releases,
+        "announcements": announcements,
+        "announcements_overridden": overridden,
+    }
+
+
 def publish_pages_content(workspace, repo, website_branch, target_dir):
     from repo_manager.web import export_static_site
 
@@ -2048,6 +2182,19 @@ def cmd_init(args):
     init_db(workspace)
     if args.clone:
         clone_or_fetch(args.repo, workspace)
+    if not args.no_pull:
+        try:
+            summary = import_published_data(
+                workspace, args.repo, args.branch, args.website_branch, args.target_dir, args.wiki_page
+            )
+            print(
+                f"Pulled online data: {summary['commit_reviews']} commit reviews, "
+                f"{summary['release_reviews']} release reviews, "
+                f"{summary['announcements']} announcements "
+                f"({summary['announcements_overridden']} from wiki/release pages)"
+            )
+        except SystemExit as exc:
+            print(f"Skipped pulling online data: {exc}")
     if not args.no_pi_install:
         pi = shutil.which("pi")
         if not pi:
@@ -2660,6 +2807,23 @@ def cmd_publish_pages(args):
     print(f"Published static repo-manager dashboard to {repo}:{args.website_branch}:{target_rel.as_posix()}/")
 
 
+def cmd_pull(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    branch = args.branch or config.get("branch", "main")
+    summary = import_published_data(
+        workspace, repo, branch, args.website_branch, args.target_dir, args.wiki_page
+    )
+    print(f"Synced online data from {repo}:{args.website_branch}:{args.target_dir}/")
+    print(f"  commit reviews:  {summary['commit_reviews']}")
+    print(f"  release reviews: {summary['release_reviews']}")
+    print(
+        f"  announcements:   {summary['announcements']} "
+        f"({summary['announcements_overridden']} replaced from wiki/release pages)"
+    )
+
+
 def cmd_all(args):
     workspace = find_workspace()
     config = load_config(workspace)
@@ -2754,6 +2918,10 @@ def build_parser():
     init.add_argument("--branch", default="main")
     init.add_argument("--clone", action="store_true", help="Clone/fetch the target repo immediately.")
     init.add_argument("--no-pi-install", action="store_true", help="Skip installing this package's Pi skills.")
+    init.add_argument("--no-pull", action="store_true", help="Skip pulling the published online database after init.")
+    init.add_argument("--website-branch", default="website", help="Branch backing the published dashboard to pull from.")
+    init.add_argument("--target-dir", default="docs/repo-manager", help="Directory holding the published dashboard.")
+    init.add_argument("--wiki-page", default="Release-Announcements", help="Wiki page holding real release announcements.")
     init.set_defaults(func=cmd_init)
 
     review = sub.add_parser("review-commit", help="Run commit-review for one commit and save it.")
@@ -2883,6 +3051,14 @@ def build_parser():
     publish_pages.add_argument("--out", help="Output directory for --dry-run. Defaults to .repo-manager/pages-preview in the workspace.")
     publish_pages.add_argument("--open", action=argparse.BooleanOptionalAction, default=True, help="Open the dry-run preview in the default browser.")
     publish_pages.set_defaults(func=cmd_publish_pages)
+
+    pull = sub.add_parser("pull", help="Sync the published online dashboard back into the local database.")
+    pull.add_argument("--repo")
+    pull.add_argument("--branch")
+    pull.add_argument("--website-branch", default="website", help="Branch backing the published dashboard.")
+    pull.add_argument("--target-dir", default="docs/repo-manager", help="Directory holding the published dashboard.")
+    pull.add_argument("--wiki-page", default="Release-Announcements", help="Wiki page holding real release announcements.")
+    pull.set_defaults(func=cmd_pull)
     return parser
 
 

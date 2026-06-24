@@ -36,6 +36,28 @@ repo-manager init lemonade-sdk/lemonade --branch main --clone
 
 After initialization, commands run from that folder do not need `OWNER/REPO`. Pass `--no-pi-install` if you need to initialize without installing Pi skills.
 
+### Onboarding to a repo that already uses repo-manager
+
+If the target repo has already been managed from another machine and its dashboard was published with [`publish-pages`](#github-pages-publishing), you do not need to re-review anything from scratch. `init` automatically pulls the published database so a brand-new machine mirrors the online state:
+
+```bash
+mkdir lemonade-release-review
+cd lemonade-release-review
+repo-manager init lemonade-sdk/lemonade --branch main --clone
+```
+
+This reads the published dashboard from the `website` branch (`docs/repo-manager/index.html`) and restores commit reviews, release reviews, announcements, to-do completion, and read state into a fresh local database. Pass `--no-pull` to skip this and start empty, or `--no-clone`/`--no-pi-install` to skip cloning the target repo or installing Pi skills (the pull itself needs neither).
+
+To refresh an existing workspace later — for example after someone else publishes new reviews — re-run the pull anytime:
+
+```bash
+repo-manager pull
+```
+
+`pull` is a merge: rows from the online copy are inserted or updated by key, and any local-only work you have not published yet is preserved. It is safe to run repeatedly.
+
+**Announcements are special.** repo-manager only ever stores the *proposed* Discord announcement; the *real* one is hand-edited by a maintainer before posting. So `init`/`pull` do not trust the published announcement text. Instead they fetch the real Discord announcement from the repo's wiki page (`Release-Announcements` by default; override with `--wiki-page`) and the website highlights (`## Headline` / `## Breaking Changes`) from each version's GitHub release page. A release with no wiki entry yet (for example an in-progress `vNext`) keeps its proposed draft. Keep the wiki page up to date with the announcements you actually post so onboarding machines get the canonical copy.
+
 Review one commit and save the result to SQLite:
 
 ```bash
@@ -179,6 +201,8 @@ repo-manager publish-pages --dry-run
 The dry run writes `.repo-manager/pages-preview/index.html` and opens it in your default browser by default. Use `--no-open` to only write the files, or `--out PATH` to choose a different preview directory.
 
 The published dashboard shows the saved commit reviews, release reviews, announcements, read status, and to-do completion state as of the publish time. To-do and read-state changes should still be made in the local UI, then republished.
+
+This published copy is also what a new or stale machine syncs from — see [Onboarding to a repo that already uses repo-manager](#onboarding-to-a-repo-that-already-uses-repo-manager) for the `pull` side of this flow.
 
 Workspace state lives under `.repo-manager/` in the initialized folder, including `config.json`, the SQLite database, explicit review artifacts, and the reusable repo checkout.
 
