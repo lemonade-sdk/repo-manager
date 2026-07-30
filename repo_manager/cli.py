@@ -22,6 +22,8 @@ DB_FILE = "repo-manager.sqlite"
 RUBRIC_VERSION = "commit-review-2026-06-09"
 RELEASE_RUBRIC_VERSION = "release-review-2026-06-09"
 ANNOUNCEMENT_VERSION = "release-announcement-2026-06-09"
+PR_RUBRIC_VERSION = "pr-review-2026-07-30"
+PR_REVIEW_COMMENT_MARKER = "<!-- repo-manager:pr-review"
 
 
 def now_iso():
@@ -114,6 +116,13 @@ def ensure_db_schema(conn):
                         WHERE release_highlights_path=''
                         """
                     )
+    for table in ("commit_reviews", "release_reviews", "release_announcements", "pr_reviews"):
+        try:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            continue
+        if columns and "generation_seconds" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN generation_seconds REAL NOT NULL DEFAULT 0")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_todos (
@@ -150,6 +159,46 @@ def ensure_db_schema(conn):
           issue_kind TEXT NOT NULL,
           issue_number INTEGER NOT NULL,
           issue_url TEXT NOT NULL DEFAULT '',
+          synced_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_reviews (
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL DEFAULT '',
+          pr_title TEXT NOT NULL DEFAULT '',
+          author TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          attention_level TEXT NOT NULL DEFAULT '',
+          scope_verdict TEXT NOT NULL DEFAULT '',
+          second_review_required INTEGER NOT NULL DEFAULT 0,
+          documentation_status TEXT NOT NULL DEFAULT '',
+          alignment_flags TEXT NOT NULL DEFAULT '[]',
+          breaking_changes TEXT NOT NULL DEFAULT '[]',
+          suggested_reviewers TEXT NOT NULL DEFAULT '[]',
+          maintainer_needed_areas TEXT NOT NULL DEFAULT '[]',
+          raw_output TEXT NOT NULL,
+          json_path TEXT NOT NULL DEFAULT '',
+          reviewed_at TEXT NOT NULL,
+          skill_version TEXT NOT NULL,
+          rubric_version TEXT NOT NULL,
+          generation_seconds REAL NOT NULL DEFAULT 0,
+          PRIMARY KEY (repo, pr_number, rubric_version)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_review_comments (
+          comment_key TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          comment_id INTEGER NOT NULL,
+          comment_url TEXT NOT NULL DEFAULT '',
+          posted_head_sha TEXT NOT NULL DEFAULT '',
           synced_at TEXT NOT NULL
         )
         """
@@ -692,6 +741,20 @@ def read_json(path):
         return json.load(f)
 
 
+def stamp_generation_seconds(json_file, started):
+    """Record wall-clock generation time in the JSON artifact; returns the seconds."""
+    seconds = round(time.monotonic() - started, 1)
+    path = Path(json_file)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return seconds
+    if isinstance(data, dict):
+        data["generation_seconds"] = seconds
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return seconds
+
+
 def write_text(path, content):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -717,9 +780,10 @@ def store_commit_review(workspace, repo, branch, release_tag, range_start, commi
             INSERT INTO commit_reviews (
               repo, commit_sha, branch, tag_start, range_start, pr_number, author, summary,
               verdict, verdict_reason, maintainer_todos, shout_outs, raw_output, json_path,
-              reviewed_at, skill_version, rubric_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              reviewed_at, skill_version, rubric_version, generation_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, commit_sha, rubric_version) DO UPDATE SET
+              generation_seconds=excluded.generation_seconds,
               branch=excluded.branch,
               tag_start=excluded.tag_start,
               range_start=excluded.range_start,
@@ -753,6 +817,7 @@ def store_commit_review(workspace, repo, branch, release_tag, range_start, commi
                 now_iso(),
                 __version__,
                 RUBRIC_VERSION,
+                float(data.get("generation_seconds") or 0),
             ),
         )
 
@@ -764,6 +829,855 @@ def review_exists(workspace, repo, commit):
             (repo, commit, RUBRIC_VERSION),
         ).fetchone()
     return row is not None
+
+
+def pr_artifact_path(workspace, repo, pr_number):
+    base = artifact_dir(workspace, repo, "prs")
+    return base / f"pr-{pr_number}.pr-review.json"
+
+
+def pr_review_feedback_file(workspace, repo, pr_number):
+    base = artifact_dir(workspace, repo, "prs")
+    pending_dir = base / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    return pending_dir / f"pr-{pr_number}.pr-review-feedback.json"
+
+
+def load_pr_review_feedback(workspace, repo, pr_number):
+    path = pr_review_feedback_file(workspace, repo, pr_number)
+    if not path.exists():
+        return ""
+    try:
+        data = read_json(path)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return build_release_review_feedback(data.get("errors", ""), data.get("artifact", ""))
+
+
+def save_pr_review_feedback(workspace, repo, pr_number, error_list, artifact_raw):
+    path = pr_review_feedback_file(workspace, repo, pr_number)
+    path.write_text(
+        json.dumps({"errors": error_list, "artifact": artifact_raw, "saved_at": now_iso()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def clear_pr_review_feedback(workspace, repo, pr_number):
+    path = pr_review_feedback_file(workspace, repo, pr_number)
+    if path.exists():
+        path.unlink()
+
+
+def gh_cli_json(args, check=True):
+    if not shutil.which("gh"):
+        raise SystemExit("`gh` was not found on PATH; install and authenticate GitHub CLI.")
+    result = run(["gh", *args], check=check)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"GitHub CLI returned invalid JSON for gh {' '.join(args)}: {exc}")
+
+
+PR_METADATA_FIELDS = "number,title,state,isDraft,headRefOid,author,url"
+
+
+def pr_author_handle(meta):
+    author = meta.get("author") or {}
+    login = author.get("login") if isinstance(author, dict) else str(author)
+    return f"@{login}" if login else ""
+
+
+def fetch_pr_metadata(repo, pr_number):
+    data = gh_cli_json(["pr", "view", str(pr_number), "--repo", repo, "--json", PR_METADATA_FIELDS])
+    if not data:
+        raise SystemExit(f"Could not fetch PR #{pr_number} from {repo}.")
+    return data
+
+
+def list_open_prs(repo, limit):
+    data = gh_cli_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(limit),
+            "--json",
+            "number,title,isDraft,headRefOid,author",
+        ]
+    )
+    return data or []
+
+
+DISCORD_ANNOTATION = re.compile(r"\s*\(discord:[^)]*\)", re.IGNORECASE)
+VALID_HANDLE = re.compile(r"^@[A-Za-z0-9-]+$")
+
+PR_DOC_VOCAB = ("contribute.md", "philosophy.md")
+PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
+PR_SCOPE_VOCAB = ("major", "minor")
+PR_SURFACE_VOCAB = ("api", "ux")
+PR_APPROVAL_VOCAB = ("approved", "not-approved", "unclear")
+PR_DESCRIPTION_VOCAB = ("accurate", "discrepancies", "missing")
+NO_ACTION_PATTERN = re.compile(r"^\s*no(?:ne)?\b.{0,30}\b(?:required|needed|necessary)", re.IGNORECASE)
+
+
+def clean_github_handle(value):
+    text = DISCORD_ANNOTATION.sub("", str(value or "")).strip().lstrip("@").strip()
+    return f"@{text}" if text else ""
+
+
+def coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in ("true", "yes", "y", "1"):
+        return True
+    if text in ("false", "no", "n", "0"):
+        return False
+    return None
+
+
+def text_of(entry, *keys):
+    for key in keys:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value not in (None, "", [], {}):
+            return str(value).strip()
+    return ""
+
+
+def normalize_pr_review_data(data):
+    """Coerce Pi's output into the documented shape and derive the computed fields.
+
+    `second_review_required` and `attention_level` are always computed here from the
+    structured lists, never trusted from Pi, so the skill's prose can never contradict them.
+    """
+    description = data.get("description_check") if isinstance(data.get("description_check"), dict) else {}
+    discrepancies = []
+    for entry in description.get("discrepancies") or []:
+        if isinstance(entry, dict):
+            discrepancies.append(
+                {
+                    "described": text_of(entry, "described", "claim", "claimed"),
+                    "actual": text_of(entry, "actual", "reality", "found"),
+                    "action": text_of(entry, "action", "todo", "fix"),
+                    "evidence": text_of(entry, "evidence"),
+                }
+            )
+        elif str(entry).strip():
+            discrepancies.append({"described": "", "actual": str(entry).strip(), "action": "", "evidence": ""})
+    data["description_check"] = {
+        "verdict": text_of(description, "verdict").lower(),
+        "notes": text_of(description, "notes", "assessment"),
+        "discrepancies": discrepancies,
+    }
+
+    flags = []
+    for entry in data.get("alignment_flags") or []:
+        if isinstance(entry, dict):
+            flags.append(
+                {
+                    "doc": text_of(entry, "doc", "document", "guide").lower(),
+                    "section": text_of(entry, "section", "heading"),
+                    "concern": text_of(entry, "concern", "text", "issue", "description"),
+                    "action": text_of(entry, "action", "todo", "fix"),
+                    "evidence": text_of(entry, "evidence"),
+                }
+            )
+        elif str(entry).strip():
+            flags.append({"doc": "", "section": "", "concern": str(entry).strip(), "action": "", "evidence": ""})
+    data["alignment_flags"] = flags
+
+    documentation = data.get("documentation") if isinstance(data.get("documentation"), dict) else {}
+    gaps = []
+    for entry in documentation.get("gaps") or []:
+        if isinstance(entry, dict):
+            gaps.append(
+                {
+                    "what": text_of(entry, "what", "text", "gap", "description"),
+                    "where": text_of(entry, "where", "path", "file"),
+                    "policy": text_of(entry, "policy", "rule"),
+                    "action": text_of(entry, "action", "todo", "fix"),
+                }
+            )
+        elif str(entry).strip():
+            gaps.append({"what": str(entry).strip(), "where": "", "policy": "", "action": ""})
+    data["documentation"] = {
+        "status": text_of(documentation, "status").lower(),
+        "gaps": gaps,
+    }
+
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    scope_verdict = text_of(scope, "verdict").lower()
+    data["scope"] = {
+        "verdict": scope_verdict,
+        "rationale": text_of(scope, "rationale", "reason"),
+        "second_review_required": scope_verdict == "major",
+    }
+
+    breaking = []
+    for entry in data.get("breaking_changes") or []:
+        if isinstance(entry, dict):
+            breaking.append(
+                {
+                    "change": text_of(entry, "change", "text", "summary", "description"),
+                    "surface": text_of(entry, "surface").lower(),
+                    "documented": coerce_bool(entry.get("documented")),
+                    "documentation_evidence": text_of(entry, "documentation_evidence"),
+                    "maintainer_approval": text_of(entry, "maintainer_approval", "approval").lower(),
+                    "approval_evidence": text_of(entry, "approval_evidence"),
+                    "action": text_of(entry, "action", "todo", "fix"),
+                }
+            )
+        elif str(entry).strip():
+            breaking.append(
+                {
+                    "change": str(entry).strip(),
+                    "surface": "",
+                    "documented": None,
+                    "documentation_evidence": "",
+                    "maintainer_approval": "",
+                    "approval_evidence": "",
+                    "action": "",
+                }
+            )
+    data["breaking_changes"] = breaking
+
+    reviewers = []
+    seen = set()
+    for entry in data.get("suggested_reviewers") or []:
+        if isinstance(entry, dict):
+            item = {
+                "handle": clean_github_handle(text_of(entry, "handle", "reviewer", "login", "maintainer")),
+                "subject_area": text_of(entry, "subject_area", "area"),
+                "reason": text_of(entry, "reason", "why"),
+            }
+        else:
+            item = {"handle": clean_github_handle(entry), "subject_area": "", "reason": ""}
+        if not item["handle"] or item["handle"].lower() in seen:
+            continue
+        seen.add(item["handle"].lower())
+        reviewers.append(item)
+    data["suggested_reviewers"] = reviewers
+
+    areas = data.get("maintainer_needed_areas")
+    if isinstance(areas, str):
+        areas = [areas]
+    data["maintainer_needed_areas"] = [str(area).strip() for area in (areas or []) if str(area).strip()]
+
+    data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+
+    uncleared = [
+        change for change in breaking
+        if change["documented"] is not True or change["maintainer_approval"] != "approved"
+    ]
+    reasons = []
+    if data["scope"]["second_review_required"]:
+        reasons.append("major scope")
+    if uncleared:
+        reasons.append(f"{len(uncleared)} breaking change(s) without docs or maintainer sign-off")
+    elif breaking:
+        reasons.append(f"{len(breaking)} documented, maintainer-approved breaking change(s)")
+    if flags:
+        reasons.append(f"{len(flags)} alignment issue(s)")
+    if data["documentation"]["status"] == "gaps":
+        reasons.append(f"{len(gaps)} documentation gap(s)")
+    verdict = data["description_check"]["verdict"]
+    if verdict == "discrepancies":
+        reasons.append("PR description does not match the diff")
+    elif verdict == "missing":
+        reasons.append("PR description is missing")
+    data["attention_reasons"] = reasons
+
+    if data["scope"]["second_review_required"] or uncleared:
+        data["attention_level"] = "High"
+    elif breaking or flags or data["documentation"]["status"] == "gaps" or verdict in ("discrepancies", "missing"):
+        data["attention_level"] = "Elevated"
+    else:
+        data["attention_level"] = "Routine"
+    return data
+
+
+def pr_review_validation_errors(data, pr_author):
+    """Structural checks that keep the artifact machine-actionable — style stays the skill's job.
+
+    The same false-green/false-red guards as the release review: a status that contradicts its
+    list, or an empty breaking-changes list whose prose still describes breaks, is the output
+    that misleads a reviewer, so those contradictions are the hard gate.
+    """
+    errors = []
+    if not str(data.get("summary", "")).strip():
+        errors.append("summary is required: one or two sentences on what the PR does.")
+
+    description = data.get("description_check", {})
+    if description.get("verdict") not in PR_DESCRIPTION_VOCAB:
+        errors.append("description_check.verdict must be exactly 'accurate', 'discrepancies', or 'missing'.")
+    if not description.get("notes"):
+        errors.append(
+            "description_check.notes is required: one or two sentences on how the author's description "
+            "compares to the diff."
+        )
+    discrepancies = description.get("discrepancies", [])
+    if description.get("verdict") == "discrepancies" and not discrepancies:
+        errors.append("description_check.verdict is 'discrepancies' but the discrepancies list is empty.")
+    elif description.get("verdict") != "discrepancies" and discrepancies:
+        errors.append(
+            "description_check.discrepancies is non-empty but the verdict is not 'discrepancies' — "
+            "set the verdict or drop the list."
+        )
+    for item in discrepancies:
+        if not (item.get("described") or item.get("actual")):
+            errors.append("Every description discrepancy needs 'described' and/or 'actual' filled in.")
+            break
+    for item in discrepancies:
+        if not item.get("action"):
+            errors.append("Every description discrepancy needs an imperative 'action' that resolves it.")
+            break
+
+    scope = data.get("scope", {})
+    if scope.get("verdict") not in PR_SCOPE_VOCAB:
+        errors.append("scope.verdict must be exactly 'major' or 'minor'.")
+    if not scope.get("rationale"):
+        errors.append("scope.rationale is required: name the surface that makes the scope major or minor.")
+
+    documentation = data.get("documentation", {})
+    status = documentation.get("status")
+    gaps = documentation.get("gaps", [])
+    if status not in PR_DOC_STATUS_VOCAB:
+        errors.append("documentation.status must be 'adequate', 'gaps', or 'not-applicable'.")
+    elif status == "gaps" and not gaps:
+        errors.append("documentation.status is 'gaps' but documentation.gaps is empty — list each gap.")
+    elif status != "gaps" and gaps:
+        errors.append(
+            "documentation.gaps is non-empty but status is not 'gaps' — set status to 'gaps' or drop the list."
+        )
+    for gap in gaps:
+        if not gap.get("what"):
+            errors.append("Every documentation gap needs a non-empty 'what' describing the undocumented change.")
+            break
+    for gap in gaps:
+        if not gap.get("action"):
+            errors.append("Every documentation gap needs an imperative 'action' that closes it.")
+            break
+
+    for flag in data.get("alignment_flags", []):
+        if flag.get("doc") not in PR_DOC_VOCAB:
+            errors.append("Every alignment flag needs doc set to 'contribute.md' or 'philosophy.md'.")
+            break
+    for flag in data.get("alignment_flags", []):
+        if not flag.get("concern") or not flag.get("evidence"):
+            errors.append("Every alignment flag needs a non-empty concern and evidence.")
+            break
+    for flag in data.get("alignment_flags", []):
+        if not flag.get("action"):
+            errors.append("Every alignment flag needs an imperative 'action' that resolves it.")
+            break
+
+    breaking = data.get("breaking_changes", [])
+    for change in breaking:
+        if not change.get("change"):
+            errors.append("Every breaking change needs a non-empty 'change' statement.")
+            break
+    for change in breaking:
+        if change.get("surface") not in PR_SURFACE_VOCAB:
+            errors.append("Every breaking change needs surface set to exactly 'api' or 'ux'.")
+            break
+    for change in breaking:
+        if change.get("documented") is None:
+            errors.append("Every breaking change needs documented set to true or false.")
+            break
+    for change in breaking:
+        if change.get("maintainer_approval") not in PR_APPROVAL_VOCAB:
+            errors.append(
+                "Every breaking change needs maintainer_approval set to 'approved', 'not-approved', or 'unclear'."
+            )
+            break
+    for change in breaking:
+        cleared = change.get("documented") is True and change.get("maintainer_approval") == "approved"
+        if not cleared and not change.get("action"):
+            errors.append(
+                "Every breaking change that is undocumented or lacks maintainer approval needs an "
+                "imperative 'action' that clears it."
+            )
+            break
+    evidence = data.get("evidence", {})
+    breaking_prose = f"{evidence.get('breaking_changes', '')} {data.get('summary', '')}"
+    if not breaking and HAS_BREAKING_PATTERN.search(breaking_prose) and not NO_BREAKING_PATTERN.search(breaking_prose):
+        errors.append(
+            "breaking_changes is empty but the evidence or summary describes breaking changes — "
+            "enumerate each one in the breaking_changes list."
+        )
+
+    all_items = (
+        discrepancies
+        + data.get("alignment_flags", [])
+        + gaps
+        + breaking
+    )
+    for item in all_items:
+        if NO_ACTION_PATTERN.match(item.get("action") or ""):
+            errors.append(
+                "An item whose action is 'no action required' is not an issue — drop it from the list; "
+                "anything checked and found fine belongs in the section's evidence entry instead."
+            )
+            break
+
+    author_key = str(pr_author or "").lower()
+    for reviewer in data.get("suggested_reviewers", []):
+        if not VALID_HANDLE.match(reviewer.get("handle", "")):
+            errors.append(
+                f"Suggested reviewer handle {reviewer.get('handle', '')!r} is not a plain GitHub handle — "
+                "use '@handle' only; 'Maintainer Needed' areas belong in maintainer_needed_areas."
+            )
+        elif author_key and reviewer["handle"].lower() == author_key:
+            errors.append(
+                f"Suggested reviewer {reviewer['handle']} is the PR author — pick another maintainer from the "
+                "area's table row, or record the area in maintainer_needed_areas."
+            )
+        elif not reviewer.get("subject_area") or not reviewer.get("reason"):
+            errors.append("Every suggested reviewer needs a subject_area and a reason.")
+    if not data.get("suggested_reviewers") and not data.get("maintainer_needed_areas"):
+        errors.append(
+            "suggested_reviewers and maintainer_needed_areas are both empty — every area the PR touches "
+            "either has maintainers to suggest or is a recorded maintainer gap."
+        )
+
+    for key in ("alignment", "documentation", "scope", "breaking_changes", "reviewers"):
+        if not str(evidence.get(key, "")).strip():
+            errors.append(
+                f"evidence.{key} is required: one or two sentences of synthesis "
+                "(or 'none observed' when that is the honest answer)."
+            )
+    return errors
+
+
+def store_pr_review(workspace, repo, meta, data, json_file):
+    raw = json.dumps(data, indent=2)
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            INSERT INTO pr_reviews (
+              repo, pr_number, head_sha, pr_title, author, summary, attention_level,
+              scope_verdict, second_review_required, documentation_status, alignment_flags,
+              breaking_changes, suggested_reviewers, maintainer_needed_areas, raw_output,
+              json_path, reviewed_at, skill_version, rubric_version, generation_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
+              generation_seconds=excluded.generation_seconds,
+              head_sha=excluded.head_sha,
+              pr_title=excluded.pr_title,
+              author=excluded.author,
+              summary=excluded.summary,
+              attention_level=excluded.attention_level,
+              scope_verdict=excluded.scope_verdict,
+              second_review_required=excluded.second_review_required,
+              documentation_status=excluded.documentation_status,
+              alignment_flags=excluded.alignment_flags,
+              breaking_changes=excluded.breaking_changes,
+              suggested_reviewers=excluded.suggested_reviewers,
+              maintainer_needed_areas=excluded.maintainer_needed_areas,
+              raw_output=excluded.raw_output,
+              json_path=excluded.json_path,
+              reviewed_at=excluded.reviewed_at,
+              skill_version=excluded.skill_version
+            """,
+            (
+                repo,
+                meta["number"],
+                meta.get("headRefOid", ""),
+                meta.get("title", ""),
+                pr_author_handle(meta),
+                data.get("summary", ""),
+                data.get("attention_level", ""),
+                data.get("scope", {}).get("verdict", ""),
+                1 if data.get("scope", {}).get("second_review_required") else 0,
+                data.get("documentation", {}).get("status", ""),
+                json.dumps(data.get("alignment_flags", [])),
+                json.dumps(data.get("breaking_changes", [])),
+                json.dumps(data.get("suggested_reviewers", [])),
+                json.dumps(data.get("maintainer_needed_areas", [])),
+                raw,
+                str(json_file),
+                now_iso(),
+                __version__,
+                PR_RUBRIC_VERSION,
+                float(data.get("generation_seconds") or 0),
+            ),
+        )
+
+
+def latest_pr_review(workspace, repo, pr_number):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT * FROM pr_reviews WHERE repo=? AND pr_number=? AND rubric_version=?",
+            (repo, pr_number, PR_RUBRIC_VERSION),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def generate_pr_review(workspace, repo, meta):
+    number = meta["number"]
+    head = meta.get("headRefOid", "")
+    author = pr_author_handle(meta)
+    json_file = pr_artifact_path(workspace, repo, number)
+    feedback = load_pr_review_feedback(workspace, repo, number)
+    if feedback:
+        print("Resuming with validation feedback from a previous interrupted pr-review run.", flush=True)
+    pending_dir = json_file.parent / ".pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    max_attempts = 3
+    data = None
+    started = time.monotonic()
+    for attempt in range(1, max_attempts + 1):
+        pending_json = pending_dir / f"{json_file.stem}.{int(time.time() * 1000)}.pending.json"
+        prompt = (
+            f"/skill:pr-review {repo} {number}\n\n"
+            f"PR: #{number} — {meta.get('title', '')}\n"
+            f"Head SHA: {head}\n"
+            f"Author: {author} (never suggest the author as a reviewer)\n\n"
+            f"Write the machine-readable JSON result to: {pending_json}\n\n"
+            f"{feedback}"
+        )
+        try:
+            output = run_pi("pr-review", prompt, workspace)
+        except SystemExit as exc:
+            if exc.code in (130, None):
+                raise
+            if attempt == max_attempts:
+                raise
+            print(f"Pi run failed (exit {exc.code}); retrying with the same instructions.", flush=True)
+            continue
+        if not pending_json.exists() and write_json_artifact_from_output(pending_json, output):
+            print(f"Wrote pr-review artifact from Pi output: {pending_json}")
+        artifact_raw = ""
+        errors = []
+        candidate = None
+        if pending_json.exists():
+            artifact_raw = pending_json.read_text(encoding="utf-8")
+            candidate = extract_json_object(artifact_raw)
+            if candidate is None:
+                errors.append("Artifact file must contain a valid JSON object.")
+            else:
+                candidate = normalize_pr_review_data(candidate)
+                errors.extend(pr_review_validation_errors(candidate, author))
+        else:
+            errors.append(f"Expected pr-review JSON file was not created: {pending_json}")
+        if not errors:
+            data = candidate
+            break
+        error_list = "\n".join(f"- {error}" for error in errors)
+        if attempt == max_attempts:
+            raise SystemExit(f"PR review failed validation after {max_attempts} attempts:\n{error_list}")
+        print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
+        save_pr_review_feedback(workspace, repo, number, error_list, artifact_raw)
+        feedback = build_release_review_feedback(error_list, artifact_raw)
+    clear_pr_review_feedback(workspace, repo, number)
+    data["repo"] = repo
+    data["pr_number"] = number
+    data["head_sha"] = head
+    data["title"] = meta.get("title", "")
+    data["author"] = author
+    data["generation_seconds"] = round(time.monotonic() - started, 1)
+    json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    store_pr_review(workspace, repo, meta, data, json_file)
+    reviewers = ", ".join(item["handle"] for item in data.get("suggested_reviewers", [])) or "none"
+    print(f"PR #{number}: attention {data['attention_level']}, scope {data['scope']['verdict']}, suggested reviewers: {reviewers}")
+    return data
+
+
+def pr_review_data_from_row(row):
+    if row.get("json_path") and Path(row["json_path"]).exists():
+        parsed = extract_json_object(Path(row["json_path"]).read_text(encoding="utf-8"))
+        if parsed is not None:
+            return normalize_pr_review_data(parsed)
+    parsed = extract_json_object(row.get("raw_output") or "")
+    if parsed is not None:
+        return normalize_pr_review_data(parsed)
+    return None
+
+
+ATTENTION_MEANINGS = {
+    "High": "a core maintainer should look at this before it merges",
+    "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
+    "Routine": "nothing flagged; a standard review pass is enough",
+}
+
+
+def attention_display(data):
+    level = data.get("attention_level", "")
+    meaning = ATTENTION_MEANINGS.get(level, "")
+    text = f"{level} — {meaning}" if meaning else level
+    reasons = "; ".join(data.get("attention_reasons") or [])
+    if reasons:
+        text += f" ({reasons})"
+    return text
+
+
+def display_handle(handle):
+    return str(handle or "").lstrip("@")
+
+
+def breaking_change_cleared(change):
+    return change.get("documented") is True and change.get("maintainer_approval") == "approved"
+
+
+def breaking_change_status(change):
+    documented = "documented in this PR" if change.get("documented") else "not documented in this PR"
+    approval = change.get("maintainer_approval") or "unclear"
+    if approval == "approved":
+        approval_text = "maintainer-approved"
+    elif approval == "not-approved":
+        approval_text = "not maintainer-approved"
+    else:
+        approval_text = "needs maintainer confirmation"
+    return f"{documented}; {approval_text}"
+
+
+def render_pr_review_comment(repo, pr_number, data, head_sha):
+    marker_payload = json.dumps(
+        {"repo": repo, "pr_number": pr_number, "rubric_version": PR_RUBRIC_VERSION},
+        sort_keys=True,
+    )
+    scope = data.get("scope") or {}
+    lines = [
+        f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->",
+        "**[AI-assisted review]** Automated pre-review from repo-manager — flags for the human reviewer, not a replacement for one.",
+        "",
+        f"**Attention level:** {attention_display(data)}",
+    ]
+    description = data.get("description_check") or {}
+    if description.get("verdict") in ("discrepancies", "missing"):
+        lines += ["", "### Author's description vs. the diff", ""]
+        if description.get("notes"):
+            notes = description["notes"]
+            lines.append(notes[:1].upper() + notes[1:])
+        if description.get("verdict") == "missing" and not (description.get("discrepancies") or []):
+            lines.append("- [ ] Ask the author to describe the change — the PR has no usable description.")
+        for item in description.get("discrepancies") or []:
+            lines.append(f"- [ ] {item.get('action') or 'Reconcile the description with the diff.'}")
+            if item.get("described"):
+                lines.append(f"  - Described: {item['described']}")
+            if item.get("actual"):
+                lines.append(f"  - In the diff: {item['actual']}")
+            if item.get("evidence"):
+                lines.append(f"  - Reference: {item['evidence']}")
+    flags = data.get("alignment_flags") or []
+    if flags:
+        lines += ["", "### Alignment issues", ""]
+        for flag in flags:
+            where = " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
+            lines.append(f"- [ ] {flag.get('action') or flag.get('concern', '')}")
+            if flag.get("concern"):
+                prefix = f"{where}: " if where else ""
+                lines.append(f"  - Why: {prefix}{flag['concern']}")
+            if flag.get("evidence"):
+                lines.append(f"  - Reference: {flag['evidence']}")
+    documentation = data.get("documentation") or {}
+    if documentation.get("status") == "gaps":
+        lines += ["", "### Documentation gaps", ""]
+        for gap in documentation.get("gaps") or []:
+            lines.append(f"- [ ] {gap.get('action') or gap.get('what', '')}")
+            if gap.get("what"):
+                lines.append(f"  - Gap: {gap['what']}")
+            if gap.get("where"):
+                lines.append(f"  - Where: `{gap['where']}`")
+            if gap.get("policy"):
+                lines.append(f"  - Why: {gap['policy']}")
+    lines += ["", "### Scope", "", f"**{scope.get('verdict', '')}** — {scope.get('rationale', '')}"]
+    breaking = data.get("breaking_changes") or []
+    if breaking:
+        lines += ["", "### Breaking changes", ""]
+        for change in breaking:
+            summary = f"({change.get('surface', '')}) {change.get('change', '')}"
+            if breaking_change_cleared(change):
+                lines.append(f"- {summary} — {breaking_change_status(change)}")
+                continue
+            lines.append(f"- [ ] {change.get('action') or 'Document this break and get a maintainer sign-off.'}")
+            lines.append(f"  - Change: {summary}")
+            lines.append(f"  - Status: {breaking_change_status(change)}")
+    reviewers = data.get("suggested_reviewers") or []
+    areas = data.get("maintainer_needed_areas") or []
+    if reviewers or areas:
+        lines += ["", "### Suggested reviewers", ""]
+        for item in reviewers:
+            lines.append(
+                f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}) — {item.get('reason', '')}"
+            )
+        for area in areas:
+            lines.append(f"- No maintainer listed for: {area}")
+    lines += [
+        "",
+        f"_Reviewed at head `{(head_sha or '')[:7]}` by repo-manager pr-review. "
+        f"Regenerate with `repo-manager review-pr {pr_number}`._",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def pr_comment_key(repo, pr_number):
+    return f"{repo}|{pr_number}|{PR_RUBRIC_VERSION}"
+
+
+def pr_comment_mapping(workspace, repo, pr_number):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT * FROM pr_review_comments WHERE comment_key=?",
+            (pr_comment_key(repo, pr_number),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_pr_comment_mapping(workspace, repo, pr_number, comment, head_sha):
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            INSERT INTO pr_review_comments
+            (comment_key, repo, pr_number, comment_id, comment_url, posted_head_sha, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(comment_key) DO UPDATE SET
+              comment_id=excluded.comment_id,
+              comment_url=excluded.comment_url,
+              posted_head_sha=excluded.posted_head_sha,
+              synced_at=excluded.synced_at
+            """,
+            (
+                pr_comment_key(repo, pr_number),
+                repo,
+                pr_number,
+                comment.get("id"),
+                comment.get("html_url", ""),
+                head_sha,
+                now_iso(),
+            ),
+        )
+
+
+def find_pr_review_comment(workspace, repo, pr_number):
+    mapping = pr_comment_mapping(workspace, repo, pr_number)
+    if mapping:
+        comment = gh_json([f"repos/{repo}/issues/comments/{mapping['comment_id']}"], check=False)
+        if comment and comment.get("id"):
+            return comment
+    comments = gh_json(
+        ["--method", "GET", f"repos/{repo}/issues/{pr_number}/comments", "-f", "per_page=100"],
+        check=False,
+    )
+    for comment in comments or []:
+        if str(comment.get("body", "")).startswith(PR_REVIEW_COMMENT_MARKER):
+            return comment
+    return None
+
+
+def post_pr_review(workspace, repo, pr_number, dry_run=False):
+    """Post or update the stored PR review as a marker-tagged PR comment. Returns a result dict."""
+    row = latest_pr_review(workspace, repo, pr_number)
+    if not row:
+        return {
+            "ok": False,
+            "error": f"No stored review for PR #{pr_number}. Run `repo-manager review-pr {pr_number}` first.",
+        }
+    data = pr_review_data_from_row(row)
+    if data is None:
+        return {"ok": False, "error": f"Stored review for PR #{pr_number} could not be parsed."}
+    warnings = []
+    meta = fetch_pr_metadata(repo, pr_number)
+    live_head = meta.get("headRefOid", "")
+    if live_head and row.get("head_sha") and live_head != row["head_sha"]:
+        warnings.append(
+            f"PR head has moved since the review ({row['head_sha'][:7]} -> {live_head[:7]}); "
+            f"consider regenerating with `repo-manager review-pr {pr_number}`."
+        )
+    body = render_pr_review_comment(repo, pr_number, data, row.get("head_sha", ""))
+    existing = find_pr_review_comment(workspace, repo, pr_number)
+    if dry_run:
+        action = "update" if existing else "create"
+        return {"ok": True, "action": action, "dry_run": True, "body": body, "warnings": warnings}
+    if existing:
+        comment = gh_json(
+            ["--method", "PATCH", f"repos/{repo}/issues/comments/{existing['id']}", "-f", f"body={body}"]
+        )
+        action = "updated"
+    else:
+        comment = gh_json(
+            ["--method", "POST", f"repos/{repo}/issues/{pr_number}/comments", "-f", f"body={body}"]
+        )
+        action = "created"
+    if not comment or not comment.get("id"):
+        return {"ok": False, "error": "GitHub did not return the posted comment.", "warnings": warnings}
+    save_pr_comment_mapping(workspace, repo, pr_number, comment, row.get("head_sha", ""))
+    return {"ok": True, "action": action, "url": comment.get("html_url", ""), "warnings": warnings}
+
+
+def request_pr_reviewers(workspace, repo, pr_number, handles=None, dry_run=False):
+    """Request the stored suggested reviewers (or an explicit list) on GitHub. Returns a result dict."""
+    warnings = []
+    if handles:
+        suggestions = [
+            {"handle": clean_github_handle(handle), "subject_area": "", "reason": "requested explicitly"}
+            for handle in handles
+            if clean_github_handle(handle)
+        ]
+    else:
+        row = latest_pr_review(workspace, repo, pr_number)
+        if not row:
+            return {
+                "ok": False,
+                "error": f"No stored review for PR #{pr_number}. Run `repo-manager review-pr {pr_number}` "
+                "first, or pass --reviewers.",
+            }
+        data = pr_review_data_from_row(row) or {}
+        suggestions = data.get("suggested_reviewers", [])
+        for area in data.get("maintainer_needed_areas", []):
+            warnings.append(f"No maintainer listed for: {area}")
+    meta = gh_cli_json(["pr", "view", str(pr_number), "--repo", repo, "--json", "author,reviewRequests,reviews"])
+    if not meta:
+        return {"ok": False, "error": f"Could not fetch PR #{pr_number} from {repo}.", "warnings": warnings}
+    author = pr_author_handle(meta).lower()
+    involved = set()
+    for request in meta.get("reviewRequests") or []:
+        login = request.get("login") or request.get("slug") or ""
+        if login:
+            involved.add(login.lower())
+    for review in meta.get("reviews") or []:
+        login = (review.get("author") or {}).get("login") or ""
+        if login:
+            involved.add(login.lower())
+    to_request, skipped = [], []
+    for item in suggestions:
+        handle = item.get("handle", "")
+        if not VALID_HANDLE.match(handle):
+            skipped.append({"handle": handle, "reason": "not a plain GitHub handle"})
+        elif handle.lower() == author:
+            skipped.append({"handle": handle, "reason": "PR author"})
+        elif handle.lstrip("@").lower() in involved:
+            skipped.append({"handle": handle, "reason": "already requested or reviewed"})
+        else:
+            to_request.append(item)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "to_request": to_request, "skipped": skipped, "warnings": warnings}
+    requested, failed = [], []
+    for item in to_request:
+        login = item["handle"].lstrip("@")
+        result = gh_json(
+            [
+                "--method",
+                "POST",
+                f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
+                "-f",
+                f"reviewers[]={login}",
+            ],
+            check=False,
+        )
+        if result:
+            requested.append(item["handle"])
+        else:
+            failed.append({"handle": item["handle"], "reason": "GitHub rejected the request (not a collaborator?)"})
+    return {"ok": True, "requested": requested, "skipped": skipped, "failed": failed, "warnings": warnings}
 
 
 def list_commits(repo, workspace, branch, range_start):
@@ -2222,8 +3136,10 @@ def cmd_review_commit(args):
         f"Write the machine-readable JSON result to: {json_file}\n"
         "The JSON must match the schema required by the skill."
     )
+    started = time.monotonic()
     run_pi("commit-review", prompt, workspace)
     require_files(json_file)
+    stamp_generation_seconds(json_file, started)
     range_start = args.since or (infer_range_start(repo, workspace, release_tag) if release_tag else "")
     store_commit_review(workspace, repo, branch, release_tag, range_start, args.commit, json_file)
 
@@ -2249,9 +3165,57 @@ def cmd_sweep(args):
             f"Write the machine-readable JSON result to: {json_file}\n"
             "The JSON must match the schema required by the skill."
         )
+        started = time.monotonic()
         run_pi("commit-review", prompt, workspace)
         require_files(json_file)
+        stamp_generation_seconds(json_file, started)
         store_commit_review(workspace, repo, branch, release_tag, range_start, commit, json_file)
+
+
+def cmd_review_pr(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    meta = fetch_pr_metadata(repo, args.pr_number)
+    if str(meta.get("state", "")).upper() != "OPEN":
+        print(f"Warning: PR #{args.pr_number} is {meta.get('state', 'unknown').lower()}, not open.")
+    if meta.get("isDraft"):
+        print(f"Warning: PR #{args.pr_number} is a draft.")
+    generate_pr_review(workspace, repo, meta)
+
+
+def cmd_sweep_prs(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    prs = list_open_prs(repo, args.limit)
+    prs.sort(key=lambda meta: meta["number"])
+    print(f"Found {len(prs)} open PRs in {repo}")
+    generated, skipped, failed = 0, 0, []
+    for meta in prs:
+        number = meta["number"]
+        if meta.get("isDraft") and not args.include_drafts:
+            print(f"Skipping draft PR #{number}")
+            skipped += 1
+            continue
+        existing = latest_pr_review(workspace, repo, number)
+        if existing and existing.get("head_sha") == meta.get("headRefOid") and not args.force:
+            print(f"Skipping PR #{number} (review current at {meta.get('headRefOid', '')[:7]})")
+            skipped += 1
+            continue
+        print(f"Reviewing PR #{number}: {meta.get('title', '')}")
+        try:
+            generate_pr_review(workspace, repo, meta)
+            generated += 1
+        except SystemExit as exc:
+            if exc.code in (130, None):
+                raise
+            print(f"PR #{number} review failed: {exc}")
+            failed.append(number)
+    summary = f"Swept {len(prs)} open PRs: {generated} reviewed, {skipped} skipped"
+    if failed:
+        summary += f", {len(failed)} failed ({', '.join(f'#{n}' for n in failed)})"
+    print(summary)
 
 
 def cmd_release_review(args):
@@ -2290,6 +3254,7 @@ def cmd_release_review(args):
     pending_dir.mkdir(parents=True, exist_ok=True)
     max_attempts = 3
     data = None
+    started = time.monotonic()
     for attempt in range(1, max_attempts + 1):
         pending_json = pending_dir / f"{json_file.stem}.{int(time.time() * 1000)}.pending.json"
         prompt = (
@@ -2340,6 +3305,7 @@ def cmd_release_review(args):
     data["tag_start"] = release_tag
     data["range_start"] = range_start
     data["head_sha"] = head
+    data["generation_seconds"] = round(time.monotonic() - started, 1)
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     raw = json.dumps(data, indent=2)
     verdict = data.get("verdict", "")
@@ -2354,10 +3320,23 @@ def cmd_release_review(args):
         conn.execute(
             """
             INSERT OR REPLACE INTO release_reviews
-            (repo, branch, tag_start, range_start, head_sha, verdict, raw_output, json_path, reviewed_at, skill_version, rubric_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (repo, branch, tag_start, range_start, head_sha, verdict, raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (repo, branch, release_tag, range_start, head, verdict, raw, str(json_file), now_iso(), __version__, RELEASE_RUBRIC_VERSION),
+            (
+                repo,
+                branch,
+                release_tag,
+                range_start,
+                head,
+                verdict,
+                raw,
+                str(json_file),
+                now_iso(),
+                __version__,
+                RELEASE_RUBRIC_VERSION,
+                float(data.get("generation_seconds") or 0),
+            ),
         )
         normalize_review_todos(conn, "release", release_review_key(repo, branch, release_tag), data.get("prioritized_todos", []))
 
@@ -2551,6 +3530,7 @@ def cmd_announce(args):
     if feedback:
         print("Resuming with validation feedback from a previous interrupted announce run.", flush=True)
     max_attempts = 3
+    started = time.monotonic()
     for attempt in range(1, max_attempts + 1):
         pending_release_highlights_file, pending_markdown_file = (
             pending_release_announcement_artifact_paths(workspace, repo, release_tag, head)
@@ -2616,8 +3596,9 @@ def cmd_announce(args):
             """
             INSERT OR REPLACE INTO release_announcements
             (repo, branch, tag_start, range_start, head_sha, raw_output, markdown_path,
-             release_highlights_output, release_highlights_path, generated_at, skill_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             release_highlights_output, release_highlights_path, generated_at, skill_version,
+             generation_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 repo,
@@ -2631,6 +3612,7 @@ def cmd_announce(args):
                 str(release_highlights_file),
                 now_iso(),
                 ANNOUNCEMENT_VERSION,
+                round(time.monotonic() - started, 1),
             ),
         )
 
@@ -2785,6 +3767,200 @@ def cmd_db_row(args):
             print_pretty_review(json.loads(row["raw_output"]))
         except json.JSONDecodeError:
             print(row["raw_output"])
+
+
+def pr_review_rows(workspace):
+    with connect_db(workspace) as conn:
+        rows = conn.execute(
+            "SELECT * FROM pr_reviews WHERE rubric_version=? ORDER BY reviewed_at, pr_number",
+            (PR_RUBRIC_VERSION,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def cmd_pr_table(args):
+    workspace = find_workspace()
+    rows = pr_review_rows(workspace)
+    if not rows:
+        print("No PR reviews in the database.")
+        return
+    headers = ("#", "PR", "Attention", "Scope", "Description")
+    widths = (5, 6, 9, 5, 80)
+    print(
+        f"{headers[0]:>{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]:<{widths[2]}}  "
+        f"{headers[3]:<{widths[3]}}  {headers[4]}"
+    )
+    print("  ".join("-" * width for width in widths))
+    for index, row in enumerate(rows, start=1):
+        pr = truncate(f"#{row['pr_number']}", widths[1])
+        attention = truncate(row["attention_level"], widths[2])
+        scope = truncate(row["scope_verdict"], widths[3])
+        description = truncate(row["summary"], widths[4])
+        print(f"{index:>{widths[0]}}  {pr:<{widths[1]}}  {attention:<{widths[2]}}  {scope:<{widths[3]}}  {description}")
+
+
+def cmd_pr_row(args):
+    workspace = find_workspace()
+    rows = pr_review_rows(workspace)
+    if args.index < 1 or args.index > len(rows):
+        raise SystemExit("Row index out of range. Use `repo-manager pr-table` to see valid indexes.")
+    row = rows[args.index - 1]
+    print(f"Row: {args.index}")
+    print(f"Repo: {row['repo']}")
+    print(f"PR: #{row['pr_number']} — {row['pr_title'] or ''}")
+    print(f"Author: {row['author'] or ''}")
+    print(f"Head: {row['head_sha'] or ''}")
+    print(f"Reviewed At: {row['reviewed_at']}")
+    if row.get("generation_seconds"):
+        print(f"Generated in: {round(row['generation_seconds'])} seconds")
+    print(f"JSON: {row['json_path'] or ''}")
+    print()
+    data = pr_review_data_from_row(row)
+    if data is not None:
+        print_pretty_pr_review(data)
+    elif row["raw_output"]:
+        print(row["raw_output"])
+
+
+def print_pretty_pr_review(data):
+    evidence = data.get("evidence") or {}
+
+    def checked(key):
+        value = evidence.get(key)
+        if value:
+            print(f"Checked: {value}")
+
+    print("Description")
+    print(data.get("summary", ""))
+    print()
+
+    description = data.get("description_check") or {}
+    if description.get("verdict"):
+        print("Author's Description vs. the Diff")
+        print(f"{description.get('verdict', '')}: {description.get('notes', '')}")
+        if description.get("verdict") == "missing" and not (description.get("discrepancies") or []):
+            print("- [ ] Ask the author to describe the change — the PR has no usable description.")
+        for item in description.get("discrepancies") or []:
+            print(f"- [ ] {item.get('action') or 'Reconcile the description with the diff.'}")
+            if item.get("described"):
+                print(f"      Described: {item['described']}")
+            if item.get("actual"):
+                print(f"      In the diff: {item['actual']}")
+            if item.get("evidence"):
+                print(f"      Reference: {item['evidence']}")
+        print()
+
+    print("Attention")
+    print(attention_display(data))
+    print()
+
+    scope = data.get("scope") or {}
+    print("Scope")
+    print(f"{scope.get('verdict', '')}: {scope.get('rationale', '')}")
+    print()
+
+    flags = data.get("alignment_flags") or []
+    print("Alignment Issues")
+    if not flags:
+        print("None found.")
+        checked("alignment")
+    for flag in flags:
+        where = " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
+        print(f"- [ ] {flag.get('action') or flag.get('concern', '')}")
+        if flag.get("concern"):
+            prefix = f"{where}: " if where else ""
+            print(f"      Why: {prefix}{flag['concern']}")
+        if flag.get("evidence"):
+            print(f"      Reference: {flag['evidence']}")
+    print()
+
+    documentation = data.get("documentation") or {}
+    print("Documentation")
+    print(documentation.get("status", ""))
+    if not documentation.get("gaps"):
+        checked("documentation")
+    for gap in documentation.get("gaps") or []:
+        print(f"- [ ] {gap.get('action') or gap.get('what', '')}")
+        if gap.get("what"):
+            print(f"      Gap: {gap['what']}")
+        if gap.get("where"):
+            print(f"      Where: {gap['where']}")
+        if gap.get("policy"):
+            print(f"      Why: {gap['policy']}")
+    print()
+
+    breaking = data.get("breaking_changes") or []
+    print("Breaking Changes")
+    if not breaking:
+        print("None found.")
+        checked("breaking_changes")
+    for change in breaking:
+        summary = f"({change.get('surface', '')}) {change.get('change', '')}"
+        if breaking_change_cleared(change):
+            print(f"- {summary} — {breaking_change_status(change)}")
+            continue
+        print(f"- [ ] {change.get('action') or 'Document this break and get a maintainer sign-off.'}")
+        print(f"      Change: {summary}")
+        print(f"      Status: {breaking_change_status(change)}")
+    print()
+
+    reviewers = data.get("suggested_reviewers") or []
+    if reviewers:
+        print("Suggested Reviewers")
+        for item in reviewers:
+            print(f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}): {item.get('reason', '')}")
+        print()
+    areas = data.get("maintainer_needed_areas") or []
+    if areas:
+        print("Maintainer Needed")
+        for area in areas:
+            print(f"- {area}")
+        print()
+
+
+def cmd_post_pr_review(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    result = post_pr_review(workspace, repo, args.pr_number, dry_run=args.dry_run)
+    for warning in result.get("warnings", []):
+        print(f"Warning: {warning}")
+    if not result.get("ok"):
+        raise SystemExit(result.get("error", "post-pr-review failed"))
+    if result.get("dry_run"):
+        print(f"Would {result['action']} this comment on {repo}#{args.pr_number}:\n")
+        print(result["body"])
+        return
+    print(f"{result['action'].capitalize()} review comment on {repo}#{args.pr_number}: {result.get('url', '')}")
+
+
+def cmd_request_pr_reviewers(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    handles = [part.strip() for part in (args.reviewers or "").split(",") if part.strip()] or None
+    result = request_pr_reviewers(workspace, repo, args.pr_number, handles=handles, dry_run=args.dry_run)
+    for warning in result.get("warnings", []):
+        print(f"Warning: {warning}")
+    if not result.get("ok"):
+        raise SystemExit(result.get("error", "request-pr-reviewers failed"))
+    for item in result.get("skipped", []):
+        print(f"Skipping {item['handle']}: {item['reason']}")
+    if result.get("dry_run"):
+        if result["to_request"]:
+            print(f"Would request reviews on {repo}#{args.pr_number} from:")
+            for item in result["to_request"]:
+                area = f" ({item['subject_area']})" if item.get("subject_area") else ""
+                print(f"- {item['handle']}{area}: {item.get('reason', '')}")
+        else:
+            print("No reviewers left to request.")
+        return
+    for handle in result.get("requested", []):
+        print(f"Requested review from {handle}")
+    for item in result.get("failed", []):
+        print(f"Failed to request {item['handle']}: {item['reason']}")
+    if not result.get("requested") and not result.get("failed"):
+        print("No reviewers left to request.")
 
 
 def cmd_ui(args):
@@ -2953,6 +4129,33 @@ def build_parser():
     sweep.add_argument("--force", action="store_true", help="Re-run reviews that already exist.")
     sweep.set_defaults(func=cmd_sweep)
 
+    review_pr = sub.add_parser("review-pr", help="Run pr-review for one open PR and save it.")
+    review_pr.add_argument("pr_number", type=int)
+    review_pr.add_argument("--repo")
+    review_pr.set_defaults(func=cmd_review_pr)
+
+    sweep_prs = sub.add_parser("sweep-prs", help="Review every open PR that lacks a current review.")
+    sweep_prs.add_argument("--repo")
+    sweep_prs.add_argument("--limit", type=int, default=100, help="Maximum number of open PRs to consider.")
+    sweep_prs.add_argument("--force", action="store_true", help="Re-run reviews even when the head SHA is unchanged.")
+    sweep_prs.add_argument("--include-drafts", action="store_true", help="Also review draft PRs.")
+    sweep_prs.set_defaults(func=cmd_sweep_prs)
+
+    post_pr = sub.add_parser("post-pr-review", help="Post or update the saved PR review as a PR comment.")
+    post_pr.add_argument("pr_number", type=int)
+    post_pr.add_argument("--repo")
+    post_pr.add_argument("--dry-run", action="store_true", help="Print the comment without posting it.")
+    post_pr.set_defaults(func=cmd_post_pr_review)
+
+    request_reviewers = sub.add_parser(
+        "request-pr-reviewers", help="Request the saved suggested reviewers on GitHub."
+    )
+    request_reviewers.add_argument("pr_number", type=int)
+    request_reviewers.add_argument("--repo")
+    request_reviewers.add_argument("--reviewers", help="Comma-separated handles to request instead of the saved suggestions.")
+    request_reviewers.add_argument("--dry-run", action="store_true", help="Print who would be requested without requesting.")
+    request_reviewers.set_defaults(func=cmd_request_pr_reviewers)
+
     release = sub.add_parser("release-review", help="Run release-level review from stored commit reviews.")
     release.add_argument(
         "release",
@@ -3044,6 +4247,13 @@ def build_parser():
     db_row = sub.add_parser("db-row", help="Print saved commit review contents by table row index.")
     db_row.add_argument("index", type=int)
     db_row.set_defaults(func=cmd_db_row)
+
+    pr_table = sub.add_parser("pr-table", help="Print saved PR reviews as a table.")
+    pr_table.set_defaults(func=cmd_pr_table)
+
+    pr_row = sub.add_parser("pr-row", help="Print saved PR review contents by table row index.")
+    pr_row.add_argument("index", type=int)
+    pr_row.set_defaults(func=cmd_pr_row)
 
     ui = sub.add_parser("ui", help="Serve a local web UI for saved reviews and announcements.")
     ui.add_argument("--host", default="127.0.0.1")

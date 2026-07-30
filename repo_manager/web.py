@@ -3,10 +3,11 @@ import hashlib
 import re
 import sqlite3
 import subprocess
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
 
 
@@ -14,7 +15,19 @@ def connect(db_file):
     conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row
     ensure_range_schema(conn)
+    ensure_pr_schema(conn)
+    ensure_generation_schema(conn)
     return conn
+
+
+def ensure_generation_schema(conn):
+    for table in ("commit_reviews", "release_reviews", "release_announcements", "pr_reviews"):
+        try:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            continue
+        if columns and "generation_seconds" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN generation_seconds REAL NOT NULL DEFAULT 0")
 
 
 def now_iso():
@@ -58,6 +71,49 @@ def ensure_range_schema(conn):
                         WHERE release_highlights_path=''
                         """
                     )
+
+
+def ensure_pr_schema(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_reviews (
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL DEFAULT '',
+          pr_title TEXT NOT NULL DEFAULT '',
+          author TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          attention_level TEXT NOT NULL DEFAULT '',
+          scope_verdict TEXT NOT NULL DEFAULT '',
+          second_review_required INTEGER NOT NULL DEFAULT 0,
+          documentation_status TEXT NOT NULL DEFAULT '',
+          alignment_flags TEXT NOT NULL DEFAULT '[]',
+          breaking_changes TEXT NOT NULL DEFAULT '[]',
+          suggested_reviewers TEXT NOT NULL DEFAULT '[]',
+          maintainer_needed_areas TEXT NOT NULL DEFAULT '[]',
+          raw_output TEXT NOT NULL,
+          json_path TEXT NOT NULL DEFAULT '',
+          reviewed_at TEXT NOT NULL,
+          skill_version TEXT NOT NULL,
+          rubric_version TEXT NOT NULL,
+          generation_seconds REAL NOT NULL DEFAULT 0,
+          PRIMARY KEY (repo, pr_number, rubric_version)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_review_comments (
+          comment_key TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          comment_id INTEGER NOT NULL,
+          comment_url TEXT NOT NULL DEFAULT '',
+          posted_head_sha TEXT NOT NULL DEFAULT '',
+          synced_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def ensure_todo_schema(conn):
@@ -387,6 +443,211 @@ def release_reviews(workspace):
     return rows
 
 
+_PR_STATE_CACHE = {}
+PR_STATE_TTL_SECONDS = 60
+
+
+def live_pr_states(repo, numbers):
+    """Current state, base branch, and review activity for the given PRs, in one cached GraphQL call.
+
+    Returns {number: {"state", "base", "review_decision", "last_commit_at", "reviews",
+    "comments", "viewer"}}. Empty on any gh failure so callers treat state as unknown
+    instead of hiding rows or inventing a status.
+    """
+    numbers = sorted({int(number) for number in numbers})
+    if not repo or "/" not in repo or not numbers:
+        return {}
+    now = time.time()
+    cached = _PR_STATE_CACHE.get(repo)
+    if cached and now - cached[0] < PR_STATE_TTL_SECONDS and cached[2] == numbers:
+        return cached[1]
+    owner, _, name = repo.partition("/")
+    fields = " ".join(
+        f"pr{number}: pullRequest(number: {number}) {{ state baseRefName reviewDecision "
+        "commits(last: 1) { nodes { commit { committedDate } } } "
+        "reviews(last: 50) { nodes { author { login } state submittedAt } } "
+        "comments(last: 50) { nodes { author { login } createdAt } } "
+        "reviewThreads(last: 30) { nodes { comments(last: 15) { nodes { author { login } createdAt } } } } "
+        "reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } } "
+        "}"
+        for number in numbers
+    )
+    query = f'query {{ viewer {{ login }} repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}'
+    try:
+        proc = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={query}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        payload = json.loads(proc.stdout) if proc.stdout else {}
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return cached[1] if cached else {}
+    data = payload.get("data") or {}
+    viewer = (data.get("viewer") or {}).get("login", "")
+    repository = data.get("repository") or {}
+
+    def login_of(node):
+        return ((node or {}).get("author") or {}).get("login", "")
+
+    states = {}
+    for number in numbers:
+        entry = repository.get(f"pr{number}")
+        if not isinstance(entry, dict):
+            continue
+        commits = ((entry.get("commits") or {}).get("nodes")) or []
+        last_commit_at = ((commits[0].get("commit") or {}).get("committedDate", "")) if commits else ""
+        reviews = [
+            {"login": login_of(node), "state": node.get("state", ""), "at": node.get("submittedAt", "")}
+            for node in ((entry.get("reviews") or {}).get("nodes")) or []
+            if login_of(node)
+        ]
+        comments = [
+            {"login": login_of(node), "at": node.get("createdAt", "")}
+            for node in ((entry.get("comments") or {}).get("nodes")) or []
+            if login_of(node)
+        ]
+        for thread in ((entry.get("reviewThreads") or {}).get("nodes")) or []:
+            comments += [
+                {"login": login_of(node), "at": node.get("createdAt", "")}
+                for node in ((thread.get("comments") or {}).get("nodes")) or []
+                if login_of(node)
+            ]
+        requested = []
+        for node in ((entry.get("reviewRequests") or {}).get("nodes")) or []:
+            reviewer = (node or {}).get("requestedReviewer") or {}
+            handle = reviewer.get("login") or reviewer.get("name") or ""
+            if handle:
+                requested.append(handle)
+        states[number] = {
+            "state": entry.get("state", ""),
+            "base": entry.get("baseRefName", ""),
+            "review_decision": entry.get("reviewDecision") or "",
+            "last_commit_at": last_commit_at,
+            "reviews": reviews,
+            "comments": comments,
+            "requested": requested,
+            "viewer": viewer,
+        }
+    if states:
+        _PR_STATE_CACHE[repo] = (now, states, numbers)
+        return states
+    return cached[1] if cached else {}
+
+
+def derive_review_status(info, author, attention_level, viewer_override=""):
+    """Map live review activity to a (short label, tooltip detail) pair.
+
+    The perspective is the gh-authenticated viewer unless viewer_override names another
+    GitHub login: "Waiting for me" means the ball is in that person's court. Returns
+    ('', '') when the PR is not open or live data is missing.
+    """
+    if not info or info.get("state") != "OPEN":
+        return "", ""
+    viewer = str(viewer_override or info.get("viewer") or "").lstrip("@").lower()
+    author_login = str(author or "").lstrip("@").lower()
+    latest = {}
+    for review in sorted(info.get("reviews", []), key=lambda review: review.get("at") or ""):
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"):
+            latest[review["login"].lower()] = review
+    mine = latest.get(viewer)
+    if mine and mine.get("state") == "CHANGES_REQUESTED":
+        my_time = mine.get("at") or ""
+        activity = [
+            comment.get("at") or ""
+            for comment in info.get("comments", [])
+            if (comment.get("login") or "").lower() == author_login
+        ]
+        if info.get("last_commit_at"):
+            activity.append(info["last_commit_at"])
+        if any(at > my_time for at in activity if at):
+            return "Waiting for me", "The author replied to my change request — my turn to re-review."
+        return "Requests", "I requested changes — waiting for the author to respond."
+    if info.get("review_decision") == "APPROVED":
+        return "Approved", "Approved but not merged yet."
+    others = {
+        login: review
+        for login, review in latest.items()
+        if login not in (viewer, author_login)
+        and not is_ai_reviewer(login)
+        and review.get("state") != "DISMISSED"
+    }
+    if others:
+        names = ", ".join(sorted(others))
+        if attention_level == "High":
+            return "Needs core", f"In review by {names}, but the pre-review flags High attention — needs a core maintainer."
+        blocking = sorted(login for login, review in others.items() if review.get("state") == "CHANGES_REQUESTED")
+        if blocking:
+            return "Waiting", f"{', '.join(blocking)} requested changes — waiting for the author."
+        return "Handled", f"Being handled by another reviewer: {names}."
+    requested = [handle for handle in info.get("requested", []) if not is_ai_reviewer(handle)]
+    if any(handle.lower() == viewer for handle in requested):
+        return "Waiting for me", "I am assigned as a reviewer and have not reviewed yet."
+    requested_others = [handle for handle in requested if handle.lower() != viewer]
+    if requested_others:
+        return "Waiting", f"Reviewer assigned but no review yet: {', '.join(sorted(requested_others))}."
+    return "Needs triage", "No reviewer assigned and no reviews yet — needs triage by me."
+
+
+def pr_reviews(workspace, pr_viewer=""):
+    rows = []
+    effective_viewer = str(pr_viewer or "").lstrip("@").strip()
+    with connect(db_file(workspace)) as conn:
+        comment_urls = {
+            (row["repo"], row["pr_number"]): row["comment_url"]
+            for row in conn.execute("SELECT repo, pr_number, comment_url FROM pr_review_comments")
+        }
+        seen = set()
+        for row in conn.execute(
+            """
+            SELECT rowid, *
+            FROM pr_reviews
+            ORDER BY reviewed_at DESC, pr_number DESC
+            """
+        ):
+            item = dict(row)
+            key = (item["repo"], item["pr_number"])
+            if key in seen:
+                continue
+            seen.add(key)
+            data = review_data(item)
+            item["details"] = data
+            item["summary"] = data.get("summary", item.get("summary") or "")
+            item["alignment_flags"] = data.get("alignment_flags", parse_json_text(item.get("alignment_flags"), []))
+            item["breaking_changes"] = data.get("breaking_changes", parse_json_text(item.get("breaking_changes"), []))
+            item["suggested_reviewers"] = data.get(
+                "suggested_reviewers", parse_json_text(item.get("suggested_reviewers"), [])
+            )
+            item["maintainer_needed_areas"] = data.get(
+                "maintainer_needed_areas", parse_json_text(item.get("maintainer_needed_areas"), [])
+            )
+            item["documentation"] = data.get("documentation", {})
+            item["scope"] = data.get("scope", {})
+            item["evidence"] = data.get("evidence", {})
+            item["description_check"] = data.get("description_check", {})
+            item["attention_reasons"] = data.get("attention_reasons", [])
+            item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
+            rows.append(item)
+    by_repo = {}
+    for item in rows:
+        by_repo.setdefault(item["repo"], set()).add(item["pr_number"])
+    authenticated = ""
+    for repo, numbers in by_repo.items():
+        states = live_pr_states(repo, numbers)
+        for item in rows:
+            if item["repo"] == repo:
+                info = states.get(item["pr_number"], {})
+                authenticated = authenticated or info.get("viewer", "")
+                item["pr_state"] = info.get("state", "")
+                item["base_ref"] = info.get("base", "")
+                status, detail = derive_review_status(
+                    info, item.get("author"), item.get("attention_level"), effective_viewer
+                )
+                item["review_status"] = status
+                item["review_status_detail"] = detail
+    return rows, (effective_viewer or authenticated)
+
+
 def release_announcements(workspace):
     rows = []
     seen = set()
@@ -431,10 +692,11 @@ def load_config(workspace):
         return json.load(f)
 
 
-def app_data(workspace):
+def app_data(workspace, pr_viewer=""):
     commits = commit_reviews(workspace)
     releases = release_reviews(workspace)
     announcements = release_announcements(workspace)
+    prs, effective_viewer = pr_reviews(workspace, pr_viewer)
     authors = {normalize_handle(row.get("author")) for row in commits if normalize_handle(row.get("author"))}
     reviewers = {reviewer for row in commits for reviewer in row.get("reviewers", [])}
     tags = sorted(
@@ -453,6 +715,7 @@ def app_data(workspace):
             "commits": len(commits),
             "release_reviews": len(releases),
             "announcements": len(announcements),
+            "pr_reviews": len(prs),
             "unread_reviews": sum(1 for row in commits if not row.get("is_read")),
             "outstanding_todos": sum(row.get("outstanding_todos", 0) for row in commits)
             + sum(row.get("outstanding_todos", 0) for row in releases),
@@ -464,11 +727,18 @@ def app_data(workspace):
         "commit_reviews": commits,
         "release_reviews": releases,
         "release_announcements": announcements,
+        "pr_reviews": prs,
+        "pr_viewer": effective_viewer,
     }
 
 
 def public_app_data(workspace):
     data = app_data(workspace)
+    # PR reviews are transient pre-merge advisories and are not round-tripped by
+    # sync_down, so they stay out of the published dashboard entirely.
+    data.pop("pr_reviews", None)
+    data.pop("pr_viewer", None)
+    data.get("counts", {}).pop("pr_reviews", None)
     for key in ("commit_reviews", "release_reviews", "release_announcements"):
         cleaned = []
         for row in data.get(key, []):
@@ -556,6 +826,26 @@ def update_read_state(workspace, payload):
     return {"ok": True}
 
 
+def run_pr_action(workspace, action, payload):
+    """Run a gh-backed PR action from a request thread.
+
+    cli.py signals every failure with SystemExit, which would otherwise kill the handler
+    thread with no HTTP response — so it must be caught and turned into a JSON error here.
+    """
+    pr_number = payload.get("pr_number")
+    if not isinstance(pr_number, int):
+        return {"ok": False, "error": "Missing pr_number"}
+    from repo_manager import cli
+
+    try:
+        repo = load_config(workspace)["repo"]
+        if action == "comment":
+            return cli.post_pr_review(workspace, repo, pr_number)
+        return cli.request_pr_reviewers(workspace, repo, pr_number)
+    except SystemExit as exc:
+        return {"ok": False, "error": str(exc) or "Command failed"}
+
+
 def make_handler(workspace):
     class RepoManagerHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -563,15 +853,25 @@ def make_handler(workspace):
             if path == "/":
                 self.send_text(INDEX_HTML, "text/html; charset=utf-8")
             elif path == "/api/data":
-                self.send_json(app_data(workspace))
+                params = parse_qs(urlparse(self.path).query)
+                pr_viewer = (params.get("viewer") or [""])[0][:64]
+                self.send_json(app_data(workspace, pr_viewer))
             else:
                 self.send_error(404)
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in ("/api/todo", "/api/read"):
+            if path not in ("/api/todo", "/api/read", "/api/pr-comment", "/api/pr-reviewers"):
                 self.send_error(404)
                 return
+            if path in ("/api/pr-comment", "/api/pr-reviewers"):
+                # These act on GitHub with the user's gh credentials, so reject
+                # cross-origin requests (browser-set Origin that isn't this server).
+                origin = self.headers.get("Origin", "")
+                host = self.headers.get("Host", "")
+                if origin and urlparse(origin).netloc != host:
+                    self.send_json({"ok": False, "error": "Cross-origin request rejected"}, status=403)
+                    return
             length = int(self.headers.get("Content-Length", "0") or "0")
             try:
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -580,8 +880,12 @@ def make_handler(workspace):
                 return
             if path == "/api/todo":
                 result = update_todo(workspace, payload)
-            else:
+            elif path == "/api/read":
                 result = update_read_state(workspace, payload)
+            elif path == "/api/pr-comment":
+                result = run_pr_action(workspace, "comment", payload)
+            else:
+                result = run_pr_action(workspace, "reviewers", payload)
             self.send_json(result, status=200 if result.get("ok") else 400)
 
         def send_json(self, payload, status=200):
@@ -833,6 +1137,28 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 15px;
       margin: 0;
     }
+    .pr-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .pr-toggle input {
+      accent-color: var(--accent, #6b8afd);
+      margin: 0;
+    }
+    .pr-toggle input[type="text"] {
+      width: 110px;
+      font: inherit;
+      font-size: 12px;
+      padding: 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+    }
     .table-wrap {
       overflow: auto;
       min-height: 0;
@@ -923,7 +1249,44 @@ INDEX_HTML = r"""<!doctype html>
       background: #fff5df;
       border-color: #f4d79a;
     }
-    .badge.blocker, .badge.blocked {
+    .badge.blocker, .badge.blocked, .badge.high {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    .pr-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .badge.routine {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.elevated {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    /* Status colors answer "do I need to act?":
+       green = no, gray = someone else is handling it, yellow = yes, red = urgent. */
+    .badge.approved, .badge.requests {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.handled, .badge.waiting {
+      color: #5c6470;
+      background: #f0f1f3;
+      border-color: #d8dbe0;
+    }
+    .badge.needs-triage, .badge.waiting-for-me {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.needs-core {
       color: var(--danger);
       background: #fff0ee;
       border-color: #f4c4bd;
@@ -1099,6 +1462,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <nav>
         <button class="nav-button active" data-view="commits">Commit DB</button>
+        <button class="nav-button" data-view="prs">PR Reviews</button>
         <button class="nav-button" data-view="release">Release Review</button>
         <button class="nav-button" data-view="announcement">Announcement</button>
       </nav>
@@ -1145,6 +1509,39 @@ INDEX_HTML = r"""<!doctype html>
           </section>
         </div>
 
+        <div id="view-prs" class="split hidden">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Saved PR Reviews</h2>
+              <label class="muted pr-toggle" title="GitHub login whose perspective the Status column reflects">Status as
+                <input type="text" id="pr-viewer" spellcheck="false"></label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed PRs</label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide PRs not into main</label>
+              <span class="muted" id="pr-count"></span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 48px;">#</th>
+                    <th style="width: 72px;">PR</th>
+                    <th style="width: 118px;">Status</th>
+                    <th style="width: 110px;">Attention</th>
+                    <th style="width: 70px;">Scope</th>
+                    <th>Description</th>
+                    <th style="width: 130px;">Author</th>
+                  </tr>
+                </thead>
+                <tbody id="pr-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>PR Review</h2><span class="muted" id="pr-selected"></span></div>
+            <div class="detail" id="pr-detail"></div>
+          </section>
+        </div>
+
         <div id="view-release" class="single hidden">
           <section class="panel">
             <div class="panel-head"><h2>Release-Level Review</h2></div>
@@ -1169,10 +1566,15 @@ INDEX_HTML = r"""<!doctype html>
       view: "commits",
       selectedTag: "",
       selectedCommit: 0,
+      selectedPr: 0,
       selectedRelease: 0,
       selectedAnnouncement: 0,
       filter: "",
-      route: {}
+      route: {},
+      prActionMessage: null,
+      hideClosedPrs: true,
+      hideNonMainPrs: true,
+      prViewer: ""
     };
     let suppressRouteUpdate = false;
     const $ = (id) => document.getElementById(id);
@@ -1184,8 +1586,14 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function badge(value) {
-      const cls = String(value || "unknown").toLowerCase().replace(/\s+/g, "-");
+      const cls = String(value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
       return `<span class="badge ${cls}">${esc(value || "Unknown")}</span>`;
+    }
+
+    function statusBadge(row) {
+      if (!row.review_status) return `<span class="muted">—</span>`;
+      const cls = row.review_status.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      return `<span class="badge ${cls}" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
     }
 
     function shortSha(value) {
@@ -1197,9 +1605,10 @@ INDEX_HTML = r"""<!doctype html>
       const params = new URLSearchParams(rawHash || window.location.search.slice(1));
       const view = params.get("view");
       return {
-        view: ["commits", "release", "announcement"].includes(view) ? view : "",
+        view: ["commits", "prs", "release", "announcement"].includes(view) ? view : "",
         tag: params.get("tag") || "",
         commit: params.get("commit") || "",
+        pr: params.get("pr") || "",
         releaseHead: params.get("releaseHead") || "",
         announcementHead: params.get("announcementHead") || ""
       };
@@ -1209,6 +1618,7 @@ INDEX_HTML = r"""<!doctype html>
       const route = parseRoute();
       state.route = route;
       if (!route.view && route.commit) route.view = "commits";
+      if (!route.view && route.pr) route.view = "prs";
       if (!route.view && route.releaseHead) route.view = "release";
       if (!route.view && route.announcementHead) route.view = "announcement";
       if (state.data && route.commit && !route.tag) {
@@ -1235,6 +1645,9 @@ INDEX_HTML = r"""<!doctype html>
       if (state.view === "commits") {
         const row = filteredCommits()[state.selectedCommit] || filteredCommits()[0];
         if (row && row.commit_sha) params.set("commit", row.commit_sha);
+      } else if (state.view === "prs") {
+        const row = filteredPrs()[state.selectedPr] || filteredPrs()[0];
+        if (row && row.pr_number) params.set("pr", String(row.pr_number));
       } else if (state.view === "release") {
         const row = filteredReleases()[state.selectedRelease] || filteredReleases()[0];
         if (row && row.head_sha) params.set("releaseHead", row.head_sha);
@@ -1343,8 +1756,13 @@ INDEX_HTML = r"""<!doctype html>
         renderAll();
         return;
       }
-      const response = await fetch("/api/data");
+      const viewerParam = state.prViewer ? `?viewer=${encodeURIComponent(state.prViewer)}` : "";
+      const response = await fetch(`/api/data${viewerParam}`);
       state.data = await response.json();
+      const viewerInput = $("pr-viewer");
+      if (viewerInput && document.activeElement !== viewerInput) {
+        viewerInput.value = state.prViewer || state.data.pr_viewer || "";
+      }
       applyRouteFromUrl();
       renderAll();
     }
@@ -1385,6 +1803,21 @@ INDEX_HTML = r"""<!doctype html>
       if (!query) return tagged;
       return tagged.filter((row) => [
         row.commit_sha, row.verdict, row.summary, row.author, row.verdict_reason, row.tag_start, row.branch
+      ].join(" ").toLowerCase().includes(query));
+    }
+
+    function prVisible(row) {
+      if (state.hideClosedPrs && row.pr_state && row.pr_state !== "OPEN") return false;
+      if (state.hideNonMainPrs && row.base_ref && row.base_ref !== "main") return false;
+      return true;
+    }
+
+    function filteredPrs() {
+      const rows = (state.data.pr_reviews || []).filter(prVisible);
+      const query = state.filter.trim().toLowerCase();
+      if (!query) return rows;
+      return rows.filter((row) => [
+        String(row.pr_number), row.pr_title, row.summary, row.author, row.attention_level, row.scope_verdict, row.review_status
       ].join(" ").toLowerCase().includes(query));
     }
 
@@ -1504,6 +1937,7 @@ INDEX_HTML = r"""<!doctype html>
         field("Author", row.author),
         row.merge_date ? field("Merged", row.merge_date) : "",
         field("Audited", row.reviewed_at),
+        generatedInField(row),
         section("Description", `<p>${esc(row.summary)}</p>`),
         section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(row.verdict_reason || "")}</p>`),
         section("Maintainer To-Do", todoList(row.todo_items)),
@@ -1511,6 +1945,252 @@ INDEX_HTML = r"""<!doctype html>
         section("Evidence", evidenceList(evidence))
       ].join("");
       attachTodoHandlers($("commit-detail"));
+    }
+
+    async function runPrAction(path, prNumber) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pr_number: prNumber })
+      });
+      let result = {};
+      try {
+        result = await response.json();
+      } catch (error) {
+        result = {};
+      }
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || "Action failed");
+      }
+      return result;
+    }
+
+    function describePrActionResult(kind, result) {
+      if (kind === "comment") {
+        const action = result.action === "updated" ? "Updated" : "Posted";
+        return `${action} review comment${result.url ? `: ${result.url}` : "."}`;
+      }
+      const parts = [];
+      if ((result.requested || []).length) parts.push(`Requested: ${result.requested.join(", ")}`);
+      (result.skipped || []).forEach((item) => parts.push(`Skipped ${item.handle} (${item.reason})`));
+      (result.failed || []).forEach((item) => parts.push(`Failed ${item.handle}: ${item.reason}`));
+      (result.warnings || []).forEach((warning) => parts.push(warning));
+      return parts.join(" · ") || "No reviewers left to request.";
+    }
+
+    function prActions(row) {
+      const disabled = isStatic ? "disabled" : "";
+      const message = state.prActionMessage && state.prActionMessage.pr === row.pr_number
+        ? `<p class="muted" id="pr-action-result">${esc(state.prActionMessage.text)}</p>`
+        : `<p class="muted hidden" id="pr-action-result"></p>`;
+      const commentLink = row.comment_url
+        ? `<p class="muted">Posted comment: <a href="${esc(row.comment_url)}" target="_blank" rel="noopener noreferrer">${esc(row.comment_url)}</a></p>`
+        : "";
+      return `
+        <div class="pr-actions">
+          <button class="copy" id="pr-post-comment" data-pr="${row.pr_number}" ${disabled}>Post review comment</button>
+          <button class="copy" id="pr-request-reviewers" data-pr="${row.pr_number}" ${disabled}>Request reviewers</button>
+        </div>
+        ${message}
+        ${commentLink}`;
+    }
+
+    function attachPrActionHandlers(row) {
+      if (isStatic) return;
+      const bindings = [
+        ["pr-post-comment", "/api/pr-comment", "comment"],
+        ["pr-request-reviewers", "/api/pr-reviewers", "reviewers"]
+      ];
+      bindings.forEach(([id, path, kind]) => {
+        const button = $(id);
+        if (!button) return;
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          const original = button.textContent;
+          button.textContent = "Working...";
+          try {
+            const result = await runPrAction(path, Number(button.dataset.pr));
+            const warnings = (result.warnings || []).length && kind === "comment"
+              ? ` (${result.warnings.join("; ")})` : "";
+            state.prActionMessage = {
+              pr: Number(button.dataset.pr),
+              text: describePrActionResult(kind, result) + warnings
+            };
+            await reloadData();
+          } catch (error) {
+            button.disabled = false;
+            button.textContent = original;
+            alert(error.message);
+          }
+        });
+      });
+    }
+
+    const ATTENTION_MEANINGS = {
+      "High": "a core maintainer should look at this before it merges",
+      "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
+      "Routine": "nothing flagged; a standard review pass is enough"
+    };
+
+    function attentionSection(row) {
+      const meaning = ATTENTION_MEANINGS[row.attention_level] || "";
+      const reasons = (row.attention_reasons || []).join("; ");
+      return `<p>${badge(row.attention_level)} ${esc(meaning)}${reasons ? ` <span class="muted">(${esc(reasons)})</span>` : ""}</p>`;
+    }
+
+    function generatedInField(row) {
+      const seconds = Number(row.generation_seconds || (row.details || {}).generation_seconds || 0);
+      if (!seconds || seconds <= 0) return "";
+      return field("Generated in", `${Math.round(seconds)} seconds`);
+    }
+
+    function basisNote(evidence, key) {
+      const value = (evidence || {})[key];
+      return value ? `<p class="muted">Checked: ${esc(value)}</p>` : "";
+    }
+
+    function todoItems(items) {
+      return `<ul class="todo-issues">${items.map((item) => {
+        const subs = (item.subs || []).filter(([, value]) => value)
+          .map(([label, value]) => `<li><span class="muted">${esc(label)}:</span> ${esc(value)}</li>`).join("");
+        return `<li>☐ <strong>${esc(item.action || item.fallback || "")}</strong>${subs ? `<ul>${subs}</ul>` : ""}</li>`;
+      }).join("")}</ul>`;
+    }
+
+    function descriptionCheckSection(check, evidence) {
+      if (!check || !check.verdict) return `<p class="muted">Not assessed by this review.</p>`;
+      const missingTodo = check.verdict === "missing" && !(check.discrepancies || []).length
+        ? todoItems([{ action: "Ask the author to describe the change — the PR has no usable description.", subs: [] }])
+        : "";
+      const todos = (check.discrepancies || []).length ? todoItems(check.discrepancies.map((item) => ({
+        action: item.action,
+        fallback: "Reconcile the description with the diff.",
+        subs: [["Described", item.described], ["In the diff", item.actual], ["Reference", item.evidence]]
+      }))) : "";
+      return `<p>${badge(check.verdict)} ${esc(check.notes || "")}</p>${missingTodo}${todos}`;
+    }
+
+    function alignmentList(flags, evidence) {
+      if (!flags || !flags.length) return `<p class="muted">None found.</p>` + basisNote(evidence, "alignment");
+      return todoItems(flags.map((flag) => {
+        const where = [flag.doc, flag.section].filter(Boolean).join(" — ");
+        const why = where ? `${where}: ${flag.concern || ""}` : (flag.concern || "");
+        return {
+          action: flag.action,
+          fallback: flag.concern,
+          subs: [["Why", why], ["Reference", flag.evidence]]
+        };
+      }));
+    }
+
+    function documentationSection(documentation, evidence) {
+      const status = (documentation || {}).status || "";
+      const gaps = (documentation || {}).gaps || [];
+      if (!gaps.length) return `<p>${badge(status || "unknown")}</p>${basisNote(evidence, "documentation")}`;
+      return `<p>${badge(status || "unknown")}</p>${todoItems(gaps.map((gap) => ({
+        action: gap.action,
+        fallback: gap.what,
+        subs: [["Gap", gap.what], ["Where", gap.where], ["Why", gap.policy]]
+      })))}`;
+    }
+
+    function breakingStatus(change) {
+      const documented = change.documented ? "documented in this PR" : "not documented in this PR";
+      const approval = change.maintainer_approval === "approved"
+        ? "maintainer-approved"
+        : change.maintainer_approval === "not-approved" ? "not maintainer-approved" : "needs maintainer confirmation";
+      return `${documented}; ${approval}`;
+    }
+
+    function breakingList(changes, evidence) {
+      if (!changes || !changes.length) return `<p class="muted">None found.</p>` + basisNote(evidence, "breaking_changes");
+      const items = changes.map((change) => {
+        const summary = `(${change.surface || ""}) ${change.change || ""}`;
+        if (change.documented === true && change.maintainer_approval === "approved") {
+          return `<li>${esc(summary)} — ${esc(breakingStatus(change))}</li>`;
+        }
+        return `<li>☐ <strong>${esc(change.action || "Document this break and get a maintainer sign-off.")}</strong>
+          <ul><li>${esc(summary)}</li><li>${esc(breakingStatus(change))}</li></ul></li>`;
+      }).join("");
+      return `<ul class="todo-issues">${items}</ul>`;
+    }
+
+    function reviewerList(reviewers, areas, evidence) {
+      const items = [];
+      (reviewers || []).forEach((item) => {
+        const handle = String(item.handle || "").replace(/^@/, "");
+        const area = item.subject_area ? ` (${esc(item.subject_area)})` : "";
+        const reason = item.reason ? ` — ${esc(item.reason)}` : "";
+        items.push(`<li><strong>${esc(handle)}</strong>${area}${reason}</li>`);
+      });
+      (areas || []).forEach((area) => {
+        items.push(`<li class="muted">No maintainer listed for: ${esc(area)}</li>`);
+      });
+      if (!items.length) return `<p class="muted">None.</p>`;
+      return `<ul>${items.join("")}</ul>`;
+    }
+
+    function renderPrReviews() {
+      const rows = filteredPrs();
+      if (state.route.pr) {
+        const routedIndex = rows.findIndex((row) => String(row.pr_number) === String(state.route.pr));
+        if (routedIndex !== -1) {
+          state.selectedPr = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedPr = Math.min(state.selectedPr, rows.length - 1);
+      }
+      $("pr-count").textContent = `${rows.length} shown`;
+      $("pr-rows").innerHTML = rows.map((row, index) => `
+        <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}">
+          <td>${index + 1}</td>
+          <td>#${row.pr_number}</td>
+          <td>${statusBadge(row)}</td>
+          <td>${badge(row.attention_level)}</td>
+          <td>${esc(row.scope_verdict || "")}</td>
+          <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
+          <td>${esc(row.author || "")}</td>
+        </tr>
+      `).join("");
+      scrollSelected($("pr-rows"));
+      $("pr-rows").querySelectorAll("tr").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          state.selectedPr = Number(tr.dataset.index);
+          state.route = {};
+          state.prActionMessage = null;
+          renderPrReviews();
+          updateRoute();
+        });
+      });
+      const row = rows[state.selectedPr] || rows[0];
+      if (!row) {
+        $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager review-pr N</code> or <code>repo-manager sweep-prs</code> to review open PRs.</div>`;
+        $("pr-selected").textContent = "";
+        return;
+      }
+      $("pr-selected").textContent = `#${row.pr_number}`;
+      const prUrl = `https://github.com/${state.data.config.repo}/pull/${row.pr_number}`;
+      const scope = row.scope || {};
+      $("pr-detail").innerHTML = [
+        linkedField("PR", prUrl, `#${row.pr_number} — ${row.pr_title || ""}`),
+        field("Author", row.author),
+        row.pr_state ? field("State", `${row.pr_state}${row.base_ref ? ` → ${row.base_ref}` : ""}`) : "",
+        field("Head", shortSha(row.head_sha)),
+        field("Reviewed", row.reviewed_at),
+        generatedInField(row),
+        row.review_status ? section("Review Status", `<p>${statusBadge(row)} ${esc(row.review_status_detail || "")}</p>`) : "",
+        section("Description", `<p>${esc(row.summary)}</p>`),
+        section("Author's Description vs. the Diff", descriptionCheckSection(row.description_check, row.evidence)),
+        section("Attention", attentionSection(row)),
+        section("Scope", `<p><strong>${esc(scope.verdict || row.scope_verdict || "")}</strong> — ${esc(scope.rationale || "")}</p>`),
+        section("Alignment Issues", alignmentList(row.alignment_flags, row.evidence)),
+        section("Documentation", documentationSection(row.documentation, row.evidence)),
+        section("Breaking Changes", breakingList(row.breaking_changes, row.evidence)),
+        section("Suggested Reviewers", reviewerList(row.suggested_reviewers, row.maintainer_needed_areas, row.evidence)),
+        section("Actions", prActions(row))
+      ].join("");
+      attachPrActionHandlers(row);
     }
 
     function renderRelease() {
@@ -1536,6 +2216,7 @@ INDEX_HTML = r"""<!doctype html>
         row.range_start ? field("Since", row.range_start) : "",
         field("Head", row.head_sha),
         field("Audited", row.reviewed_at),
+        generatedInField(row),
         section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(details.verdict_reason || row.verdict_reason || "")}</p>`),
         section("Prioritized To-Do", todoList(row.todo_items)),
         section("Evidence", evidenceList(details.evidence))
@@ -1564,6 +2245,7 @@ INDEX_HTML = r"""<!doctype html>
         row.range_start ? field("Since", row.range_start) : "",
         field("Head", row.head_sha),
         field("Generated", row.generated_at),
+        generatedInField(row),
         section("Website Release Highlights", `<pre id="release-highlights-markdown">${esc(row.release_highlights_markdown || "No website release highlights artifact saved.")}</pre>`),
         section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.markdown || "")}</pre>`)
       ].join("");
@@ -1573,17 +2255,19 @@ INDEX_HTML = r"""<!doctype html>
       state.view = view;
       document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
       $("view-commits").classList.toggle("hidden", view !== "commits");
+      $("view-prs").classList.toggle("hidden", view !== "prs");
       $("view-release").classList.toggle("hidden", view !== "release");
       $("view-announcement").classList.toggle("hidden", view !== "announcement");
-      $("search").classList.toggle("hidden", view !== "commits");
+      $("search").classList.toggle("hidden", view !== "commits" && view !== "prs");
       $("copy-announcement").classList.toggle("hidden", view !== "announcement");
-      $("view-title").textContent = view === "commits" ? "Commit DB" : view === "release" ? "Release Review" : "Announcement";
+      $("view-title").textContent = view === "commits" ? "Commit DB" : view === "prs" ? "PR Reviews" : view === "release" ? "Release Review" : "Announcement";
       updateRoute();
     }
 
     function renderAll() {
       renderShell();
       renderCommits();
+      renderPrReviews();
       renderRelease();
       renderAnnouncement();
       setView(state.view);
@@ -1598,13 +2282,32 @@ INDEX_HTML = r"""<!doctype html>
     $("search").addEventListener("input", (event) => {
       state.filter = event.target.value;
       state.selectedCommit = 0;
+      state.selectedPr = 0;
       state.route = {};
       renderCommits();
+      renderPrReviews();
+      updateRoute();
+    });
+    $("pr-viewer").addEventListener("change", async (event) => {
+      state.prViewer = event.target.value.trim().replace(/^@/, "");
+      await reloadData();
+    });
+    $("pr-hide-closed").addEventListener("change", (event) => {
+      state.hideClosedPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
+      updateRoute();
+    });
+    $("pr-hide-non-main").addEventListener("change", (event) => {
+      state.hideNonMainPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
       updateRoute();
     });
     $("tag-select").addEventListener("change", (event) => {
       state.selectedTag = event.target.value;
       state.selectedCommit = 0;
+      state.selectedPr = 0;
       state.selectedRelease = 0;
       state.selectedAnnouncement = 0;
       state.route = {};

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS commit_reviews (
   reviewed_at TEXT NOT NULL,
   skill_version TEXT NOT NULL,
   rubric_version TEXT NOT NULL,
+  generation_seconds REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (repo, commit_sha, rubric_version)
 );
 
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS release_reviews (
   reviewed_at TEXT NOT NULL,
   skill_version TEXT NOT NULL,
   rubric_version TEXT NOT NULL,
+  generation_seconds REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (repo, branch, tag_start, rubric_version)
 );
 
@@ -52,7 +54,45 @@ CREATE TABLE IF NOT EXISTS release_announcements (
   release_highlights_path TEXT NOT NULL DEFAULT '',
   generated_at TEXT NOT NULL,
   skill_version TEXT NOT NULL,
+  generation_seconds REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (repo, branch, tag_start, skill_version)
+);
+
+CREATE TABLE IF NOT EXISTS pr_reviews (
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL DEFAULT '',
+  pr_title TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  attention_level TEXT NOT NULL DEFAULT '',
+  scope_verdict TEXT NOT NULL DEFAULT '',
+  second_review_required INTEGER NOT NULL DEFAULT 0,
+  documentation_status TEXT NOT NULL DEFAULT '',
+  alignment_flags TEXT NOT NULL DEFAULT '[]',
+  breaking_changes TEXT NOT NULL DEFAULT '[]',
+  suggested_reviewers TEXT NOT NULL DEFAULT '[]',
+  maintainer_needed_areas TEXT NOT NULL DEFAULT '[]',
+  raw_output TEXT NOT NULL,
+  json_path TEXT NOT NULL DEFAULT '',
+  reviewed_at TEXT NOT NULL,
+  skill_version TEXT NOT NULL,
+  rubric_version TEXT NOT NULL,
+  generation_seconds REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (repo, pr_number, rubric_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo_reviewed_at
+ON pr_reviews (repo, reviewed_at);
+
+CREATE TABLE IF NOT EXISTS pr_review_comments (
+  comment_key TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  comment_id INTEGER NOT NULL,
+  comment_url TEXT NOT NULL DEFAULT '',
+  posted_head_sha TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS review_todos (

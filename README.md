@@ -78,6 +78,47 @@ Re-run existing reviews for the inferred release:
 repo-manager sweep --force
 ```
 
+### Reviewing open PRs
+
+repo-manager can pre-review open pull requests to flag what a human reviewer should look out for. This is advisory — it never replaces the human review. Each review checks whether the author's description accurately matches the diff, checks the PR against the target repo's `docs/dev/contribute.md` and `docs/dev/philosophy.md`, verifies documentation shipped with the change per `docs/dev/documentation.md`, judges whether the scope is major enough to need a second review from a core maintainer, flags breaking API/UX changes (and whether each is documented and maintainer-approved), and suggests reviewers from the maintainer table in `contribute.md`. Every flagged issue comes with an imperative to-do naming the step that resolves it, and the attention level (`Routine`/`Elevated`/`High`) is spelled out with what drove it.
+
+The flow is generate → read → act. Generate and store a review for one PR:
+
+```bash
+repo-manager review-pr 1234
+```
+
+Or sweep every open PR that lacks a current review. A PR whose head SHA has moved since its stored review is re-reviewed automatically; drafts are skipped unless `--include-drafts` is passed:
+
+```bash
+repo-manager sweep-prs
+repo-manager sweep-prs --limit 20 --force
+```
+
+Read stored PR reviews in the terminal (or in the [web UI](#reviewing-in-the-web-ui)):
+
+```bash
+repo-manager pr-table
+repo-manager pr-row 1
+```
+
+Then act. Post the review as a PR comment — the comment is prefixed `[AI-assisted review]` per lemonade's AI policy, and re-posting updates the existing comment in place instead of duplicating it:
+
+```bash
+repo-manager post-pr-review 1234 --dry-run   # print the comment first
+repo-manager post-pr-review 1234
+```
+
+Request the suggested reviewers on GitHub. The PR author and anyone who already reviewed or was already requested are skipped, and each reviewer is requested individually so one non-collaborator does not abort the rest:
+
+```bash
+repo-manager request-pr-reviewers 1234 --dry-run
+repo-manager request-pr-reviewers 1234
+repo-manager request-pr-reviewers 1234 --reviewers bitgamma,jeremyfowers
+```
+
+PR reviews are stored locally (SQLite + `.repo-manager/reviews/prs/`) and are not part of the published dashboard or `pull`.
+
 Create a release-readiness review from stored commit reviews:
 
 ```bash
@@ -158,7 +199,9 @@ repo-manager db-table
 repo-manager db-row 1
 ```
 
-Browse saved reviews, the release-level review, and generated announcement in a local web UI:
+### Reviewing in the web UI
+
+Browse saved reviews, PR reviews, the release-level review, and generated announcement in a local web UI:
 
 ```bash
 repo-manager ui
@@ -166,12 +209,15 @@ repo-manager ui
 
 The UI serves the current workspace at `http://127.0.0.1:8765/` by default. Use `--no-open` to print the URL without opening a browser. Commit and release review to-dos can be checked off in the UI, and that state is persisted in SQLite.
 
+The **PR Reviews** tab lists stored open-PR reviews with their attention level and scope, and its detail pane includes the act half of the PR flow: **Post review comment** and **Request reviewers** buttons that run the same logic as `post-pr-review` and `request-pr-reviewers`. These buttons only work in the local UI (they use your `gh` credentials); the published static dashboard excludes PR reviews entirely.
+
 Use the tag dropdown to browse `vNext` and historical releases.
 
 The UI keeps the URL updated as you browse, so links can be shared directly to a release bucket and selected review. Deep links use hash parameters and work in both the local and static UI:
 
 ```text
 #view=commits&tag=v10.7.0&commit=COMMIT_SHA
+#view=prs&pr=1234
 #view=release&tag=v10.7.0
 #view=announcement&tag=v10.7.0
 ```
@@ -209,6 +255,7 @@ Workspace state lives under `.repo-manager/` in the initialized folder, includin
 ## Skills
 
 - `commit-review`: analyzes a GitHub commit and judges whether it was good for the project, with attention to review quality, tests, release risk, API compatibility, security, documentation, and shout-outs.
+- `pr-review`: pre-reviews an open pull request against the project's contribution, philosophy, and documentation guides, flags major scope and breaking API/UX changes, and suggests reviewers from the maintainer table.
 - `release-review`: analyzes stored commit reviews and produces a release-readiness verdict with P0/P1/P2 maintainer actions.
 - `release-announcement`: turns stored commit reviews into Discord-friendly markdown release highlights.
 
@@ -236,6 +283,9 @@ repo_manager/
 scripts/
 skills/
   commit-review/
+    SKILL.md
+    scripts/
+  pr-review/
     SKILL.md
     scripts/
   release-review/
