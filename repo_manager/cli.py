@@ -924,6 +924,20 @@ PR_SURFACE_VOCAB = ("api", "ux")
 PR_APPROVAL_VOCAB = ("approved", "not-approved", "unclear")
 PR_DESCRIPTION_VOCAB = ("accurate", "discrepancies", "missing")
 NO_ACTION_PATTERN = re.compile(r"^\s*no(?:ne)?\b.{0,30}\b(?:required|needed|necessary)", re.IGNORECASE)
+# A breaking change must name a surface a user experiences. Text that talks about code
+# structure without naming one is describing internals, which are never breaking.
+INTERNAL_SURFACE_PATTERN = re.compile(
+    r"\b(?:constructor|destructor|signature|subclass(?:es)?|base class|class layout|type alias|"
+    r"header file|refactor(?:s|ed|ing)?|internal (?:API|structure|code))\b|::|\.[ch]pp\b|\.hpp\b|\.tsx?\b",
+    re.IGNORECASE,
+)
+USER_SURFACE_PATTERN = re.compile(
+    r"(?:\bendpoint\b|\broute\b|/(?:api|v\d)\b|\bHTTP\b|\bCLI\b|\bcommand\b|\bsubcommand\b|--[a-z]|"
+    r"\bflag\b|\bconfig(?:uration)? (?:key|file|format|option)\b|\bGUI\b|\bUI\b|\bbutton\b|\bdropdown\b|"
+    r"\bpane\b|\bmodal\b|\bdefault(?:s)? chang\w+|\busers? (?:can no longer|will|see|lose)\b|\bschema\b|"
+    r"\bresponse\b|\brequest\b|\bpersisted\b|\bsaved (?:data|settings)\b)",
+    re.IGNORECASE,
+)
 
 
 def clean_github_handle(value):
@@ -1204,6 +1218,16 @@ def pr_review_validation_errors(data, pr_author):
             errors.append(
                 "Every breaking change that is undocumented or lacks maintainer approval needs an "
                 "imperative 'action' that clears it."
+            )
+            break
+    for change in breaking:
+        text = change.get("change", "")
+        if INTERNAL_SURFACE_PATTERN.search(text) and not USER_SURFACE_PATTERN.search(text):
+            errors.append(
+                f"Breaking change {text[:80]!r} describes internal code structure without naming a "
+                "user-visible surface (endpoint, CLI flag, config key, GUI control). Internal C++/TS "
+                "structure is never a breaking change — name the surface a user experiences, or drop "
+                "the item."
             )
             break
     evidence = data.get("evidence", {})

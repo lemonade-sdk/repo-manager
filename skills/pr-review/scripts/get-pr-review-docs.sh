@@ -102,3 +102,24 @@ if [[ -n "${documentation_file:-}" ]]; then
     "$documentation_file" \
     "documentation" "checklist" "ai" "contribut" "belongs" "process" "style" "voice" "structure"
 fi
+
+# The full docs tree, so peer-doc locations are a lookup rather than a guess when
+# judging documentation gaps by repo precedent.
+tree_file="${cache_dir}/docs-tree.txt"
+if [[ ! -s "$tree_file" ]]; then
+  if ! gh api \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "repos/${repo}/git/trees/${ref}?recursive=1" \
+    --jq '.tree[] | select(.type == "blob") | .path | select(startswith("docs/") or . == "README.md")' \
+    > "$tree_file"; then
+    rm -f "$tree_file"
+    echo "Missing or unreadable: docs tree for ${ref}" >&2
+  fi
+fi
+
+if [[ -s "$tree_file" ]]; then
+  echo "## Documentation tree (${ref})"
+  echo "Cached at: ${tree_file}"
+  cat "$tree_file"
+  echo
+fi
