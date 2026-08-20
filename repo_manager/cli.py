@@ -22,7 +22,7 @@ DB_FILE = "repo-manager.sqlite"
 RUBRIC_VERSION = "commit-review-2026-06-09"
 RELEASE_RUBRIC_VERSION = "release-review-2026-06-09"
 ANNOUNCEMENT_VERSION = "release-announcement-2026-06-09"
-PR_RUBRIC_VERSION = "pr-review-2026-07-30"
+PR_RUBRIC_VERSION = "pr-review-2026-08-08"
 PR_REVIEW_COMMENT_MARKER = "<!-- repo-manager:pr-review"
 
 
@@ -123,6 +123,9 @@ def ensure_db_schema(conn):
             continue
         if columns and "generation_seconds" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN generation_seconds REAL NOT NULL DEFAULT 0")
+    pr_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_reviews)")}
+    if pr_columns and "testing_status" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_todos (
@@ -176,6 +179,7 @@ def ensure_db_schema(conn):
           scope_verdict TEXT NOT NULL DEFAULT '',
           second_review_required INTEGER NOT NULL DEFAULT 0,
           documentation_status TEXT NOT NULL DEFAULT '',
+          testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
           breaking_changes TEXT NOT NULL DEFAULT '[]',
           suggested_reviewers TEXT NOT NULL DEFAULT '[]',
@@ -919,6 +923,7 @@ VALID_HANDLE = re.compile(r"^@[A-Za-z0-9-]+$")
 
 PR_DOC_VOCAB = ("contribute.md", "philosophy.md")
 PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
+PR_TEST_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
 PR_SCOPE_VOCAB = ("major", "minor")
 PR_SURFACE_VOCAB = ("api", "ux")
 PR_APPROVAL_VOCAB = ("approved", "not-approved", "unclear")
@@ -929,6 +934,23 @@ NO_ACTION_PATTERN = re.compile(r"^\s*no(?:ne)?\b.{0,30}\b(?:required|needed|nece
 INTERNAL_SURFACE_PATTERN = re.compile(
     r"\b(?:constructor|destructor|signature|subclass(?:es)?|base class|class layout|type alias|"
     r"header file|refactor(?:s|ed|ing)?|internal (?:API|structure|code))\b|::|\.[ch]pp\b|\.hpp\b|\.tsx?\b",
+    re.IGNORECASE,
+)
+# A clean testing bill is a trace: the check that covers the change, and the job or label
+# that runs it. Prose that names neither is an impression, and impressions are what let an
+# untested change through — so `adequate` has to cite both. The covering check is usually a
+# test file or case, but testing.md counts live CI verification (hash and drift checks,
+# artifact probes, typecheck) as coverage too, so a named step qualifies.
+COVERING_TEST_PATTERN = re.compile(
+    r"tests?[/\\][\w./\\-]+|\btest_[\w.]+|\b\w+Test\b|\bnpm run [\w:-]+|"
+    r"\.(?:py|cpp|cc|hpp|h|cjs|mjs|js|ts|tsx|sh|ps1|yml|yaml)\b|"
+    r"\b(?:sha256sum|markdown-link-check|typecheck|link check|drift[- ]check|--check)\b",
+    re.IGNORECASE,
+)
+CI_EXECUTION_PATTERN = re.compile(
+    r"\.github/workflows|\bworkflow\b|\bCI (?:job|check)s?\b|\bjob\b|\bcpp-ci\b|\bctest\b|"
+    r"register_cpp_ci_test|\bmatrix\b|\b(?:ctest|CTest|cpp-ci) label\b|\bmerge queue\b|"
+    r"\bscheduled\b|validate_\w+|typecheck",
     re.IGNORECASE,
 )
 USER_SURFACE_PATTERN = re.compile(
@@ -1027,6 +1049,25 @@ def normalize_pr_review_data(data):
         "gaps": gaps,
     }
 
+    testing = data.get("testing") if isinstance(data.get("testing"), dict) else {}
+    test_gaps = []
+    for entry in testing.get("gaps") or []:
+        if isinstance(entry, dict):
+            test_gaps.append(
+                {
+                    "what": text_of(entry, "what", "text", "gap", "description"),
+                    "where": text_of(entry, "where", "path", "file", "suite"),
+                    "policy": text_of(entry, "policy", "rule"),
+                    "action": text_of(entry, "action", "todo", "fix"),
+                }
+            )
+        elif str(entry).strip():
+            test_gaps.append({"what": str(entry).strip(), "where": "", "policy": "", "action": ""})
+    data["testing"] = {
+        "status": text_of(testing, "status").lower(),
+        "gaps": test_gaps,
+    }
+
     scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
     scope_verdict = text_of(scope, "verdict").lower()
     data["scope"] = {
@@ -1102,6 +1143,8 @@ def normalize_pr_review_data(data):
         reasons.append(f"{len(flags)} alignment issue(s)")
     if data["documentation"]["status"] == "gaps":
         reasons.append(f"{len(gaps)} documentation gap(s)")
+    if data["testing"]["status"] == "gaps":
+        reasons.append(f"{len(test_gaps)} testing gap(s)")
     verdict = data["description_check"]["verdict"]
     if verdict == "discrepancies":
         reasons.append("PR description does not match the diff")
@@ -1111,7 +1154,13 @@ def normalize_pr_review_data(data):
 
     if data["scope"]["second_review_required"] or uncleared:
         data["attention_level"] = "High"
-    elif breaking or flags or data["documentation"]["status"] == "gaps" or verdict in ("discrepancies", "missing"):
+    elif (
+        breaking
+        or flags
+        or data["documentation"]["status"] == "gaps"
+        or data["testing"]["status"] == "gaps"
+        or verdict in ("discrepancies", "missing")
+    ):
         data["attention_level"] = "Elevated"
     else:
         data["attention_level"] = "Routine"
@@ -1180,6 +1229,50 @@ def pr_review_validation_errors(data, pr_author):
             errors.append("Every documentation gap needs an imperative 'action' that closes it.")
             break
 
+    testing = data.get("testing", {})
+    test_status = testing.get("status")
+    test_gaps = testing.get("gaps", [])
+    if test_status not in PR_TEST_STATUS_VOCAB:
+        errors.append("testing.status must be 'adequate', 'gaps', or 'not-applicable'.")
+    elif test_status == "gaps" and not test_gaps:
+        errors.append("testing.status is 'gaps' but testing.gaps is empty — list each gap.")
+    elif test_status != "gaps" and test_gaps:
+        errors.append(
+            "testing.gaps is non-empty but status is not 'gaps' — set status to 'gaps' or drop the list."
+        )
+    for gap in test_gaps:
+        if not gap.get("what"):
+            errors.append("Every testing gap needs a non-empty 'what' describing the untested change.")
+            break
+    for gap in test_gaps:
+        if not gap.get("where"):
+            errors.append(
+                "Every testing gap needs a 'where' naming the suite, workflow, or CMake registration "
+                "that has to change — testing.md's routing table gives a destination for every "
+                "surface, and a gap you cannot route is a gap you have not established."
+            )
+            break
+    for gap in test_gaps:
+        if not gap.get("action"):
+            errors.append("Every testing gap needs an imperative 'action' that closes it.")
+            break
+    testing_basis = str(data.get("evidence", {}).get("testing", ""))
+    if test_status == "adequate":
+        if not COVERING_TEST_PATTERN.search(testing_basis):
+            errors.append(
+                "testing.status is 'adequate' but evidence.testing names no test — cite the suite and "
+                "the case that exercises this change (for example 'test/server_endpoints.py "
+                "test_037_...' or 'RocmRootResolutionTest'), or record the missing coverage as a gap."
+            )
+        elif not CI_EXECUTION_PATTERN.search(testing_basis):
+            errors.append(
+                "testing.status is 'adequate' but evidence.testing does not say what runs that test — "
+                "grep .github/workflows for the suite filename or the CTest name, and CMakeLists.txt "
+                "for its registration, then name what you found ('the Linux endpoints job in "
+                "cpp_server_build_test_release.yml', 'the cpp-ci label', 'the ctest -R list'). If no "
+                "grep hits, the coverage is a gap: set status to 'gaps' and record it."
+            )
+
     for flag in data.get("alignment_flags", []):
         if flag.get("doc") not in PR_DOC_VOCAB:
             errors.append("Every alignment flag needs doc set to 'contribute.md' or 'philosophy.md'.")
@@ -1242,6 +1335,7 @@ def pr_review_validation_errors(data, pr_author):
         discrepancies
         + data.get("alignment_flags", [])
         + gaps
+        + test_gaps
         + breaking
     )
     for item in all_items:
@@ -1272,7 +1366,7 @@ def pr_review_validation_errors(data, pr_author):
             "either has maintainers to suggest or is a recorded maintainer gap."
         )
 
-    for key in ("alignment", "documentation", "scope", "breaking_changes", "reviewers"):
+    for key in ("alignment", "documentation", "testing", "scope", "breaking_changes", "reviewers"):
         if not str(evidence.get(key, "")).strip():
             errors.append(
                 f"evidence.{key} is required: one or two sentences of synthesis "
@@ -1288,10 +1382,10 @@ def store_pr_review(workspace, repo, meta, data, json_file):
             """
             INSERT INTO pr_reviews (
               repo, pr_number, head_sha, pr_title, author, summary, attention_level,
-              scope_verdict, second_review_required, documentation_status, alignment_flags,
-              breaking_changes, suggested_reviewers, maintainer_needed_areas, raw_output,
-              json_path, reviewed_at, skill_version, rubric_version, generation_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              scope_verdict, second_review_required, documentation_status, testing_status,
+              alignment_flags, breaking_changes, suggested_reviewers, maintainer_needed_areas,
+              raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
               generation_seconds=excluded.generation_seconds,
               head_sha=excluded.head_sha,
@@ -1302,6 +1396,7 @@ def store_pr_review(workspace, repo, meta, data, json_file):
               scope_verdict=excluded.scope_verdict,
               second_review_required=excluded.second_review_required,
               documentation_status=excluded.documentation_status,
+              testing_status=excluded.testing_status,
               alignment_flags=excluded.alignment_flags,
               breaking_changes=excluded.breaking_changes,
               suggested_reviewers=excluded.suggested_reviewers,
@@ -1322,6 +1417,7 @@ def store_pr_review(workspace, repo, meta, data, json_file):
                 data.get("scope", {}).get("verdict", ""),
                 1 if data.get("scope", {}).get("second_review_required") else 0,
                 data.get("documentation", {}).get("status", ""),
+                data.get("testing", {}).get("status", ""),
                 json.dumps(data.get("alignment_flags", [])),
                 json.dumps(data.get("breaking_changes", [])),
                 json.dumps(data.get("suggested_reviewers", [])),
@@ -1506,6 +1602,17 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
     if documentation.get("status") == "gaps":
         lines += ["", "### Documentation gaps", ""]
         for gap in documentation.get("gaps") or []:
+            lines.append(f"- [ ] {gap.get('action') or gap.get('what', '')}")
+            if gap.get("what"):
+                lines.append(f"  - Gap: {gap['what']}")
+            if gap.get("where"):
+                lines.append(f"  - Where: `{gap['where']}`")
+            if gap.get("policy"):
+                lines.append(f"  - Why: {gap['policy']}")
+    testing = data.get("testing") or {}
+    if testing.get("status") == "gaps":
+        lines += ["", "### Testing gaps", ""]
+        for gap in testing.get("gaps") or []:
             lines.append(f"- [ ] {gap.get('action') or gap.get('what', '')}")
             if gap.get("what"):
                 lines.append(f"  - Gap: {gap['what']}")
@@ -3904,6 +4011,21 @@ def print_pretty_pr_review(data):
     if not documentation.get("gaps"):
         checked("documentation")
     for gap in documentation.get("gaps") or []:
+        print(f"- [ ] {gap.get('action') or gap.get('what', '')}")
+        if gap.get("what"):
+            print(f"      Gap: {gap['what']}")
+        if gap.get("where"):
+            print(f"      Where: {gap['where']}")
+        if gap.get("policy"):
+            print(f"      Why: {gap['policy']}")
+    print()
+
+    testing = data.get("testing") or {}
+    print("Testing")
+    print(testing.get("status", ""))
+    if not testing.get("gaps"):
+        checked("testing")
+    for gap in testing.get("gaps") or []:
         print(f"- [ ] {gap.get('action') or gap.get('what', '')}")
         if gap.get("what"):
             print(f"      Gap: {gap['what']}")

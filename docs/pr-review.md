@@ -1,6 +1,8 @@
 # PR Reviews
 
-repo-manager can pre-review open pull requests to flag what a human reviewer should look out for. This is advisory — it never replaces the human review. Each review checks whether the author's description accurately matches the diff, checks the PR against the target repo's `docs/dev/contribute.md` and `docs/dev/philosophy.md`, verifies documentation shipped with the change per `docs/dev/documentation.md`, judges whether the scope is major enough to need a second review from a core maintainer, flags breaking API/UX changes (and whether each is documented and maintainer-approved), and suggests reviewers from the maintainer table in `contribute.md`. Every flagged issue comes with an imperative to-do naming the step that resolves it, and the attention level (`Routine`/`Elevated`/`High`) is spelled out with what drove it.
+repo-manager can pre-review open pull requests to flag what a human reviewer should look out for. This is advisory — it never replaces the human review. Each review checks whether the author's description accurately matches the diff, checks the PR against the target repo's `docs/dev/contribute.md` and `docs/dev/philosophy.md`, verifies documentation shipped with the change per `docs/dev/documentation.md`, verifies the tests shipped with it per `docs/dev/testing.md`, judges whether the scope is major enough to need a second review from a core maintainer, flags breaking API/UX changes (and whether each is documented and maintainer-approved), and suggests reviewers from the maintainer table in `contribute.md`.
+
+The testing check asks the three questions `testing.md` asks: did a test ship with the change (routed through the guide's "Where Tests Go" table, so every gap names the suite that owns the surface), would CI actually run it (a new suite wired into a workflow, a C++ test registered with `register_cpp_ci_test()`, a merge-queue-gated surface carrying its `ci:` label), and could the test fail (the guide's anti-pattern table — structural-only assertions on numeric output, sleeps as success signals, logic reimplemented in the test). It is equally strict about over-testing: a data-table row covered by an existing mechanism, or a new test file for a device variant that belongs behind a flag on the existing suite, is a finding in the other direction. Every flagged issue comes with an imperative to-do naming the step that resolves it, and the attention level (`Routine`/`Elevated`/`High`) is spelled out with what drove it.
 
 ## Generate
 
@@ -26,7 +28,7 @@ repo-manager pr-table
 repo-manager pr-row 1
 ```
 
-A stored review has one section per question — description accuracy, alignment, documentation, scope, breaking changes, reviewers. Sections with findings render them as a to-do checklist with the justification and references as sub-bullets; clean sections instead show a one-line "Checked:" note recording what was inspected to earn the clean bill. The review never re-describes the PR beyond a one-sentence summary: the description-accuracy section judges the author's own description against the diff and only spends words on discrepancies.
+A stored review has one section per question — description accuracy, alignment, documentation, testing, scope, breaking changes, reviewers. Sections with findings render them as a to-do checklist with the justification and references as sub-bullets; clean sections instead show a one-line "Checked:" note recording what was inspected to earn the clean bill. The review never re-describes the PR beyond a one-sentence summary: the description-accuracy section judges the author's own description against the diff and only spends words on discrepancies.
 
 ## Act
 
@@ -46,6 +48,16 @@ repo-manager request-pr-reviewers 1234 --reviewers bitgamma,jeremyfowers
 ```
 
 PR reviews are stored locally (SQLite + `.repo-manager/reviews/prs/`) and are not part of the published dashboard or `pull`.
+
+## Replaying a merged PR
+
+Tuning the skill means asking whether it would have caught what human reviewers caught — and a merged PR's diff already contains the fixes those reviewers asked for, with their comments sitting in the context. `REPO_MANAGER_REPLAY_SHA` removes both: the diff is taken from the PR base to that commit, and the PR's reviews, comments, and check results are withheld, so the review judges the code as it stood before anyone looked at it.
+
+```bash
+REPO_MANAGER_REPLAY_SHA=abc1234 repo-manager review-pr 2603
+```
+
+The stored artifact still records the PR's live head SHA, so replay reviews are for evaluation rather than posting. One limit to read replays with: only the diff is rewound. Files the PR does not touch — workflows, `CMakeLists.txt`, the docs tree — are still read at the base branch's current state, so a review of a long-merged PR may cite a line that landed after it.
 
 ## PR Reviews in the web UI
 

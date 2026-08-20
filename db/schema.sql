@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
   scope_verdict TEXT NOT NULL DEFAULT '',
   second_review_required INTEGER NOT NULL DEFAULT 0,
   documentation_status TEXT NOT NULL DEFAULT '',
+  testing_status TEXT NOT NULL DEFAULT '',
   alignment_flags TEXT NOT NULL DEFAULT '[]',
   breaking_changes TEXT NOT NULL DEFAULT '[]',
   suggested_reviewers TEXT NOT NULL DEFAULT '[]',

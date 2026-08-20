@@ -82,6 +82,9 @@ print_doc() {
 contribute_file="$(fetch_doc "docs/dev/contribute.md" || true)"
 philosophy_file="$(fetch_doc "docs/dev/philosophy.md" || true)"
 documentation_file="$(fetch_doc "docs/dev/documentation.md" || true)"
+# testing.md is printed in full: its routing table ("Where Tests Go"), its CI
+# expectations, and its anti-pattern table are all tables no section filter would keep.
+testing_file="$(fetch_doc "docs/dev/testing.md" || true)"
 
 if [[ -n "${contribute_file:-}" ]]; then
   print_doc \
@@ -103,23 +106,34 @@ if [[ -n "${documentation_file:-}" ]]; then
     "documentation" "checklist" "ai" "contribut" "belongs" "process" "style" "voice" "structure"
 fi
 
-# The full docs tree, so peer-doc locations are a lookup rather than a guess when
-# judging documentation gaps by repo precedent.
-tree_file="${cache_dir}/docs-tree.txt"
+if [[ -n "${testing_file:-}" ]]; then
+  print_doc \
+    "docs/dev/testing.md" \
+    "$testing_file"
+fi
+
+# The repository tree, filtered twice: docs so peer-doc locations are a lookup rather
+# than a guess when judging documentation gaps by precedent, and test/CI paths so the
+# suite that owns a change — and whether a workflow would run it — is a lookup too.
+tree_file="${cache_dir}/repo-tree.txt"
 if [[ ! -s "$tree_file" ]]; then
   if ! gh api \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "repos/${repo}/git/trees/${ref}?recursive=1" \
-    --jq '.tree[] | select(.type == "blob") | .path | select(startswith("docs/") or . == "README.md")' \
+    --jq '.tree[] | select(.type == "blob") | .path' \
     > "$tree_file"; then
     rm -f "$tree_file"
-    echo "Missing or unreadable: docs tree for ${ref}" >&2
+    echo "Missing or unreadable: repository tree for ${ref}" >&2
   fi
 fi
 
 if [[ -s "$tree_file" ]]; then
   echo "## Documentation tree (${ref})"
   echo "Cached at: ${tree_file}"
-  cat "$tree_file"
+  grep -E '^(docs/|README\.md$)' "$tree_file" || true
+  echo
+
+  echo "## Test and CI tree (${ref})"
+  grep -E '^(test/|tests/|\.github/workflows/)' "$tree_file" || true
   echo
 fi

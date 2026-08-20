@@ -1,13 +1,13 @@
 ---
 name: pr-review
-description: Review an open GitHub pull request against the project's contribution, philosophy, and documentation guides, flag major scope and breaking API/UX changes, and suggest reviewers from the maintainer table. Use when asked to review an open PR, pre-review a PR, or triage what a human reviewer should look out for.
+description: Review an open GitHub pull request against the project's contribution, philosophy, documentation, and testing guides, flag major scope and breaking API/UX changes, and suggest reviewers from the maintainer table. Use when asked to review an open PR, pre-review a PR, or triage what a human reviewer should look out for.
 ---
 
 # PR Review
 
-The reader is the human reviewer about to review this PR. Your job is to hand them a short list of things worth their attention before they start reading code: whether the author's description honestly matches the diff, where the PR strays from the project's written guides, whether the documentation shipped with it, whether its scope or breaking changes demand a core maintainer's sign-off, and who from the maintainer table should review it. You are the advance scout, not the reviewer — never produce a line-by-line code review, never nitpick style, and never render a verdict on whether the PR should merge. That call belongs to the human.
+The reader is the human reviewer about to review this PR. Your job is to hand them a short list of things worth their attention before they start reading code: whether the author's description honestly matches the diff, where the PR strays from the project's written guides, whether the documentation and the tests shipped with it, whether its scope or breaking changes demand a core maintainer's sign-off, and who from the maintainer table should review it. You are the advance scout, not the reviewer — never produce a line-by-line code review, never nitpick style, and never render a verdict on whether the PR should merge. That call belongs to the human.
 
-Every issue you flag — a description discrepancy, an alignment issue, a documentation gap, an uncleared breaking change — is a discrete piece of work someone must do before this PR merges. So each one carries an `action`: a single imperative sentence naming the concrete step that would resolve it ("Run docs/tools/gen_backend_boilerplate.py and commit the regenerated table", "Split the unrelated CI change into its own PR"). The justification lives in the item's other fields; the action is only the fix.
+Every issue you flag — a description discrepancy, an alignment issue, a documentation or testing gap, an uncleared breaking change — is a discrete piece of work someone must do before this PR merges. So each one carries an `action`: a single imperative sentence naming the concrete step that would resolve it ("Run docs/tools/gen_backend_boilerplate.py and commit the regenerated table", "Split the unrelated CI change into its own PR"). The justification lives in the item's other fields; the action is only the fix.
 
 Your reader's time is the budget. Each prose field has exactly one job, and no fact appears in the artifact twice: `summary` is the one-sentence dashboard-table line saying what the PR does; `description_check.notes` judges how well the author's description covers the diff, without re-describing the changes; `scope.rationale` names the surface that decides major versus minor, without re-listing what changed; within a flagged item, `concern` states the violation once, `evidence` is the observable fact that proves it (a file, a count, a quoted sentence — never a repeat of the clause `concern` already cites), and `action` is only the fix. A reader who reads the whole review should never read the same sentence twice.
 
@@ -57,6 +57,17 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
       }
     ]
   },
+  "testing": {
+    "status": "adequate",
+    "gaps": [
+      {
+        "what": "The untested change, or the test that cannot do its job.",
+        "where": "test/... suite, workflow, or CMake registration that has to change.",
+        "policy": "The testing.md rule it violates.",
+        "action": "The imperative step that closes the gap."
+      }
+    ]
+  },
   "scope": {
     "verdict": "minor",
     "rationale": "One or two sentences on why this is minor or major scope."
@@ -83,6 +94,7 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
   "evidence": {
     "alignment": "...",
     "documentation": "...",
+    "testing": "...",
     "scope": "...",
     "breaking_changes": "...",
     "reviewers": "..."
@@ -94,6 +106,7 @@ Fixed vocabularies — use these exact values and no others:
 
 - `description_check.verdict`: `accurate`, `discrepancies`, or `missing`
 - `documentation.status`: `adequate`, `gaps`, or `not-applicable`
+- `testing.status`: `adequate`, `gaps`, or `not-applicable`
 - `scope.verdict`: `major` or `minor`
 - `breaking_changes[].surface`: `api` or `ux`
 - `breaking_changes[].maintainer_approval`: `approved`, `not-approved`, or `unclear`
@@ -101,7 +114,7 @@ Fixed vocabularies — use these exact values and no others:
 
 The `evidence` entries are shown to the reader only when their section is clean — they are the one-or-two-sentence basis for the clean bill ("reviewed both guides; the change is a contained fix with a linked issue"). When a section has items, the entry is never displayed: the items carry their own evidence, so keep it to a terse record of what you inspected and never restate the items.
 
-The caller computes two things from your artifact: whether a second review by a core maintainer is required (derived from `scope.verdict == "major"`), and the overall attention level (derived from the description check, breaking changes, alignment issues, and documentation status). Do not assert either in your prose — state the facts and let the structure speak.
+The caller computes two things from your artifact: whether a second review by a core maintainer is required (derived from `scope.verdict == "major"`), and the overall attention level (derived from the description check, breaking changes, alignment issues, and the documentation and testing statuses). Do not assert either in your prose — state the facts and let the structure speak.
 
 ## Required Inputs
 
@@ -120,9 +133,11 @@ scripts/get-pr-diff.sh OWNER/REPO PR_NUMBER
 scripts/get-pr-review-docs.sh OWNER/REPO REF
 ```
 
-Run each once. `get-pr-review-docs.sh` caches and prints `docs/dev/contribute.md` (in full, including the maintainer tables), `docs/dev/philosophy.md`, `docs/dev/documentation.md`, and the target repo's full documentation tree (every file under `docs/` plus the README); treat its output as the project-doc context for the run and do not reread those docs unless a required section is missing — if full docs are truly needed, rerun with `REPO_MANAGER_FULL_DOCS=1` and explain why. The documentation tree is your map for the precedent test: when the PR adds or changes something user-facing, scan the tree for the files where its peers would live and fetch the one or two candidates that would prove or disprove a gap — do not assert a clean documentation bill without having looked. Use the base branch (usually `main`) as REF. When linked issues or discussions matter to the scope question, fetch them with `skills/commit-review/scripts/get-linked-discussion.sh`. If the diff was truncated, read the specific files you still need. If the project docs are missing, report that in evidence; do not invent policy.
+Run each once. `get-pr-review-docs.sh` caches and prints `docs/dev/contribute.md` (in full, including the maintainer tables), `docs/dev/philosophy.md`, `docs/dev/documentation.md`, `docs/dev/testing.md` (in full, including its routing and anti-pattern tables), the target repo's full documentation tree (every file under `docs/` plus the README), and its test and CI tree (every file under `test/` and `.github/workflows/`); treat its output as the project-doc context for the run and do not reread those docs unless a required section is missing — if full docs are truly needed, rerun with `REPO_MANAGER_FULL_DOCS=1` and explain why. The two trees are your maps for the precedent tests: when the PR adds or changes something user-facing, scan the docs tree for the files where its peers would live and fetch the one or two candidates that would prove or disprove a gap — do not assert a clean documentation bill without having looked. The test and CI tree does the same job for testing: it tells you which suite owns the changed surface and which workflows exist to run it, so a suite you name is one that exists. Use the base branch (usually `main`) as REF. When linked issues or discussions matter to the scope question, fetch them with `skills/commit-review/scripts/get-linked-discussion.sh`. If the diff was truncated, read the specific files you still need. If the project docs are missing, report that in evidence; do not invent policy.
 
 Prefer the scripts and raw `gh api` endpoints over guessed CLI subcommands — `gh pr reviews` is not a valid GitHub CLI command.
+
+When the context output announces **replay mode**, the PR's reviews, comments, and check results have been withheld on purpose: the run is measuring what the diff alone supports. Do not go fetch them by another route, and judge every section from the diff, the description, and the project docs.
 
 ## Evaluation
 
@@ -137,6 +152,22 @@ Flag a misalignment only when you can trace it to a specific statement in one of
 Judge against what documentation.md actually says, not a generic sense that "features need docs." The core rule: documentation for a new or changed feature belongs in the same PR as the code. The test for whether a change has a doc-relevant surface is **repo precedent**: find where peers of the changed thing are documented — backend options have a per-backend table in `docs/dev/backends-reference.md`, endpoints live in `docs/api/`, CLI flags in `docs/guide/cli.md` — and a new peer needs the same coverage in the same PR. Search for **every** place peers appear (grep the docs tree for a sibling's name), not just the files the PR happens to touch — the canonical reference the PR forgot is exactly the gap worth finding. Match the doc surface to the size of the change: an API parameter row documents the parameter, not the feature, so a PR that introduces a new subsystem or user-facing capability is judged against where sibling features are introduced to users (the guides and concept docs), and a major feature whose only documentation is a parameter table has a gap. Precedent cuts both ways: if no peer of the changed thing is documented anywhere, there is no same-PR obligation, and pointing a gap at a stub or nonexistent location is manufacturing work. When you find the surface, name the exact file in the gap's `where`; an inline UI tooltip does not substitute for the docs table its siblings appear in.
 
 Some docs surfaces are **generated**: `docs/dev/backends-reference.md` is produced by `docs/tools/gen_backend_boilerplate.py` from the C++ backend descriptors, and CI checks that it is current. A PR that adds or changes a backend descriptor option without committing the regenerated doc has left the generated table stale — that is a gap, and the fix to name is "run the generator and commit the result", not "write prose". Check the top of a docs file for a generation marker before assuming it is hand-maintained. For PRs that touch docs, check for the failure modes documentation.md enumerates — hallucinated parameters, placeholder examples, stale claims. That check is active, not stylistic: read the changed examples as a user would run them (a multi-line shell command missing its continuation backslash is broken, not cosmetic), and test a doc's claims against the code in the same diff — a shipped doc that says "streaming is preserved" while the diff buffers the stream is a doc gap with the doc file as its `where`. Use `not-applicable` for PRs with no doc-relevant surface (internal refactors, CI changes, test-only changes, fixes that add no new behavior). `status` must agree with `gaps`: `gaps` non-empty exactly when status is `gaps`.
+
+### Testing
+
+Judge against testing.md exactly as you judge documentation against documentation.md: its written rules, never a generic sense that "code needs tests." Its core claim — a feature isn't done until a test that could catch its regression runs in CI — gives you three questions, in order.
+
+**Did a test ship with the change?** The "Where Tests Go" table is a routing table: find the row this PR falls in and you have both the obligation and the destination. A new or changed endpoint owes `test/server_endpoints.py`, a CLI change owes `test/server_cli2.py`, pure C++ logic owes `test/cpp/test_<thing>.cpp`, and a bug fix owes a numbered regression test in whichever suite owns the surface. Name that suite in the gap's `where`; a gap you cannot route to a file is a gap you have not established.
+
+Credit only coverage this diff contains: the changed-files list is the arbiter, and the test tree tells you where tests live, never what this PR added. Existing coverage still earns `adequate` when you can say which existing case exercises the changed path — "there is a suite for this area" is not that, and a new test your evidence describes but the changed-files list does not show is someone else's work you have credited to this PR.
+
+**Would CI actually run it?** A committed test no workflow executes is the failure mode reviewers catch most often, and the one a diff settles definitively. This question is about the test the PR *relies on*, not only about files the PR creates: adding cases to an existing suite owes the same answer as adding a new one — which job or label executes that file? Trace it and name it. A new Python suite has to join a job in `cpp_server_build_test_release.yml`; a C++ test has to reach the `cpp-ci` label through `register_cpp_ci_test()` in `CMakeLists.txt`, so one registered with plain `add_test`, or registered with CI explicitly off, is a test CI does not run. Coverage guarded by `#ifdef _WIN32` or a capability gate runs only where a job provides that platform or capability, so trace it to that job too. "The test file exists and gained cases" is not an answer to this question — `evidence.testing` records the job or label you traced, and when you cannot find one, that is the gap. The same question governs the merge-queue table: when the PR touches packaging, macOS, a wrapped server, or a backend version pin and carries none of the matching `ci:` labels, the jobs that would catch the break never ran, and the action names the label to apply. And when the checks are red while the PR's own comments wave the failure off as a known flake, testing.md makes the evidence the author's job — the action is to link the identical failure on a `main` run or fix it.
+
+**Could the test fail?** Read new assertions the way an adversary would: one that also holds on the broken code is decoration, not coverage. Counters asserted `>= 0`, structural checks on numeric output where testing.md wants a golden reference, a sleep standing in for a success signal, a Python reimplementation of the C++ logic under test, a builder's output compared against the builder's own expectations, an assertion coupled to model wording, a capability gate no CI matrix row satisfies — each is in the anti-pattern table, and each is a gap whose `where` is the test that has to change. For a bug fix, testing.md asks the author to confirm the test fails on pre-fix code; when a regression test would plausibly pass without the fix and nothing in the PR says otherwise, say so.
+
+A clean testing bill is a trace, not an impression. Before writing `adequate` you can name three things: the suite that owns the changed surface, the specific test case in it that exercises this change (`test_037_model_update_check_lifecycle`, `RocmRootResolutionTest`), and the job or CTest label that executes that case. `evidence.testing` records all three, because each is a claim you had to look up — the routing table gives you the first, the diff or the suite gives you the second, and the third is one grep: search `.github/workflows/` for the suite's filename or the test's CTest name, and `CMakeLists.txt` for its registration. A C++ test reaches CI through `register_cpp_ci_test()` and the `cpp-ci` label or by appearing in a workflow's `ctest -R` pattern; a Python suite reaches it by being named in a workflow step. One of those greps hits, or the coverage is a gap. Coverage need not be a unittest: testing.md counts the live CI checks — hash and drift guards, artifact probes, link checks, the app typecheck — as the coverage for the things they guard, so when the change is guarded by such a step, that step is the covering check and naming it with its job completes the trace. Do not ask for a unittest on top of it. Any of the three you cannot name is the gap; write it as one rather than asserting the coverage exists. "The test file is registered with CI" without the job or label that proves it is exactly the sentence this rule exists to stop.
+
+Restraint is the other half of the judgment, and testing.md is as explicit about over-testing as under-testing. Rows added to a data table an existing mechanism already consumes — a GPU architecture, a model registry entry, a version pin — are covered by that mechanism's tests and the live CI checks; demanding a new test for the row is manufacturing work the guide names as an anti-pattern, and what the PR owes instead is a description of what the author verified on real hardware. A new backend or device for an existing modality belongs behind a flag and a matrix row on the existing suite, so a PR that adds a whole new test *file* for one has the gap running the other way. Use `not-applicable` for changes with no testable surface — docs-only, comments, assets, or a pure workflow edit. A change that alters runtime behavior always has a testable surface: it is a bug fix by the routing table's reckoning even when the diff is a handful of lines inside existing server code, and "no new surface" is the reason its regression test belongs in the suite that already owns that surface, not a reason to skip it. Use `adequate` when the trace above lands — the owning suite, the case, and the job that runs it. Never invent a destination: if no existing suite owns the surface and the routing table has no row for it, write what you found in evidence rather than pointing an action at a file that does not exist. `status` must agree with `gaps`: `gaps` non-empty exactly when status is `gaps`.
 
 ### Scope
 

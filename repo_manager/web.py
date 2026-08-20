@@ -28,6 +28,9 @@ def ensure_generation_schema(conn):
             continue
         if columns and "generation_seconds" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN generation_seconds REAL NOT NULL DEFAULT 0")
+    pr_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_reviews)")}
+    if pr_columns and "testing_status" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
 
 
 def now_iso():
@@ -87,6 +90,7 @@ def ensure_pr_schema(conn):
           scope_verdict TEXT NOT NULL DEFAULT '',
           second_review_required INTEGER NOT NULL DEFAULT 0,
           documentation_status TEXT NOT NULL DEFAULT '',
+          testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
           breaking_changes TEXT NOT NULL DEFAULT '[]',
           suggested_reviewers TEXT NOT NULL DEFAULT '[]',
@@ -622,6 +626,7 @@ def pr_reviews(workspace, pr_viewer=""):
                 "maintainer_needed_areas", parse_json_text(item.get("maintainer_needed_areas"), [])
             )
             item["documentation"] = data.get("documentation", {})
+            item["testing"] = data.get("testing", {})
             item["scope"] = data.get("scope", {})
             item["evidence"] = data.get("evidence", {})
             item["description_check"] = data.get("description_check", {})
@@ -2083,10 +2088,10 @@ INDEX_HTML = r"""<!doctype html>
       }));
     }
 
-    function documentationSection(documentation, evidence) {
-      const status = (documentation || {}).status || "";
-      const gaps = (documentation || {}).gaps || [];
-      if (!gaps.length) return `<p>${badge(status || "unknown")}</p>${basisNote(evidence, "documentation")}`;
+    function gapSection(block, evidence, evidenceKey) {
+      const status = (block || {}).status || "";
+      const gaps = (block || {}).gaps || [];
+      if (!gaps.length) return `<p>${badge(status || "unknown")}</p>${basisNote(evidence, evidenceKey)}`;
       return `<p>${badge(status || "unknown")}</p>${todoItems(gaps.map((gap) => ({
         action: gap.action,
         fallback: gap.what,
@@ -2185,7 +2190,8 @@ INDEX_HTML = r"""<!doctype html>
         section("Attention", attentionSection(row)),
         section("Scope", `<p><strong>${esc(scope.verdict || row.scope_verdict || "")}</strong> — ${esc(scope.rationale || "")}</p>`),
         section("Alignment Issues", alignmentList(row.alignment_flags, row.evidence)),
-        section("Documentation", documentationSection(row.documentation, row.evidence)),
+        section("Documentation", gapSection(row.documentation, row.evidence, "documentation")),
+        section("Testing", gapSection(row.testing, row.evidence, "testing")),
         section("Breaking Changes", breakingList(row.breaking_changes, row.evidence)),
         section("Suggested Reviewers", reviewerList(row.suggested_reviewers, row.maintainer_needed_areas, row.evidence)),
         section("Actions", prActions(row))
