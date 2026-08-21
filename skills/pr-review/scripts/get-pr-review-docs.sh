@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   echo "Usage: $0 OWNER/REPO REF [cache-dir]" >&2
   echo "Set REPO_MANAGER_FULL_DOCS=1 to print complete documents." >&2
+  echo "Set REPO_MANAGER_REFRESH_DOCS=1 to re-fetch instead of serving the cache." >&2
 }
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
@@ -22,6 +23,10 @@ mkdir -p "$cache_dir"
 fetch_doc() {
   local path="$1"
   local file="${cache_dir}/${path//\//__}"
+
+  if [[ "${REPO_MANAGER_REFRESH_DOCS:-}" == "1" ]]; then
+    rm -f "$file"
+  fi
 
   if [[ ! -s "$file" ]]; then
     if ! gh api \
@@ -77,8 +82,9 @@ print_doc() {
   echo
 }
 
-# contribute.md is printed in full: the maintainer tables sit under headings
-# like "### Features" that no section filter would match.
+# contribute.md is printed in full: the maintainer table and the Review Process
+# ladder that sets how many reviewers a PR needs sit under headings no section
+# filter would match.
 contribute_file="$(fetch_doc "docs/dev/contribute.md" || true)"
 philosophy_file="$(fetch_doc "docs/dev/philosophy.md" || true)"
 documentation_file="$(fetch_doc "docs/dev/documentation.md" || true)"
@@ -116,6 +122,9 @@ fi
 # than a guess when judging documentation gaps by precedent, and test/CI paths so the
 # suite that owns a change — and whether a workflow would run it — is a lookup too.
 tree_file="${cache_dir}/repo-tree.txt"
+if [[ "${REPO_MANAGER_REFRESH_DOCS:-}" == "1" ]]; then
+  rm -f "$tree_file"
+fi
 if [[ ! -s "$tree_file" ]]; then
   if ! gh api \
     -H "X-GitHub-Api-Version: 2022-11-28" \

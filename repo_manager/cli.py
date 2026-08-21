@@ -22,7 +22,7 @@ DB_FILE = "repo-manager.sqlite"
 RUBRIC_VERSION = "commit-review-2026-06-09"
 RELEASE_RUBRIC_VERSION = "release-review-2026-06-09"
 ANNOUNCEMENT_VERSION = "release-announcement-2026-06-09"
-PR_RUBRIC_VERSION = "pr-review-2026-08-08"
+PR_RUBRIC_VERSION = "pr-review-tiered-2026-08-20"
 PR_REVIEW_COMMENT_MARKER = "<!-- repo-manager:pr-review"
 
 
@@ -126,6 +126,22 @@ def ensure_db_schema(conn):
     pr_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_reviews)")}
     if pr_columns and "testing_status" not in pr_columns:
         conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
+    # The major/minor scope taxonomy predates contribute.md's Review Process rungs and is
+    # gone, not shimmed: drop the columns so nothing can read a stale verdict.
+    for dead in ("scope_verdict", "second_review_required"):
+        if dead in pr_columns:
+            try:
+                conn.execute(f"ALTER TABLE pr_reviews DROP COLUMN {dead}")
+            except sqlite3.OperationalError:
+                pass
+    if pr_columns and "review_rung" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN review_rung TEXT NOT NULL DEFAULT ''")
+    if pr_columns and "reviewers_needed" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN reviewers_needed INTEGER NOT NULL DEFAULT 1")
+    if pr_columns and "tier_reached" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN tier_reached TEXT NOT NULL DEFAULT ''")
+    if pr_columns and "gate_stopped_at" not in pr_columns:
+        conn.execute("ALTER TABLE pr_reviews ADD COLUMN gate_stopped_at TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_todos (
@@ -176,8 +192,8 @@ def ensure_db_schema(conn):
           author TEXT NOT NULL DEFAULT '',
           summary TEXT NOT NULL DEFAULT '',
           attention_level TEXT NOT NULL DEFAULT '',
-          scope_verdict TEXT NOT NULL DEFAULT '',
-          second_review_required INTEGER NOT NULL DEFAULT 0,
+          review_rung TEXT NOT NULL DEFAULT '',
+          reviewers_needed INTEGER NOT NULL DEFAULT 1,
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -239,10 +255,26 @@ def resolve_repo(args, config):
     return args.repo or config["repo"]
 
 
+def project_docs_cache_dir(workspace):
+    """Absolute cache root for fetched project docs.
+
+    The fetch script defaults this to a path relative to its cwd, which is how a skill run
+    from somewhere else ends up reading — or writing — a different repository's cache.
+    """
+    return Path(workspace).resolve() / CONFIG_DIR / "cache" / "project-docs"
+
+
+PR_TIERS_WITHOUT_REVIEW_STATE = ("pr-triage", "pr-reviewers")
+
+
 def run_pi(skill_name, prompt, cwd):
     pi = shutil.which("pi")
     if not pi:
         raise SystemExit("`pi` was not found on PATH.")
+    env = dict(os.environ)
+    env["REPO_MANAGER_CACHE_DIR"] = str(project_docs_cache_dir(cwd))
+    if skill_name in PR_TIERS_WITHOUT_REVIEW_STATE:
+        env["REPO_MANAGER_WITHHOLD_REVIEWS"] = "1"
     cmd = [pi, "--mode", "json", "--skill", str(skill_path(skill_name))]
     saw_text = False
     assistant_text = []
@@ -259,6 +291,7 @@ def run_pi(skill_name, prompt, cwd):
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,
@@ -884,7 +917,7 @@ def gh_cli_json(args, check=True):
         raise SystemExit(f"GitHub CLI returned invalid JSON for gh {' '.join(args)}: {exc}")
 
 
-PR_METADATA_FIELDS = "number,title,state,isDraft,headRefOid,author,url"
+PR_METADATA_FIELDS = "number,title,state,isDraft,headRefOid,author,url,baseRefName"
 
 
 def pr_author_handle(meta):
@@ -922,46 +955,24 @@ DISCORD_ANNOTATION = re.compile(r"\s*\(discord:[^)]*\)", re.IGNORECASE)
 VALID_HANDLE = re.compile(r"^@[A-Za-z0-9-]+$")
 
 PR_DOC_VOCAB = ("contribute.md", "philosophy.md")
-PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
-PR_TEST_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
-PR_SCOPE_VOCAB = ("major", "minor")
+PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable", "not-evaluated")
+PR_TEST_STATUS_VOCAB = ("adequate", "gaps", "not-applicable", "not-evaluated")
+PR_FOCUS_VOCAB = ("focused", "bundled")
+# contribute.md's Review Process rungs. These replace the old major/minor scope verdict,
+# which predated the guide and encoded a size taxonomy the guide does not use.
+PR_RUNG_VOCAB = ("one-reviewer", "two-with-expert", "named-approver")
+PR_RUNG_REVIEWERS = {"one-reviewer": 1, "two-with-expert": 2, "named-approver": 2}
+PR_RUNG_LABEL = {
+    "one-reviewer": "any 1 reviewer",
+    "two-with-expert": "2 reviewers including 1 subject-area expert",
+    "named-approver": "review from the maintainer the guide names",
+}
 PR_SURFACE_VOCAB = ("api", "ux")
 PR_APPROVAL_VOCAB = ("approved", "not-approved", "unclear")
 PR_DESCRIPTION_VOCAB = ("accurate", "discrepancies", "missing")
-NO_ACTION_PATTERN = re.compile(r"^\s*no(?:ne)?\b.{0,30}\b(?:required|needed|necessary)", re.IGNORECASE)
-# A breaking change must name a surface a user experiences. Text that talks about code
-# structure without naming one is describing internals, which are never breaking.
-INTERNAL_SURFACE_PATTERN = re.compile(
-    r"\b(?:constructor|destructor|signature|subclass(?:es)?|base class|class layout|type alias|"
-    r"header file|refactor(?:s|ed|ing)?|internal (?:API|structure|code))\b|::|\.[ch]pp\b|\.hpp\b|\.tsx?\b",
-    re.IGNORECASE,
-)
-# A clean testing bill is a trace: the check that covers the change, and the job or label
-# that runs it. Prose that names neither is an impression, and impressions are what let an
-# untested change through — so `adequate` has to cite both. The covering check is usually a
-# test file or case, but testing.md counts live CI verification (hash and drift checks,
-# artifact probes, typecheck) as coverage too, so a named step qualifies.
-COVERING_TEST_PATTERN = re.compile(
-    r"tests?[/\\][\w./\\-]+|\btest_[\w.]+|\b\w+Test\b|\bnpm run [\w:-]+|"
-    r"\.(?:py|cpp|cc|hpp|h|cjs|mjs|js|ts|tsx|sh|ps1|yml|yaml)\b|"
-    r"\b(?:sha256sum|markdown-link-check|typecheck|link check|drift[- ]check|--check)\b",
-    re.IGNORECASE,
-)
-CI_EXECUTION_PATTERN = re.compile(
-    r"\.github/workflows|\bworkflow\b|\bCI (?:job|check)s?\b|\bjob\b|\bcpp-ci\b|\bctest\b|"
-    r"register_cpp_ci_test|\bmatrix\b|\b(?:ctest|CTest|cpp-ci) label\b|\bmerge queue\b|"
-    r"\bscheduled\b|validate_\w+|typecheck",
-    re.IGNORECASE,
-)
-USER_SURFACE_PATTERN = re.compile(
-    r"(?:\bendpoint\b|\broute\b|/(?:api|v\d)\b|\bHTTP\b|\bCLI\b|\bcommand\b|\bsubcommand\b|--[a-z]|"
-    r"\bflag\b|\bconfig(?:uration)? (?:key|file|format|option)\b|\bGUI\b|\bUI\b|\bbutton\b|\bdropdown\b|"
-    r"\bpane\b|\bmodal\b|\bdefault(?:s)? chang\w+|\busers? (?:can no longer|will|see|lose)\b|\bschema\b|"
-    r"\bresponse\b|\brequest\b|\bpersisted\b|\bsaved (?:data|settings)\b)",
-    re.IGNORECASE,
-)
-
-
+# Why a reviewer is on the list. 'code-author' is a contributor who wrote the code under
+# review, which is a different claim from maintainership and never satisfies it.
+PR_BASIS_VOCAB = ("maintainer-table", "code-author")
 def clean_github_handle(value):
     text = DISCORD_ANNOTATION.sub("", str(value or "")).strip().lstrip("@").strip()
     return f"@{text}" if text else ""
@@ -991,7 +1002,7 @@ def text_of(entry, *keys):
 def normalize_pr_review_data(data):
     """Coerce Pi's output into the documented shape and derive the computed fields.
 
-    `second_review_required` and `attention_level` are always computed here from the
+    `reviewers_needed` and `attention_level` are always computed here from the
     structured lists, never trusted from Pi, so the skill's prose can never contradict them.
     """
     description = data.get("description_check") if isinstance(data.get("description_check"), dict) else {}
@@ -1068,13 +1079,27 @@ def normalize_pr_review_data(data):
         "gaps": test_gaps,
     }
 
-    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
-    scope_verdict = text_of(scope, "verdict").lower()
-    data["scope"] = {
-        "verdict": scope_verdict,
-        "rationale": text_of(scope, "rationale", "reason"),
-        "second_review_required": scope_verdict == "major",
+    focus = data.get("focus") if isinstance(data.get("focus"), dict) else {}
+    data["focus"] = {
+        "verdict": text_of(focus, "verdict").lower(),
+        "rationale": text_of(focus, "rationale", "reason"),
+        "action": text_of(focus, "action", "todo", "fix"),
     }
+
+    requirement = data.get("review_requirement") if isinstance(data.get("review_requirement"), dict) else {}
+    rung = text_of(requirement, "rung", "verdict").lower()
+    areas = requirement.get("expert_areas")
+    if isinstance(areas, str):
+        areas = [areas]
+    data["review_requirement"] = {
+        "rung": rung,
+        "surface": text_of(requirement, "surface"),
+        "expert_areas": [str(area).strip() for area in (areas or []) if str(area).strip()],
+        "named_approver": clean_github_handle(text_of(requirement, "named_approver")) if rung == "named-approver" else "",
+        "rationale": text_of(requirement, "rationale", "reason"),
+        "reviewers_needed": PR_RUNG_REVIEWERS.get(rung, 1),
+    }
+
 
     breaking = []
     for entry in data.get("breaking_changes") or []:
@@ -1110,11 +1135,19 @@ def normalize_pr_review_data(data):
         if isinstance(entry, dict):
             item = {
                 "handle": clean_github_handle(text_of(entry, "handle", "reviewer", "login", "maintainer")),
+                "basis": (text_of(entry, "basis", "source") or "maintainer-table").lower(),
+                "in_maintainer_table": coerce_bool(entry.get("in_maintainer_table")),
                 "subject_area": text_of(entry, "subject_area", "area"),
                 "reason": text_of(entry, "reason", "why"),
             }
         else:
-            item = {"handle": clean_github_handle(entry), "subject_area": "", "reason": ""}
+            item = {
+                "handle": clean_github_handle(entry),
+                "basis": "maintainer-table",
+                "in_maintainer_table": None,
+                "subject_area": "",
+                "reason": "",
+            }
         if not item["handle"] or item["handle"].lower() in seen:
             continue
         seen.add(item["handle"].lower())
@@ -1133,8 +1166,12 @@ def normalize_pr_review_data(data):
         if change["documented"] is not True or change["maintainer_approval"] != "approved"
     ]
     reasons = []
-    if data["scope"]["second_review_required"]:
-        reasons.append("major scope")
+    rung_now = data["review_requirement"]["rung"]
+    if rung_now == "named-approver":
+        named = data["review_requirement"].get("named_approver") or "the maintainer the guide names"
+        reasons.append(f"needs {named}")
+    elif rung_now == "two-with-expert":
+        reasons.append("needs 2 reviewers including a subject-area expert")
     if uncleared:
         reasons.append(f"{len(uncleared)} breaking change(s) without docs or maintainer sign-off")
     elif breaking:
@@ -1146,17 +1183,24 @@ def normalize_pr_review_data(data):
     if data["testing"]["status"] == "gaps":
         reasons.append(f"{len(test_gaps)} testing gap(s)")
     verdict = data["description_check"]["verdict"]
-    if verdict == "discrepancies":
+    # Bundling outranks a description omission — see pr_gate_after_triage. Reporting both
+    # gives the reader two reasons for one problem.
+    if data["focus"]["verdict"] == "bundled":
+        reasons.append("unrelated changes bundled together")
+    elif verdict == "discrepancies":
         reasons.append("PR description does not match the diff")
     elif verdict == "missing":
         reasons.append("PR description is missing")
     data["attention_reasons"] = reasons
 
-    if data["scope"]["second_review_required"] or uncleared:
+    if rung_now == "named-approver" or uncleared:
         data["attention_level"] = "High"
+    elif rung_now == "two-with-expert":
+        data["attention_level"] = "Elevated"
     elif (
         breaking
         or flags
+        or data["focus"]["verdict"] == "bundled"
         or data["documentation"]["status"] == "gaps"
         or data["testing"]["status"] == "gaps"
         or verdict in ("discrepancies", "missing")
@@ -1167,25 +1211,184 @@ def normalize_pr_review_data(data):
     return data
 
 
-def pr_review_validation_errors(data, pr_author):
-    """Structural checks that keep the artifact machine-actionable — style stays the skill's job.
+def store_pr_review(workspace, repo, meta, data, json_file):
+    raw = json.dumps(data, indent=2)
+    with connect_db(workspace) as conn:
+        conn.execute(
+            """
+            INSERT INTO pr_reviews (
+              repo, pr_number, head_sha, pr_title, author, summary, attention_level,
+              review_rung, reviewers_needed, documentation_status, testing_status,
+              alignment_flags, breaking_changes, suggested_reviewers, maintainer_needed_areas,
+              raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds,
+              tier_reached, gate_stopped_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
+              generation_seconds=excluded.generation_seconds,
+              head_sha=excluded.head_sha,
+              pr_title=excluded.pr_title,
+              author=excluded.author,
+              summary=excluded.summary,
+              attention_level=excluded.attention_level,
+              review_rung=excluded.review_rung,
+              reviewers_needed=excluded.reviewers_needed,
+              documentation_status=excluded.documentation_status,
+              testing_status=excluded.testing_status,
+              alignment_flags=excluded.alignment_flags,
+              breaking_changes=excluded.breaking_changes,
+              suggested_reviewers=excluded.suggested_reviewers,
+              maintainer_needed_areas=excluded.maintainer_needed_areas,
+              raw_output=excluded.raw_output,
+              json_path=excluded.json_path,
+              reviewed_at=excluded.reviewed_at,
+              skill_version=excluded.skill_version,
+              tier_reached=excluded.tier_reached,
+              gate_stopped_at=excluded.gate_stopped_at
+            """,
+            (
+                repo,
+                meta["number"],
+                meta.get("headRefOid", ""),
+                meta.get("title", ""),
+                pr_author_handle(meta),
+                data.get("summary", ""),
+                data.get("attention_level", ""),
+                data.get("review_requirement", {}).get("rung", ""),
+                int(data.get("review_requirement", {}).get("reviewers_needed") or 1),
+                data.get("documentation", {}).get("status", ""),
+                data.get("testing", {}).get("status", ""),
+                json.dumps(data.get("alignment_flags", [])),
+                json.dumps(data.get("breaking_changes", [])),
+                json.dumps(data.get("suggested_reviewers", [])),
+                json.dumps(data.get("maintainer_needed_areas", [])),
+                raw,
+                str(json_file),
+                now_iso(),
+                __version__,
+                PR_RUBRIC_VERSION,
+                float(data.get("generation_seconds") or 0),
+                data.get("tier_reached", ""),
+                (data.get("gate") or {}).get("stopped_at") or "",
+            ),
+        )
 
-    The same false-green/false-red guards as the release review: a status that contradicts its
-    list, or an empty breaking-changes list whose prose still describes breaks, is the output
-    that misleads a reviewer, so those contradictions are the hard gate.
+
+def latest_pr_review(workspace, repo, pr_number):
+    with connect_db(workspace) as conn:
+        row = conn.execute(
+            "SELECT * FROM pr_reviews WHERE repo=? AND pr_number=? AND rubric_version=?",
+            (repo, pr_number, PR_RUBRIC_VERSION),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def refresh_project_docs(workspace, repo, ref):
+    """Re-fetch the project docs at `ref` before the skill runs.
+
+    Two failures this closes. The cache never expires on its own — the fetch script only
+    downloads a file it does not already have — so a warm cache serves whatever vintage it
+    was filled with. And a skill that skips the fetch reads the docs from whatever working
+    tree is lying around, which for a PR review is the PR's own branch: its contribution
+    guide is the one from the branch point, not the one the PR will merge into.
     """
+    script = repo_root() / "skills" / "pr-review" / "scripts" / "get-pr-review-docs.sh"
+    if not script.exists():
+        print(f"Warning: doc fetch script not found at {script}; the skill will fetch its own.")
+        return
+    env = dict(os.environ)
+    env["REPO_MANAGER_CACHE_DIR"] = str(project_docs_cache_dir(workspace))
+    env["REPO_MANAGER_REFRESH_DOCS"] = "1"
+    print(f"Refreshing project docs from {repo}@{ref}...", flush=True)
+    result = subprocess.run(
+        ["bash", str(script), repo, ref],
+        cwd=workspace,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"Warning: could not refresh project docs at {ref} "
+            f"({(result.stderr or '').strip() or 'unknown error'}). "
+            "The review may be judged against a stale contribution guide."
+        )
+
+
+PR_TIERS = ("triage", "quality", "reviewers")
+PR_TIER_SKILLS = {"triage": "pr-triage", "quality": "pr-quality", "reviewers": "pr-reviewers"}
+
+
+# --- contribute.md maintainer table -------------------------------------------------
+#
+# The guide is the source of truth for who maintains what and who the escalation rung
+# names. Parsing it beats hardcoding, which is how the old "core maintainer" wording
+# outlived the concept it described.
+
+MAINTAINER_ROW = re.compile(r"^\|\s*@([A-Za-z0-9-]+)\s*\|([^|]*)\|(.*)\|\s*$")
+NAMED_APPROVER = re.compile(r"should have\s+@([A-Za-z0-9-]+)\s+review", re.IGNORECASE)
+
+
+def contribute_doc_path(workspace, repo, ref="main"):
+    safe = str(repo).replace("/", "__")
+    return Path(workspace) / ".repo-manager" / "cache" / "project-docs" / safe / ref / "docs__dev__contribute.md"
+
+
+def parse_maintainer_table(text):
+    """{handle: {"admin": bool, "areas": [term, ...]}} from the Maintainers table."""
+    table = {}
+    for line in text.splitlines():
+        match = MAINTAINER_ROW.match(line.strip())
+        if not match:
+            continue
+        handle, admin_cell, areas_cell = match.groups()
+        areas = [area.strip() for area in areas_cell.split(",") if area.strip()]
+        if not areas:
+            continue
+        table[handle.lower()] = {
+            "handle": f"@{handle}",
+            "admin": admin_cell.strip().lower() in ("yes", "y", "true", "x"),
+            "areas": areas,
+        }
+    return table
+
+
+def parse_named_approver(text):
+    """The handle the guide's top review rung names, or '' when it names none."""
+    match = NAMED_APPROVER.search(text)
+    return f"@{match.group(1)}" if match else ""
+
+
+def load_maintainer_context(workspace, repo, ref="main"):
+    path = contribute_doc_path(workspace, repo, ref)
+    if not path.exists():
+        return {"table": {}, "named_approver": "", "source": ""}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "table": parse_maintainer_table(text),
+        "named_approver": parse_named_approver(text),
+        "source": str(path),
+    }
+
+
+def covers_any_area(entry, expert_areas):
+    """Does this maintainer's Subject Areas cell name any area the PR needs an expert for?"""
+    if not entry or not expert_areas:
+        return []
+    owned = {area.lower() for area in entry.get("areas", [])}
+    return [area for area in expert_areas if area.strip().lower() in owned]
+
+def pr_triage_validation_errors(data, pr_author, maintainer_areas=None):
+    """Tier 1: the shape checks. Their verdicts gate the rest of the pipeline."""
     errors = []
     if not str(data.get("summary", "")).strip():
-        errors.append("summary is required: one or two sentences on what the PR does.")
+        errors.append("summary is required: one sentence on what the PR does.")
 
     description = data.get("description_check", {})
     if description.get("verdict") not in PR_DESCRIPTION_VOCAB:
         errors.append("description_check.verdict must be exactly 'accurate', 'discrepancies', or 'missing'.")
     if not description.get("notes"):
-        errors.append(
-            "description_check.notes is required: one or two sentences on how the author's description "
-            "compares to the diff."
-        )
+        errors.append("description_check.notes is required: how the author's description compares to the diff.")
     discrepancies = description.get("discrepancies", [])
     if description.get("verdict") == "discrepancies" and not discrepancies:
         errors.append("description_check.verdict is 'discrepancies' but the discrepancies list is empty.")
@@ -1202,76 +1405,107 @@ def pr_review_validation_errors(data, pr_author):
         if not item.get("action"):
             errors.append("Every description discrepancy needs an imperative 'action' that resolves it.")
             break
+    for item in discrepancies:
+        if not item.get("evidence"):
+            errors.append(
+                "Every description discrepancy needs 'evidence' — the file, hunk, or quoted description "
+                "text a reader can check it against."
+            )
+            break
 
-    scope = data.get("scope", {})
-    if scope.get("verdict") not in PR_SCOPE_VOCAB:
-        errors.append("scope.verdict must be exactly 'major' or 'minor'.")
-    if not scope.get("rationale"):
-        errors.append("scope.rationale is required: name the surface that makes the scope major or minor.")
+    focus = data.get("focus", {})
+    if focus.get("verdict") not in PR_FOCUS_VOCAB:
+        errors.append("focus.verdict must be exactly 'focused' or 'bundled'.")
+    if not focus.get("rationale"):
+        errors.append("focus.rationale is required: whether the diff solves one problem.")
+    if focus.get("verdict") == "bundled" and not focus.get("action"):
+        errors.append("focus.verdict is 'bundled' but focus.action is empty — name the split.")
+    if focus.get("verdict") == "focused" and focus.get("action"):
+        errors.append("focus.action is set but the verdict is 'focused' — drop the action or change the verdict.")
 
-    documentation = data.get("documentation", {})
-    status = documentation.get("status")
-    gaps = documentation.get("gaps", [])
-    if status not in PR_DOC_STATUS_VOCAB:
-        errors.append("documentation.status must be 'adequate', 'gaps', or 'not-applicable'.")
-    elif status == "gaps" and not gaps:
-        errors.append("documentation.status is 'gaps' but documentation.gaps is empty — list each gap.")
-    elif status != "gaps" and gaps:
+    requirement = data.get("review_requirement", {})
+    rung = requirement.get("rung")
+    if rung not in PR_RUNG_VOCAB:
         errors.append(
-            "documentation.gaps is non-empty but status is not 'gaps' — set status to 'gaps' or drop the list."
+            "review_requirement.rung must be exactly 'one-reviewer', 'two-with-expert', or "
+            "'named-approver' — read it off the surface table in the skill."
         )
-    for gap in gaps:
-        if not gap.get("what"):
-            errors.append("Every documentation gap needs a non-empty 'what' describing the undocumented change.")
-            break
-    for gap in gaps:
-        if not gap.get("action"):
-            errors.append("Every documentation gap needs an imperative 'action' that closes it.")
-            break
-
-    testing = data.get("testing", {})
-    test_status = testing.get("status")
-    test_gaps = testing.get("gaps", [])
-    if test_status not in PR_TEST_STATUS_VOCAB:
-        errors.append("testing.status must be 'adequate', 'gaps', or 'not-applicable'.")
-    elif test_status == "gaps" and not test_gaps:
-        errors.append("testing.status is 'gaps' but testing.gaps is empty — list each gap.")
-    elif test_status != "gaps" and test_gaps:
+    if not requirement.get("surface"):
         errors.append(
-            "testing.gaps is non-empty but status is not 'gaps' — set status to 'gaps' or drop the list."
+            "review_requirement.surface is required: the changed surface in the table's own words "
+            "(for example 'flag on an existing CLI command')."
         )
-    for gap in test_gaps:
-        if not gap.get("what"):
-            errors.append("Every testing gap needs a non-empty 'what' describing the untested change.")
-            break
-    for gap in test_gaps:
+    if not requirement.get("rationale"):
+        errors.append("review_requirement.rationale is required: the surface and the rung it maps to.")
+    if rung == "named-approver" and not VALID_HANDLE.match(requirement.get("named_approver") or ""):
+        errors.append(
+            "review_requirement.rung is 'named-approver' but named_approver is not a bare '@handle' — "
+            "copy it from contribute.md's Review Process text."
+        )
+    if rung == "one-reviewer" and requirement.get("expert_areas"):
+        errors.append(
+            "review_requirement.expert_areas must be empty for 'one-reviewer' — that rung asks for "
+            "any one reviewer, not a subject-area expert."
+        )
+    if rung in ("two-with-expert", "named-approver") and not requirement.get("expert_areas"):
+        errors.append(
+            "review_requirement.expert_areas is empty but the rung needs a subject-area expert — "
+            "name the areas a reviewer would have to cover, in maintainer-table vocabulary."
+        )
+    if maintainer_areas:
+        unknown = [
+            area for area in requirement.get("expert_areas") or []
+            if area.strip().lower() not in maintainer_areas
+        ]
+        if unknown:
+            errors.append(
+                f"review_requirement.expert_areas contains {unknown!r}, which no maintainer's "
+                "Subject Areas cell names. Copy the terms verbatim from the contribute.md table — "
+                "an area nobody lists can never be matched to a reviewer, so it reads as "
+                "'no expert available' forever. Available terms include: "
+                + ", ".join(sorted(maintainer_areas)[:14]) + "."
+            )
+
+    evidence = data.get("evidence", {})
+    for key in ("description", "focus", "review_requirement"):
+        if not str(evidence.get(key, "")).strip():
+            errors.append(
+                f"evidence.{key} is required: one or two sentences of synthesis "
+                "(or 'none observed' when that is the honest answer)."
+            )
+    return errors
+
+
+def pr_quality_validation_errors(data, pr_author):
+    """Tier 2: the author-obligation checks."""
+    errors = []
+    for section, vocab in (("documentation", PR_DOC_STATUS_VOCAB), ("testing", PR_TEST_STATUS_VOCAB)):
+        block = data.get(section, {})
+        status = block.get("status")
+        gaps = block.get("gaps", [])
+        if status not in vocab or status == "not-evaluated":
+            errors.append(f"{section}.status must be 'adequate', 'gaps', or 'not-applicable'.")
+        elif status == "gaps" and not gaps:
+            errors.append(f"{section}.status is 'gaps' but {section}.gaps is empty — list each gap.")
+        elif status != "gaps" and gaps:
+            errors.append(
+                f"{section}.gaps is non-empty but status is not 'gaps' — set status to 'gaps' or drop the list."
+            )
+        for gap in gaps:
+            if not gap.get("what"):
+                errors.append(f"Every {section} gap needs a non-empty 'what'.")
+                break
+        for gap in gaps:
+            if not gap.get("action"):
+                errors.append(f"Every {section} gap needs an imperative 'action' that closes it.")
+                break
+    for gap in data.get("testing", {}).get("gaps", []):
         if not gap.get("where"):
             errors.append(
                 "Every testing gap needs a 'where' naming the suite, workflow, or CMake registration "
-                "that has to change — testing.md's routing table gives a destination for every "
-                "surface, and a gap you cannot route is a gap you have not established."
+                "that has to change — a gap you cannot route is a gap you have not established."
             )
             break
-    for gap in test_gaps:
-        if not gap.get("action"):
-            errors.append("Every testing gap needs an imperative 'action' that closes it.")
-            break
-    testing_basis = str(data.get("evidence", {}).get("testing", ""))
-    if test_status == "adequate":
-        if not COVERING_TEST_PATTERN.search(testing_basis):
-            errors.append(
-                "testing.status is 'adequate' but evidence.testing names no test — cite the suite and "
-                "the case that exercises this change (for example 'test/server_endpoints.py "
-                "test_037_...' or 'RocmRootResolutionTest'), or record the missing coverage as a gap."
-            )
-        elif not CI_EXECUTION_PATTERN.search(testing_basis):
-            errors.append(
-                "testing.status is 'adequate' but evidence.testing does not say what runs that test — "
-                "grep .github/workflows for the suite filename or the CTest name, and CMakeLists.txt "
-                "for its registration, then name what you found ('the Linux endpoints job in "
-                "cpp_server_build_test_release.yml', 'the cpp-ci label', 'the ctest -R list'). If no "
-                "grep hits, the coverage is a gap: set status to 'gaps' and record it."
-            )
 
     for flag in data.get("alignment_flags", []):
         if flag.get("doc") not in PR_DOC_VOCAB:
@@ -1285,6 +1519,18 @@ def pr_review_validation_errors(data, pr_author):
         if not flag.get("action"):
             errors.append("Every alignment flag needs an imperative 'action' that resolves it.")
             break
+    author_handle = str(pr_author or "").lstrip("@").lower()
+    if author_handle:
+        for flag in data.get("alignment_flags", []):
+            text = f"{flag.get('action', '')} {flag.get('concern', '')}".lower()
+            if f"@{author_handle}" in text and "approv" in text:
+                errors.append(
+                    f"An alignment flag names the PR author (@{author_handle}) as the maintainer who "
+                    "approved the change. The pre-agreement is between the contributor and a different "
+                    "maintainer — name another maintainer of this area, or ask for the agreement without "
+                    "naming who gave it."
+                )
+                break
 
     breaking = data.get("breaking_changes", [])
     for change in breaking:
@@ -1313,60 +1559,9 @@ def pr_review_validation_errors(data, pr_author):
                 "imperative 'action' that clears it."
             )
             break
-    for change in breaking:
-        text = change.get("change", "")
-        if INTERNAL_SURFACE_PATTERN.search(text) and not USER_SURFACE_PATTERN.search(text):
-            errors.append(
-                f"Breaking change {text[:80]!r} describes internal code structure without naming a "
-                "user-visible surface (endpoint, CLI flag, config key, GUI control). Internal C++/TS "
-                "structure is never a breaking change — name the surface a user experiences, or drop "
-                "the item."
-            )
-            break
+
     evidence = data.get("evidence", {})
-    breaking_prose = f"{evidence.get('breaking_changes', '')} {data.get('summary', '')}"
-    if not breaking and HAS_BREAKING_PATTERN.search(breaking_prose) and not NO_BREAKING_PATTERN.search(breaking_prose):
-        errors.append(
-            "breaking_changes is empty but the evidence or summary describes breaking changes — "
-            "enumerate each one in the breaking_changes list."
-        )
-
-    all_items = (
-        discrepancies
-        + data.get("alignment_flags", [])
-        + gaps
-        + test_gaps
-        + breaking
-    )
-    for item in all_items:
-        if NO_ACTION_PATTERN.match(item.get("action") or ""):
-            errors.append(
-                "An item whose action is 'no action required' is not an issue — drop it from the list; "
-                "anything checked and found fine belongs in the section's evidence entry instead."
-            )
-            break
-
-    author_key = str(pr_author or "").lower()
-    for reviewer in data.get("suggested_reviewers", []):
-        if not VALID_HANDLE.match(reviewer.get("handle", "")):
-            errors.append(
-                f"Suggested reviewer handle {reviewer.get('handle', '')!r} is not a plain GitHub handle — "
-                "use '@handle' only; 'Maintainer Needed' areas belong in maintainer_needed_areas."
-            )
-        elif author_key and reviewer["handle"].lower() == author_key:
-            errors.append(
-                f"Suggested reviewer {reviewer['handle']} is the PR author — pick another maintainer from the "
-                "area's table row, or record the area in maintainer_needed_areas."
-            )
-        elif not reviewer.get("subject_area") or not reviewer.get("reason"):
-            errors.append("Every suggested reviewer needs a subject_area and a reason.")
-    if not data.get("suggested_reviewers") and not data.get("maintainer_needed_areas"):
-        errors.append(
-            "suggested_reviewers and maintainer_needed_areas are both empty — every area the PR touches "
-            "either has maintainers to suggest or is a recorded maintainer gap."
-        )
-
-    for key in ("alignment", "documentation", "testing", "scope", "breaking_changes", "reviewers"):
+    for key in ("alignment", "documentation", "testing", "breaking_changes"):
         if not str(evidence.get(key, "")).strip():
             errors.append(
                 f"evidence.{key} is required: one or two sentences of synthesis "
@@ -1375,109 +1570,209 @@ def pr_review_validation_errors(data, pr_author):
     return errors
 
 
-def store_pr_review(workspace, repo, meta, data, json_file):
-    raw = json.dumps(data, indent=2)
-    with connect_db(workspace) as conn:
-        conn.execute(
-            """
-            INSERT INTO pr_reviews (
-              repo, pr_number, head_sha, pr_title, author, summary, attention_level,
-              scope_verdict, second_review_required, documentation_status, testing_status,
-              alignment_flags, breaking_changes, suggested_reviewers, maintainer_needed_areas,
-              raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
-              generation_seconds=excluded.generation_seconds,
-              head_sha=excluded.head_sha,
-              pr_title=excluded.pr_title,
-              author=excluded.author,
-              summary=excluded.summary,
-              attention_level=excluded.attention_level,
-              scope_verdict=excluded.scope_verdict,
-              second_review_required=excluded.second_review_required,
-              documentation_status=excluded.documentation_status,
-              testing_status=excluded.testing_status,
-              alignment_flags=excluded.alignment_flags,
-              breaking_changes=excluded.breaking_changes,
-              suggested_reviewers=excluded.suggested_reviewers,
-              maintainer_needed_areas=excluded.maintainer_needed_areas,
-              raw_output=excluded.raw_output,
-              json_path=excluded.json_path,
-              reviewed_at=excluded.reviewed_at,
-              skill_version=excluded.skill_version
-            """,
-            (
-                repo,
-                meta["number"],
-                meta.get("headRefOid", ""),
-                meta.get("title", ""),
-                pr_author_handle(meta),
-                data.get("summary", ""),
-                data.get("attention_level", ""),
-                data.get("scope", {}).get("verdict", ""),
-                1 if data.get("scope", {}).get("second_review_required") else 0,
-                data.get("documentation", {}).get("status", ""),
-                data.get("testing", {}).get("status", ""),
-                json.dumps(data.get("alignment_flags", [])),
-                json.dumps(data.get("breaking_changes", [])),
-                json.dumps(data.get("suggested_reviewers", [])),
-                json.dumps(data.get("maintainer_needed_areas", [])),
-                raw,
-                str(json_file),
-                now_iso(),
-                __version__,
-                PR_RUBRIC_VERSION,
-                float(data.get("generation_seconds") or 0),
-            ),
+def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainers=None):
+    """Tier 3: the slate."""
+    errors = []
+    author_key = str(pr_author or "").lower()
+    for reviewer in data.get("suggested_reviewers", []):
+        if not VALID_HANDLE.match(reviewer.get("handle", "")):
+            errors.append(
+                f"Suggested reviewer handle {reviewer.get('handle', '')!r} is not a plain GitHub handle — "
+                "use '@handle' only; a surface no row covers belongs in maintainer_needed_areas."
+            )
+        elif author_key and reviewer["handle"].lower() == author_key:
+            errors.append(
+                f"Suggested reviewer {reviewer['handle']} is the PR author — pick another candidate, or "
+                "say in evidence.reviewers that the author is the sole candidate for that surface."
+            )
+        elif reviewer.get("basis") not in PR_BASIS_VOCAB:
+            errors.append(
+                f"Suggested reviewer {reviewer['handle']} needs basis set to 'maintainer-table' or 'code-author'."
+            )
+        elif reviewer.get("in_maintainer_table") is None:
+            errors.append(
+                f"Suggested reviewer {reviewer['handle']} needs in_maintainer_table set to true or false — "
+                "it records whether their handle appears in the contribute.md table."
+            )
+        elif not reviewer.get("subject_area") or not reviewer.get("reason"):
+            errors.append("Every suggested reviewer needs a subject_area and a reason.")
+    if not data.get("suggested_reviewers") and not data.get("maintainer_needed_areas"):
+        errors.append(
+            "suggested_reviewers and maintainer_needed_areas are both empty — every surface the PR touches "
+            "either has a candidate to suggest or is a recorded maintainer gap."
         )
+    # The rung named the expertise this PR needs; a slate covering none of it staffs the PR
+    # with people the dashboard will immediately report as insufficient.
+    expert_areas = [a for a in (requirement or {}).get("expert_areas") or [] if str(a).strip()]
+    if expert_areas and maintainers:
+        # An area whose only maintainers are the PR author cannot be covered by any slate,
+        # because the author is never suggestable. Demanding it would make this check
+        # unsatisfiable by construction, so those areas are excluded and belong in
+        # maintainer_needed_areas instead.
+        author_key = str(pr_author or "").lstrip("@").lower()
+        coverable = []
+        for area in expert_areas:
+            owners = {
+                handle for handle, entry in maintainers.items()
+                if area.strip().lower() in {a.lower() for a in entry.get("areas", [])}
+            }
+            if owners - {author_key}:
+                coverable.append(area)
+        expert_areas = coverable
+    if expert_areas and maintainers:
+        slate = [item.get("handle", "").lstrip("@").lower() for item in data.get("suggested_reviewers", [])]
+        wanted = {a.strip().lower() for a in expert_areas}
+        covered = [
+            handle for handle in slate
+            if wanted & {area.lower() for area in (maintainers.get(handle) or {}).get("areas", [])}
+        ]
+        if not covered:
+            errors.append(
+                f"This PR's rung needs a subject-area expert in {', '.join(expert_areas)}, but nobody "
+                "on the slate lists any of those areas in the maintainer table. Add a maintainer who "
+                "does, or record the area in maintainer_needed_areas if nobody covers it."
+            )
+
+    # A maintainer-table suggestion quotes one term from that maintainer's own row. Joining
+    # two terms, or naming one they do not list, is how a loose match gets dressed as a
+    # table lookup — the reader cannot audit a term that is not in the cell.
+    if maintainers:
+        for item in data.get("suggested_reviewers", []):
+            if item.get("basis") != "maintainer-table":
+                continue
+            handle = item.get("handle", "").lstrip("@").lower()
+            entry = maintainers.get(handle)
+            if not entry:
+                continue
+            owned = {a.lower() for a in entry.get("areas", [])}
+            cited = [part.strip() for part in str(item.get("subject_area", "")).split(",") if part.strip()]
+            if len(cited) > 3:
+                errors.append(
+                    f"Suggested reviewer {item.get('handle')} cites {len(cited)} subject areas. Name only the "
+                    "ones that make them relevant to this diff — quoting the whole cell says nothing about why "
+                    "they were chosen."
+                )
+            unknown = [part for part in cited if part.lower() not in owned]
+            if unknown:
+                errors.append(
+                    f"Suggested reviewer {item.get('handle')} cites subject area(s) {unknown!r} that do not "
+                    f"appear in their Subject Areas cell. Quote terms verbatim from it "
+                    f"({', '.join(sorted(entry.get('areas', []))[:6])}...) — citing more than one is fine when "
+                    "each is genuinely listed — or use basis 'code-author' if blame is the real reason."
+                )
+
+    # A term asserting novelty cannot justify a reviewer on a PR whose own surface says the
+    # thing already exists. Semantic fit is not checkable, but self-contradiction is.
+    # Every one-reviewer cell describes a change to something that already exists, so a term
+    # asserting novelty contradicts the rung itself — not just surfaces that say "existing".
+    surface = str((requirement or {}).get("surface", "")).lower()
+    if "existing" in surface or (requirement or {}).get("rung") == "one-reviewer":
+        for item in data.get("suggested_reviewers", []):
+            if item.get("basis") != "maintainer-table":
+                continue
+            cited = [part.strip() for part in str(item.get("subject_area", "")).split(",") if part.strip()]
+            novel = [part for part in cited if part.lower().startswith("new ")]
+            if novel:
+                errors.append(
+                    f"Suggested reviewer {item.get('handle')} is justified by {novel!r}, but this PR's "
+                    f"surface is {(requirement or {}).get('surface')!r} — it changes something that already "
+                    "exists. Cite a term that matches what the diff does, or use basis 'code-author'."
+                )
+                break
+
+    # A slate with no maintainer-table entry means no row matched any surface this PR touches.
+    # That is a maintainer gap by definition, and saying so is the useful part for the reader.
+    slate_items = data.get("suggested_reviewers", [])
+    if slate_items and not any(item.get("basis") == "maintainer-table" for item in slate_items):
+        if not data.get("maintainer_needed_areas"):
+            errors.append(
+                "Every suggested reviewer is a code-author, which means no maintainer's Subject Areas "
+                "cell covers this PR — record those surfaces in maintainer_needed_areas. A reader who "
+                "learns nobody owns a surface can act on that; a slate that omits it hides the gap."
+            )
+
+    basis_text = str(data.get("evidence", {}).get("reviewers", "")).strip()
+    if not basis_text:
+        errors.append("evidence.reviewers is required: the surfaces you identified and how you got the slate.")
+    elif "blame" not in basis_text.lower() and not any(
+        item.get("basis") == "code-author" for item in data.get("suggested_reviewers", [])
+    ):
+        errors.append(
+            "evidence.reviewers does not mention the code-authorship pass. Run "
+            "get-pr-code-authors.sh and record what it returned, even when nothing useful came "
+            "back — a docs-only PR is the case where it matters most, not the case to skip."
+        )
+    return errors
 
 
-def latest_pr_review(workspace, repo, pr_number):
-    with connect_db(workspace) as conn:
-        row = conn.execute(
-            "SELECT * FROM pr_reviews WHERE repo=? AND pr_number=? AND rubric_version=?",
-            (repo, pr_number, PR_RUBRIC_VERSION),
-        ).fetchone()
-    return dict(row) if row else None
+PR_TIER_VALIDATORS = {
+    "triage": pr_triage_validation_errors,
+    "quality": pr_quality_validation_errors,
+    "reviewers": pr_reviewers_validation_errors,
+}
 
 
-def generate_pr_review(workspace, repo, meta):
+def rung_brief(requirement):
+    """The line tier 3 needs: how many reviewers, what expertise, who is named."""
+    rung = (requirement or {}).get("rung") or ""
+    if not rung:
+        return ""
+    needed = PR_RUNG_REVIEWERS.get(rung, 1)
+    areas = ", ".join((requirement or {}).get("expert_areas") or [])
+    parts = [
+        f"Review requirement: {rung} — contribute.md asks for {PR_RUNG_LABEL.get(rung, rung)}.",
+        f"Surface: {(requirement or {}).get('surface', '')}.",
+        f"Name at least {needed} reviewer(s).",
+    ]
+    if areas:
+        parts.append(f"At least one must cover a subject area among: {areas}.")
+    named = (requirement or {}).get("named_approver") or ""
+    if named:
+        parts.append(f"The guide names {named} for this rung; include them unless they authored the PR.")
+    return " ".join(parts)
+
+
+def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
+    """Run one tier's skill and return its validated, normalized fragment.
+
+    Each tier validates only its own fields, so a bounced tier re-runs that tier's judgment
+    rather than the whole review — the monolith re-ran everything for one bad field.
+    """
     number = meta["number"]
-    head = meta.get("headRefOid", "")
     author = pr_author_handle(meta)
-    json_file = pr_artifact_path(workspace, repo, number)
-    feedback = load_pr_review_feedback(workspace, repo, number)
-    if feedback:
-        print("Resuming with validation feedback from a previous interrupted pr-review run.", flush=True)
-    pending_dir = json_file.parent / ".pending"
+    skill = PR_TIER_SKILLS[tier]
+    validator = PR_TIER_VALIDATORS[tier]
+    maintainer_areas, maintainer_table = None, {}
+    if tier in ("triage", "reviewers"):
+        maintainer_table = load_maintainer_context(workspace, repo, base_ref).get("table", {})
+        maintainer_areas = {area.lower() for entry in maintainer_table.values() for area in entry.get("areas", [])}
+    pending_dir = pr_artifact_path(workspace, repo, number).parent / ".pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
+    feedback = ""
     max_attempts = 3
-    data = None
-    started = time.monotonic()
     for attempt in range(1, max_attempts + 1):
-        pending_json = pending_dir / f"{json_file.stem}.{int(time.time() * 1000)}.pending.json"
+        pending_json = pending_dir / f"pr-{number}.{tier}.{int(time.time() * 1000)}.pending.json"
         prompt = (
-            f"/skill:pr-review {repo} {number}\n\n"
+            f"/skill:{skill} {repo} {number}\n\n"
             f"PR: #{number} — {meta.get('title', '')}\n"
-            f"Head SHA: {head}\n"
-            f"Author: {author} (never suggest the author as a reviewer)\n\n"
-            f"Write the machine-readable JSON result to: {pending_json}\n\n"
+            f"Head SHA: {meta.get('headRefOid', '')}\n"
+            f"Base branch: {base_ref} (project docs have been refreshed at this ref; "
+            f"read them only via scripts/get-pr-review-docs.sh, never from a working tree)\n"
+            f"Author: {author} (never suggest the author as a reviewer)\n"
+            + (f"{rung_brief(requirement)}\n" if tier == "reviewers" and requirement else "")
+            + f"\nWrite the machine-readable JSON result to: {pending_json}\n\n"
             f"{feedback}"
         )
         try:
-            output = run_pi("pr-review", prompt, workspace)
+            output = run_pi(skill, prompt, workspace)
         except SystemExit as exc:
-            if exc.code in (130, None):
+            if exc.code in (130, None) or attempt == max_attempts:
                 raise
-            if attempt == max_attempts:
-                raise
-            print(f"Pi run failed (exit {exc.code}); retrying with the same instructions.", flush=True)
+            print(f"Pi run failed (exit {exc.code}); retrying tier {tier}.", flush=True)
             continue
         if not pending_json.exists() and write_json_artifact_from_output(pending_json, output):
-            print(f"Wrote pr-review artifact from Pi output: {pending_json}")
-        artifact_raw = ""
-        errors = []
-        candidate = None
+            print(f"Wrote {tier} artifact from Pi output: {pending_json}")
+        errors, candidate, artifact_raw = [], None, ""
         if pending_json.exists():
             artifact_raw = pending_json.read_text(encoding="utf-8")
             candidate = extract_json_object(artifact_raw)
@@ -1485,29 +1780,135 @@ def generate_pr_review(workspace, repo, meta):
                 errors.append("Artifact file must contain a valid JSON object.")
             else:
                 candidate = normalize_pr_review_data(candidate)
-                errors.extend(pr_review_validation_errors(candidate, author))
+                if tier == "triage":
+                    errors = validator(candidate, author, maintainer_areas)
+                elif tier == "reviewers":
+                    errors = validator(candidate, author, requirement, maintainer_table)
+                else:
+                    errors = validator(candidate, author)
         else:
-            errors.append(f"Expected pr-review JSON file was not created: {pending_json}")
+            errors.append(f"Expected {tier} JSON file was not created: {pending_json}")
         if not errors:
-            data = candidate
-            break
+            return candidate
         error_list = "\n".join(f"- {error}" for error in errors)
         if attempt == max_attempts:
-            raise SystemExit(f"PR review failed validation after {max_attempts} attempts:\n{error_list}")
-        print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
-        save_pr_review_feedback(workspace, repo, number, error_list, artifact_raw)
+            raise SystemExit(f"PR {tier} failed validation after {max_attempts} attempts:\n{error_list}")
+        print(f"\nTier {tier} attempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
         feedback = build_release_review_feedback(error_list, artifact_raw)
-    clear_pr_review_feedback(workspace, repo, number)
+    raise SystemExit(f"PR {tier} produced no usable artifact.")
+
+
+def pr_gate_after_triage(triage):
+    """contribute.md Reviewer Expectation 1-2: is this PR in a shape worth reviewing?
+
+    Bundling outranks a description omission. Both checks can see the same undescribed
+    extra work, and asking an author to both describe it and split it is two contradictory
+    to-dos for one problem — so when the PR is going to be split, the split is the finding
+    and the descriptions of the resulting PRs are a question for those PRs.
+    """
+    if triage["focus"]["verdict"] == "bundled":
+        return "the PR bundles unrelated changes"
+    if triage["description_check"]["verdict"] != "accurate":
+        verdict = triage["description_check"]["verdict"]
+        return (
+            "the PR description is missing"
+            if verdict == "missing"
+            else "the PR description does not match the diff"
+        )
+    return None
+
+
+def pr_gate_after_quality(quality):
+    """Reviewer Expectation 3-5: work the author owes before a human should read the code."""
+    reasons = []
+    if quality["documentation"]["status"] == "gaps":
+        reasons.append(f"{len(quality['documentation']['gaps'])} documentation gap(s)")
+    if quality["testing"]["status"] == "gaps":
+        reasons.append(f"{len(quality['testing']['gaps'])} testing gap(s)")
+    if quality["alignment_flags"]:
+        reasons.append(f"{len(quality['alignment_flags'])} alignment issue(s)")
+    return ", ".join(reasons) or None
+
+
+def generate_pr_review(workspace, repo, meta):
+    number = meta["number"]
+    base_ref = meta.get("baseRefName") or load_config(workspace).get("branch") or "main"
+    refresh_project_docs(workspace, repo, base_ref)
+    started = time.monotonic()
+
+    triage = run_pr_tier(workspace, repo, meta, "triage", base_ref)
+    data = dict(triage)
+    tier_reached, stopped_at, gate_reason = "triage", None, None
+
+    blocked = pr_gate_after_triage(triage)
+    if blocked:
+        stopped_at, gate_reason = "triage", blocked
+        print(f"PR #{number}: stopped after triage — {blocked}.", flush=True)
+    else:
+        quality = run_pr_tier(workspace, repo, meta, "quality", base_ref)
+        for key in ("alignment_flags", "documentation", "testing", "breaking_changes"):
+            data[key] = quality[key]
+        data["evidence"].update(quality.get("evidence", {}))
+        tier_reached = "quality"
+        owed = pr_gate_after_quality(quality)
+        # An uncleared break is the one author obligation that still needs a maintainer:
+        # only a listed maintainer can sign it off, so withholding the slate would deadlock.
+        uncleared = [
+            change for change in quality["breaking_changes"]
+            if change["documented"] is not True or change["maintainer_approval"] != "approved"
+        ]
+        if meta.get("isDraft"):
+            reason = "this PR is still a draft, so no human reviewer is assigned yet"
+            if owed:
+                reason += f", and the author owes {owed}"
+            stopped_at, gate_reason = "quality", reason
+            print(f"PR #{number}: draft — skipping reviewer assignment.", flush=True)
+        elif owed and not uncleared:
+            stopped_at, gate_reason = "quality", f"the author owes {owed}"
+            print(f"PR #{number}: stopped after quality — author owes {owed}.", flush=True)
+        else:
+            if owed and uncleared:
+                print(
+                    f"PR #{number}: {owed} outstanding, but an uncleared breaking change needs a "
+                    "maintainer sign-off — assigning reviewers anyway.",
+                    flush=True,
+                )
+            reviewers = run_pr_tier(
+                workspace, repo, meta, "reviewers", base_ref, requirement=data.get("review_requirement")
+            )
+            data["suggested_reviewers"] = reviewers["suggested_reviewers"]
+            data["maintainer_needed_areas"] = reviewers["maintainer_needed_areas"]
+            data["evidence"].update(reviewers.get("evidence", {}))
+            tier_reached = "reviewers"
+
+    if tier_reached == "triage":
+        data["documentation"] = {"status": "not-evaluated", "gaps": []}
+        data["testing"] = {"status": "not-evaluated", "gaps": []}
+        data["alignment_flags"] = []
+        data["breaking_changes"] = []
+    if tier_reached != "reviewers":
+        data.setdefault("suggested_reviewers", [])
+        data.setdefault("maintainer_needed_areas", [])
+
+    data = normalize_pr_review_data(data)
+    data["tier_reached"] = tier_reached
+    data["gate"] = {"stopped_at": stopped_at, "reason": gate_reason or ""}
     data["repo"] = repo
     data["pr_number"] = number
-    data["head_sha"] = head
+    data["head_sha"] = meta.get("headRefOid", "")
     data["title"] = meta.get("title", "")
-    data["author"] = author
+    data["author"] = pr_author_handle(meta)
     data["generation_seconds"] = round(time.monotonic() - started, 1)
+
+    json_file = pr_artifact_path(workspace, repo, number)
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     store_pr_review(workspace, repo, meta, data, json_file)
-    reviewers = ", ".join(item["handle"] for item in data.get("suggested_reviewers", [])) or "none"
-    print(f"PR #{number}: attention {data['attention_level']}, scope {data['scope']['verdict']}, suggested reviewers: {reviewers}")
+    reviewers_line = ", ".join(item["handle"] for item in data.get("suggested_reviewers", [])) or "none"
+    print(
+        f"PR #{number}: tier {tier_reached}, attention {data['attention_level']}, "
+        f"rung {data['review_requirement']['rung'] or 'n/a'}, suggested reviewers: {reviewers_line}",
+        flush=True,
+    )
     return data
 
 
@@ -1564,15 +1965,32 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
         {"repo": repo, "pr_number": pr_number, "rubric_version": PR_RUBRIC_VERSION},
         sort_keys=True,
     )
-    scope = data.get("scope") or {}
+    tier = data.get("tier_reached", "reviewers")
+    gate = data.get("gate") or {}
+    stopped_at = gate.get("stopped_at")
     lines = [
         f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->",
         "**[AI-assisted review]** Automated pre-review from repo-manager — flags for the human reviewer, not a replacement for one.",
         "",
-        f"**Attention level:** {attention_display(data)}",
     ]
+    if stopped_at == "triage":
+        lines += [
+            f"**Not ready for review yet** — {gate.get('reason', '')}. "
+            "Fixing the item below is the next step; the documentation, testing, and reviewer checks "
+            "have not run yet and will follow once this is resolved.",
+        ]
+    elif stopped_at == "quality":
+        lines += [
+            f"**Not ready for review yet** — {gate.get('reason', '')}. "
+            "These are for the author to resolve. No reviewer has been suggested yet: "
+            "contribute.md asks a PR to meet the Reviewer Expectation before a human is assigned.",
+        ]
+    else:
+        lines += ["**Ready for review** — the checks below passed, and suggested reviewers are at the end."]
+    lines += ["", f"**Attention level:** {attention_display(data)}"]
     description = data.get("description_check") or {}
-    if description.get("verdict") in ("discrepancies", "missing"):
+    bundled = (data.get("focus") or {}).get("verdict") == "bundled"
+    if not bundled and description.get("verdict") in ("discrepancies", "missing"):
         lines += ["", "### Author's description vs. the diff", ""]
         if description.get("notes"):
             notes = description["notes"]
@@ -1587,6 +2005,12 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
                 lines.append(f"  - In the diff: {item['actual']}")
             if item.get("evidence"):
                 lines.append(f"  - Reference: {item['evidence']}")
+    focus = data.get("focus") or {}
+    if focus.get("verdict") == "bundled":
+        lines += ["", "### Unrelated changes bundled together", ""]
+        lines.append(f"- [ ] {focus.get('action') or 'Split the unrelated work into its own PR.'}")
+        if focus.get("rationale"):
+            lines.append(f"  - Why: {focus['rationale']}")
     flags = data.get("alignment_flags") or []
     if flags:
         lines += ["", "### Alignment issues", ""]
@@ -1620,7 +2044,19 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
                 lines.append(f"  - Where: `{gap['where']}`")
             if gap.get("policy"):
                 lines.append(f"  - Why: {gap['policy']}")
-    lines += ["", "### Scope", "", f"**{scope.get('verdict', '')}** — {scope.get('rationale', '')}"]
+    requirement = data.get("review_requirement") or {}
+    if requirement.get("rung"):
+        areas = ", ".join(requirement.get("expert_areas") or [])
+        lines += ["", "### Review needed", ""]
+        lines.append(
+            f"**{PR_RUNG_LABEL.get(requirement['rung'], requirement['rung'])}** — "
+            f"{requirement.get('surface', '')}. {requirement.get('rationale', '')}"
+        )
+        if areas:
+            lines.append(f"- Subject-area expertise this calls for: {areas}")
+        if requirement.get("named_approver"):
+            lines.append(f"- The guide names {display_handle(requirement['named_approver'])} for this rung.")
+
     breaking = data.get("breaking_changes") or []
     if breaking:
         lines += ["", "### Breaking changes", ""]
@@ -1637,14 +2073,29 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
     if reviewers or areas:
         lines += ["", "### Suggested reviewers", ""]
         for item in reviewers:
+            note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
             lines.append(
-                f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}) — {item.get('reason', '')}"
+                f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
+                f" — {item.get('reason', '')}"
             )
         for area in areas:
             lines.append(f"- No maintainer listed for: {area}")
+    if tier != "reviewers":
+        skipped = ["documentation", "testing", "alignment"] if tier == "triage" else []
+        lines += ["", "### Not checked yet", ""]
+        if skipped:
+            lines.append(
+                "The " + ", ".join(skipped) + ", and reviewer checks were skipped. "
+                "Re-request a review once the item above is resolved and they will run."
+            )
+        else:
+            lines.append(
+                "Reviewer suggestion was skipped. Re-request a review once the items above are "
+                "resolved and reviewers will be suggested."
+            )
     lines += [
         "",
-        f"_Reviewed at head `{(head_sha or '')[:7]}` by repo-manager pr-review. "
+        f"_Reviewed at head `{(head_sha or '')[:7]}` by repo-manager (tier: {tier}). "
         f"Regenerate with `repo-manager review-pr {pr_number}`._",
     ]
     return "\n".join(lines).rstrip() + "\n"
@@ -3915,7 +4366,7 @@ def cmd_pr_table(args):
     if not rows:
         print("No PR reviews in the database.")
         return
-    headers = ("#", "PR", "Attention", "Scope", "Description")
+    headers = ("#", "PR", "Attention", "Review rung", "Description")
     widths = (5, 6, 9, 5, 80)
     print(
         f"{headers[0]:>{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]:<{widths[2]}}  "
@@ -3925,7 +4376,7 @@ def cmd_pr_table(args):
     for index, row in enumerate(rows, start=1):
         pr = truncate(f"#{row['pr_number']}", widths[1])
         attention = truncate(row["attention_level"], widths[2])
-        scope = truncate(row["scope_verdict"], widths[3])
+        scope = truncate(row["review_rung"], widths[3])
         description = truncate(row["summary"], widths[4])
         print(f"{index:>{widths[0]}}  {pr:<{widths[1]}}  {attention:<{widths[2]}}  {scope:<{widths[3]}}  {description}")
 
@@ -3985,9 +4436,13 @@ def print_pretty_pr_review(data):
     print(attention_display(data))
     print()
 
-    scope = data.get("scope") or {}
-    print("Scope")
-    print(f"{scope.get('verdict', '')}: {scope.get('rationale', '')}")
+    requirement = data.get("review_requirement") or {}
+    print("Review needed")
+    print(f"{requirement.get('rung', '')} ({requirement.get('surface', '')}): {requirement.get('rationale', '')}")
+    if requirement.get("expert_areas"):
+        print(f"  subject-area expertise: {', '.join(requirement['expert_areas'])}")
+    if requirement.get("named_approver"):
+        print(f"  the guide names: {requirement['named_approver']}")
     print()
 
     flags = data.get("alignment_flags") or []

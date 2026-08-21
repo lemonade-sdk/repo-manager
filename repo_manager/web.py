@@ -87,8 +87,8 @@ def ensure_pr_schema(conn):
           author TEXT NOT NULL DEFAULT '',
           summary TEXT NOT NULL DEFAULT '',
           attention_level TEXT NOT NULL DEFAULT '',
-          scope_verdict TEXT NOT NULL DEFAULT '',
-          second_review_required INTEGER NOT NULL DEFAULT 0,
+          review_rung TEXT NOT NULL DEFAULT '',
+          reviewers_needed INTEGER NOT NULL DEFAULT 1,
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -539,7 +539,66 @@ def live_pr_states(repo, numbers):
     return cached[1] if cached else {}
 
 
-def derive_review_status(info, author, attention_level, viewer_override=""):
+def review_coverage(reviewer_logins, requirement, maintainers):
+    """Does the review this PR has actually satisfy the rung contribute.md puts it on?
+
+    Answers the two questions "needs a core maintainer" never did: whether someone reviewing
+    holds the subject-area expertise this PR calls for, and whether the guide's top rung
+    names someone who has not weighed in. Admin status is deliberately not consulted — it is
+    a repo permission, not evidence that a person knows this code.
+    """
+    rung = (requirement or {}).get("rung") or ""
+    expert_areas = [area for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
+    named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
+    reviewers = [login.lower() for login in reviewer_logins]
+    experts = {}
+    for login in reviewers:
+        covered = covers_any_area(maintainers.get(login), expert_areas)
+        if covered:
+            experts[login] = covered
+    needed = 2 if rung in ("two-with-expert", "named-approver") else 1
+    return {
+        "rung": rung,
+        "count": len(reviewers),
+        "needed": needed,
+        "experts": experts,
+        "expert_areas": expert_areas,
+        "named": named,
+        "named_reviewed": bool(named) and named in reviewers,
+    }
+
+
+def coverage_status(coverage, names):
+    """(label, detail) for a PR that already has reviewers, or None to fall through."""
+    rung = coverage["rung"]
+    if not rung:
+        return None
+    if rung == "named-approver" and not coverage["named_reviewed"]:
+        return (
+            f"Needs @{coverage['named']}",
+            f"In review by {names}, but this PR is on the guide's top rung "
+            f"(project scope, re-architecture, or design language) — it needs "
+            f"@{coverage['named']} specifically.",
+        )
+    if coverage["expert_areas"] and not coverage["experts"]:
+        areas = ", ".join(coverage["expert_areas"])
+        return (
+            "Needs subject expert",
+            f"In review by {names}, but none of them list {areas} in the maintainer table — "
+            "this rung needs a subject-area expert.",
+        )
+    if coverage["count"] < coverage["needed"]:
+        who = ", ".join(f"{login} covers {', '.join(areas)}" for login, areas in coverage["experts"].items())
+        satisfied = f" Subject expert satisfied: {who}." if who else ""
+        return (
+            f"Needs {coverage['needed'] - coverage['count']} more",
+            f"In review by {names} — this rung needs {coverage['needed']} reviewers."
+            f"{satisfied}",
+        )
+    return None
+
+
+def derive_review_status(info, author, attention_level, viewer_override="", requirement=None, maintainers=None):
     """Map live review activity to a (short label, tooltip detail) pair.
 
     The perspective is the gh-authenticated viewer unless viewer_override names another
@@ -578,8 +637,10 @@ def derive_review_status(info, author, attention_level, viewer_override=""):
     }
     if others:
         names = ", ".join(sorted(others))
-        if attention_level == "High":
-            return "Needs core", f"In review by {names}, but the pre-review flags High attention — needs a core maintainer."
+        coverage = review_coverage(list(others), requirement, maintainers or {})
+        verdict = coverage_status(coverage, names)
+        if verdict:
+            return verdict
         blocking = sorted(login for login, review in others.items() if review.get("state") == "CHANGES_REQUESTED")
         if blocking:
             return "Waiting", f"{', '.join(blocking)} requested changes — waiting for the author."
@@ -627,7 +688,10 @@ def pr_reviews(workspace, pr_viewer=""):
             )
             item["documentation"] = data.get("documentation", {})
             item["testing"] = data.get("testing", {})
-            item["scope"] = data.get("scope", {})
+            item["review_requirement"] = data.get("review_requirement", {})
+            item["focus"] = data.get("focus", {})
+            item["tier_reached"] = data.get("tier_reached", item.get("tier_reached") or "")
+            item["gate"] = data.get("gate", {})
             item["evidence"] = data.get("evidence", {})
             item["description_check"] = data.get("description_check", {})
             item["attention_reasons"] = data.get("attention_reasons", [])
@@ -639,6 +703,7 @@ def pr_reviews(workspace, pr_viewer=""):
     authenticated = ""
     for repo, numbers in by_repo.items():
         states = live_pr_states(repo, numbers)
+        maintainers = load_maintainer_context(workspace, repo).get("table", {})
         for item in rows:
             if item["repo"] == repo:
                 info = states.get(item["pr_number"], {})
@@ -646,7 +711,12 @@ def pr_reviews(workspace, pr_viewer=""):
                 item["pr_state"] = info.get("state", "")
                 item["base_ref"] = info.get("base", "")
                 status, detail = derive_review_status(
-                    info, item.get("author"), item.get("attention_level"), effective_viewer
+                    info,
+                    item.get("author"),
+                    item.get("attention_level"),
+                    effective_viewer,
+                    requirement=item.get("review_requirement"),
+                    maintainers=maintainers,
                 )
                 item["review_status"] = status
                 item["review_status_detail"] = detail
@@ -1822,7 +1892,7 @@ INDEX_HTML = r"""<!doctype html>
       const query = state.filter.trim().toLowerCase();
       if (!query) return rows;
       return rows.filter((row) => [
-        String(row.pr_number), row.pr_title, row.summary, row.author, row.attention_level, row.scope_verdict, row.review_status
+        String(row.pr_number), row.pr_title, row.summary, row.author, row.attention_level, row.review_rung, row.review_status
       ].join(" ").toLowerCase().includes(query));
     }
 
@@ -2153,7 +2223,7 @@ INDEX_HTML = r"""<!doctype html>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
-          <td>${esc(row.scope_verdict || "")}</td>
+          <td>${esc(row.review_rung || "")}</td>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>
@@ -2176,7 +2246,6 @@ INDEX_HTML = r"""<!doctype html>
       }
       $("pr-selected").textContent = `#${row.pr_number}`;
       const prUrl = `https://github.com/${state.data.config.repo}/pull/${row.pr_number}`;
-      const scope = row.scope || {};
       $("pr-detail").innerHTML = [
         linkedField("PR", prUrl, `#${row.pr_number} — ${row.pr_title || ""}`),
         field("Author", row.author),
@@ -2188,7 +2257,13 @@ INDEX_HTML = r"""<!doctype html>
         section("Description", `<p>${esc(row.summary)}</p>`),
         section("Author's Description vs. the Diff", descriptionCheckSection(row.description_check, row.evidence)),
         section("Attention", attentionSection(row)),
-        section("Scope", `<p><strong>${esc(scope.verdict || row.scope_verdict || "")}</strong> — ${esc(scope.rationale || "")}</p>`),
+        section("Review needed", (() => {
+          const req = row.review_requirement || {};
+          const areas = (req.expert_areas || []).join(", ");
+          return `<p><strong>${esc(req.rung || row.review_rung || "")}</strong> — ${esc(req.surface || "")}. ${esc(req.rationale || "")}</p>`
+            + (areas ? `<p>Subject-area expertise this calls for: ${esc(areas)}</p>` : "")
+            + (req.named_approver ? `<p>The guide names ${esc(req.named_approver)} for this rung.</p>` : "");
+        })()),
         section("Alignment Issues", alignmentList(row.alignment_flags, row.evidence)),
         section("Documentation", gapSection(row.documentation, row.evidence, "documentation")),
         section("Testing", gapSection(row.testing, row.evidence, "testing")),
@@ -2341,3 +2416,14 @@ INDEX_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+# The maintainer table parser lives in cli.py so tier-1 validation and the dashboard agree
+# on what a valid subject area is.
+from repo_manager.cli import (  # noqa: E402
+    contribute_doc_path,
+    covers_any_area,
+    load_maintainer_context,
+    parse_maintainer_table,
+    parse_named_approver,
+)

@@ -23,6 +23,16 @@ if [[ -n "$replay_sha" ]]; then
   gh pr view "$pr_number" \
     --repo "$repo" \
     --json number,title,url,isDraft,author,body,baseRefName,headRefName,labels
+elif [[ "${REPO_MANAGER_WITHHOLD_REVIEWS:-}" == "1" ]]; then
+  # Human reviews are withheld so this judgment is derived rather than copied. A tier that
+  # can read an existing review will restate it, which is worthless on the unreviewed PRs a
+  # pre-review exists for, and unfalsifiable on the rest.
+  echo "[Human reviews, review requests, and inline comments are withheld for this run."
+  echo "Judge from the diff, the description, and the project guides alone. Do not fetch"
+  echo "them by another route, and do not refer to who has or has not reviewed.]"
+  gh pr view "$pr_number" \
+    --repo "$repo" \
+    --json number,title,url,state,isDraft,mergedAt,author,body,baseRefName,headRefName,headRefOid,labels,commits,files,statusCheckRollup
 else
   gh pr view "$pr_number" \
     --repo "$repo" \

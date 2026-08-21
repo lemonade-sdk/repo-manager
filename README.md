@@ -95,7 +95,10 @@ repo-manager wipe-db   # wipe the local SQLite database
 ## Skills
 
 - `commit-review`: analyzes a GitHub commit and judges whether it was good for the project, with attention to review quality, tests, release risk, API compatibility, security, documentation, and shout-outs.
-- `pr-review`: pre-reviews an open pull request — verifies the author's description against the diff, checks the project's contribution, philosophy, and documentation guides, flags major scope and breaking API/UX changes, and suggests reviewers from the maintainer table, with an imperative to-do per finding.
+- `pr-triage`: tier 1 of the PR pre-review — checks the author's description against the diff (including whether each `Fixes #N` reference really matches its issue), whether the PR solves one problem, and which of `contribute.md`'s three review rungs it belongs on. Failing either of the first two stops the pipeline before further work.
+- `pr-quality`: tier 2 — checks alignment with the contribution and philosophy guides, documentation, and testing, and flags breaking API/UX changes, with an imperative to-do per finding.
+- `pr-reviewers`: tier 3 — suggests two to three reviewers from the maintainer table and from `git blame` on the code the PR acts on. Runs only once the earlier tiers are clean and the PR is not a draft.
+- `pr-review`: the superseded single-pass version of the above, kept for its bundled `scripts/`.
 - `release-review`: analyzes stored commit reviews and produces a release-readiness verdict with P0/P1 maintainer actions.
 - `release-announcement`: turns stored commit reviews into Discord-friendly markdown release highlights.
 
@@ -133,6 +136,9 @@ skills/
     SKILL.md
     scripts/
   pr-review/
+  pr-triage/
+  pr-quality/
+  pr-reviewers/
     SKILL.md
     scripts/
   release-review/
