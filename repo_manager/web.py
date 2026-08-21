@@ -1554,10 +1554,25 @@ INDEX_HTML = r"""<!doctype html>
       background: #fff0ee;
       border-color: #f4c4bd;
     }
-    .badge.not-applicable, .badge.unknown {
+    .badge.not-applicable, .badge.unknown, .badge.tone-neutral {
       color: #5c6470;
       background: #f0f1f3;
       border-color: #d8dbe0;
+    }
+    .badge.tone-ok {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.tone-warn {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.tone-danger {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
     }
     .detail {
       padding: 16px;
@@ -1624,6 +1639,37 @@ INDEX_HTML = r"""<!doctype html>
     }
     .md li {
       line-height: 1.5;
+    }
+    .md details {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .md summary {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      list-style: none;
+    }
+    .md summary::-webkit-details-marker {
+      display: none;
+    }
+    .md summary::after {
+      content: "\25be";
+      color: #98a2ae;
+      margin-left: auto;
+    }
+    .md details[open] > summary::after {
+      content: "\25b4";
+    }
+    .md details[open] > summary {
+      margin-bottom: 10px;
+    }
+    .md-label {
+      font-size: 13px;
+      text-transform: uppercase;
+      color: #435366;
+      font-weight: 650;
     }
     .md code {
       background: rgba(31, 119, 180, 0.08);
@@ -2364,35 +2410,39 @@ INDEX_HTML = r"""<!doctype html>
         .replace(/(^|[\s(])_([^_]+)_/g, "$1<em>$2</em>");
     }
 
-    // The verdicts the review speaks in. The comment writes them as markdown emphasis, which
-    // GitHub renders as bold; the dashboard upgrades the same words to the pills the list
-    // column already uses, so a section's answer reads at a glance instead of being read.
-    // The markdown is untouched — only its rendering here differs.
+    // The two lines that lead the comment. Every other verdict now rides on a <details>
+    // summary and is coloured by mdBadge, so this is deliberately short.
     const MD_VERDICTS = {
-      "accurate": "accurate",
-      "discrepancies": "discrepancies",
-      "missing": "missing",
-      "focused": "focused",
-      "bundled": "bundled",
-      "adequate": "adequate",
-      "gaps": "gaps",
-      "not-applicable": "not applicable",
-      "not-evaluated": "not evaluated",
-      "unknown": "unknown",
       "ready for review": "ready",
       "not ready for review yet": "not ready"
     };
 
+    // "Focus: <b>focused</b>" — the label stays a label, the verdict becomes the pill the
+    // list columns use. On GitHub the same line is bold text; only the rendering differs.
+    function mdSummary(text) {
+      const parts = text.match(/^(.*?):\s*<b>(.*?)<\/b>(.*)$/);
+      if (!parts) return mdInline(text);
+      return `<span class="md-label">${mdInline(parts[1])}</span> ${mdBadge(parts[2])}${mdInline(parts[3])}`;
+    }
+
+    // Section verdicts carry counts ("2 to resolve"), so they cannot each have a class of
+    // their own. The pill is coloured by what the verdict means instead: green when there is
+    // nothing to do, yellow when there is, red when something is absent that should not be,
+    // grey when nobody looked.
+    function mdBadge(verdict) {
+      const value = verdict.trim().toLowerCase();
+      let tone = "neutral";
+      if (/^(none found|none|adequate|accurate|focused|all cleared|not-applicable)$/.test(value)) {
+        tone = "ok";
+      } else if (/(to resolve|^gaps$|discrepancies|bundled|suggested|no maintainer)/.test(value)) {
+        tone = "warn";
+      } else if (/^missing$/.test(value)) {
+        tone = "danger";
+      }
+      return `<span class="badge tone-${tone}">${esc(verdict)}</span>`;
+    }
+
     function mdParagraph(line) {
-      if (line === "None found." || line === "None.") {
-        return `<p>${badge("none found")}</p>`;
-      }
-      // "*not evaluated* — the review stopped at ..." keeps its explanation muted: it is
-      // the absence of an answer, and should not read as loudly as one.
-      const skipped = line.match(/^\*not evaluated\*\s*—\s*(.*)$/);
-      if (skipped) {
-        return `<p>${badge("not evaluated")} <span class="muted">${mdInline(skipped[1])}</span></p>`;
-      }
       // The level is the pill here, not the words "Attention level".
       const attention = line.match(/^\*\*Attention level:\*\*\s*([A-Za-z][A-Za-z-]*)(?:\s*—\s*(.*))?$/);
       if (attention) {
@@ -2436,6 +2486,16 @@ INDEX_HTML = r"""<!doctype html>
       for (const raw of String(text || "").split("\n")) {
         const line = raw.replace(/\s+$/, "");
         if (!line.trim()) { setDepth(0); continue; }
+        // The comment folds each section into <details>, so the preview does too — same
+        // defaults, so a section open on GitHub is open here. These are the only raw HTML
+        // tags the comment emits; everything else is still escaped on the way through.
+        if (line === "</details>") { setDepth(0); out.push("</details>"); continue; }
+        const fold = line.match(/^<details( open)?><summary>(.*?)<\/summary>(<\/details>)?$/);
+        if (fold) {
+          setDepth(0);
+          out.push(`<details${fold[1] || ""}><summary>${mdSummary(fold[2])}</summary>${fold[3] || ""}`);
+          continue;
+        }
         const heading = line.match(/^#{1,6}\s+(.*)$/);
         if (heading) { setDepth(0); out.push(`<h4>${mdInline(heading[1])}</h4>`); continue; }
         const item = line.match(/^(\s*)[-*]\s+(.*)$/);

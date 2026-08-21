@@ -71,7 +71,11 @@ A stored review has one section per question — description accuracy, alignment
 
 ## Act
 
-Post the review as a PR comment — the comment is prefixed `[AI-assisted review]` per lemonade's AI policy, and re-posting updates the existing comment in place instead of duplicating it. The comment carries the whole review: the attention line, the description and its accuracy check, focus, alignment, documentation, testing, breaking changes, and suggested reviewers (rendered without `@` so nobody is pinged speculatively). Sections that found nothing say so and cite what was inspected to earn the clean bill; sections whose tier never ran say `not evaluated` and name the gate. This is the same text the dashboard previews — see [the detail pane](#pr-reviews-in-the-web-ui).
+Post the review as a PR comment — the comment is prefixed `[AI-assisted review]` per lemonade's AI policy, and re-posting updates the existing comment in place instead of duplicating it. The comment carries the whole review: the attention line, the description and its accuracy check, focus, alignment, documentation, testing, breaking changes, and suggested reviewers (rendered without `@` so nobody is pinged speculatively). This is the same text the dashboard previews — see [the detail pane](#pr-reviews-in-the-web-ui).
+
+**Every section folds into one line.** Each is a `<details>` whose summary carries the section and its whole answer — `Breaking changes: None found`, `Documentation: gaps`, `Alignment issues: 2 to resolve` — with the reasoning and the "Checked:" evidence inside. A PR with nothing wrong is a dozen visible lines rather than the fifty it would otherwise be, and the reasoning that earned each clean bill is still one click away for anyone who wants to audit it.
+
+Which sections start open is decided by the news, not by the section. A clean bill is collapsed, because nobody needs to be told at length that nothing is wrong. A finding is open, because a to-do behind a fold is a to-do nobody does, and the comment exists so the author acts on it. A gated section is collapsed under `not evaluated`: it has nothing to report, and the gate is already the headline of the comment.
 
 ```bash
 repo-manager post-pr-review 1234 --dry-run   # print the comment first

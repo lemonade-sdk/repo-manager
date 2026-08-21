@@ -2080,12 +2080,13 @@ def pr_tier_ran(tier_reached, tier):
 def pr_not_evaluated(gate):
     """What a section says when its tier never ran.
 
-    "None found" would be a lie about a check nobody performed, so a gated section names
-    the gate instead. This is the whole reason the comment cannot just omit the section.
+    "None found" would be a lie about a check nobody performed, so a gated section names the
+    gate instead. This is the whole reason the comment cannot simply omit the section. The
+    verdict itself lives on the summary line, so this is only the explanation under it.
     """
     where = f"the {gate.get('stopped_at')} gate" if gate.get("stopped_at") else "an earlier tier"
     why = f" because {gate['reason']}" if gate.get("reason") else ""
-    return f"*not evaluated* — the review stopped at {where}{why}. This check runs once that is resolved."
+    return f"The review stopped at {where}{why}. This check runs once that is resolved."
 
 
 def pr_todo_lines(items):
@@ -2097,6 +2098,28 @@ def pr_todo_lines(items):
             if value:
                 lines.append(f"  - {label}: {value}")
     return lines
+
+
+def pr_section(title, verdict, body, expanded):
+    """One collapsible section: its answer on the summary line, its evidence folded inside.
+
+    A clean bill is a line, not a page. The summary carries the whole answer, so a comment on
+    a PR with nothing wrong is a short list of one-liners rather than screens of reasoning
+    nobody asked for — and the reasoning is still one click away when somebody does.
+
+    Findings default to open. A to-do behind a fold is a to-do nobody does, and the point of
+    the comment is the author acting on it.
+    """
+    body = [line for line in body if line is not None]
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    head = f"<details{' open' if expanded else ''}><summary>{title}: <b>{verdict}</b></summary>"
+    if not body:
+        return ["", f"{head}</details>"]
+    # GitHub only renders markdown inside <details> when blank lines separate it from the tags.
+    return ["", head, "", *body, "", "</details>"]
 
 
 def pr_checked_line(evidence, key):
@@ -2144,114 +2167,122 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
     lines += ["", f"**Attention level:** {attention_display(data)}"] + rung_rationale_lines(data)
 
     if data.get("summary"):
-        lines += ["", "### Description", "", data["summary"]]
+        lines += ["", f"**Description:** {data['summary']}"]
 
     description = data.get("description_check") or {}
-    lines += ["", "### Author's description vs. the diff", ""]
-    if not description.get("verdict"):
-        lines.append("*Not assessed by this review.*")
-    else:
-        lines.append(f"**{description['verdict']}** — {description.get('notes', '')}")
-        todos = []
-        if description["verdict"] == "missing" and not (description.get("discrepancies") or []):
-            todos.append({"action": "Ask the author to describe the change — the PR has no usable description."})
-        for item in description.get("discrepancies") or []:
-            todos.append({
-                "action": item.get("action"),
-                "fallback": "Reconcile the description with the diff.",
-                "subs": [("Described", item.get("described")), ("In the diff", item.get("actual")),
-                         ("Reference", item.get("evidence"))],
-            })
-        if todos:
-            lines += [""] + pr_todo_lines(todos)
+    verdict = description.get("verdict") or "not assessed"
+    todos = []
+    if verdict == "missing" and not (description.get("discrepancies") or []):
+        todos.append({"action": "Ask the author to describe the change — the PR has no usable description."})
+    for item in description.get("discrepancies") or []:
+        todos.append({
+            "action": item.get("action"),
+            "fallback": "Reconcile the description with the diff.",
+            "subs": [("Described", item.get("described")), ("In the diff", item.get("actual")),
+                     ("Reference", item.get("evidence"))],
+        })
+    lines += pr_section(
+        "Author's description vs. the diff", verdict,
+        ([description["notes"]] if description.get("notes") else []) + (pr_todo_lines(todos) if todos else []),
+        expanded=verdict not in ("accurate", "not assessed"),
+    )
 
     focus = data.get("focus") or {}
-    lines += ["", "### Focus", ""]
-    if not focus.get("verdict"):
-        lines.append("*Not assessed by this review.*")
-    else:
-        lines.append(f"**{focus['verdict']}** — {focus.get('rationale', '')}")
-        if focus["verdict"] == "bundled":
-            lines += [""] + pr_todo_lines([{
-                "action": focus.get("action"),
-                "fallback": "Split the unrelated work into its own PR.",
-            }])
-        else:
-            lines += pr_checked_line(evidence, "focus")
+    verdict = focus.get("verdict") or "not assessed"
+    bundled = verdict == "bundled"
+    lines += pr_section(
+        "Focus", verdict,
+        ([focus["rationale"]] if focus.get("rationale") else [])
+        + (pr_todo_lines([{"action": focus.get("action"),
+                           "fallback": "Split the unrelated work into its own PR."}]) if bundled else [])
+        + ([] if bundled else pr_checked_line(evidence, "focus")),
+        expanded=bundled,
+    )
 
     quality_ran = pr_tier_ran(tier, "quality")
-    lines += ["", "### Alignment issues", ""]
+    flags = data.get("alignment_flags") or []
     if not quality_ran:
-        lines.append(pr_not_evaluated(gate))
-    elif not (data.get("alignment_flags") or []):
-        lines.append("None found.")
-        lines += pr_checked_line(evidence, "alignment")
+        lines += pr_section("Alignment issues", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
     else:
-        lines += pr_todo_lines([{
-            "action": flag.get("action"),
-            "fallback": flag.get("concern"),
-            "subs": [
-                ("Why", " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part) + ": " + (flag.get("concern") or "")
-                        if (flag.get("doc") or flag.get("section")) else flag.get("concern")),
-                ("Reference", flag.get("evidence")),
-            ],
-        } for flag in data["alignment_flags"]])
+        lines += pr_section(
+            "Alignment issues", "None found" if not flags else f"{len(flags)} to resolve",
+            pr_checked_line(evidence, "alignment") if not flags else pr_todo_lines([{
+                "action": flag.get("action"),
+                "fallback": flag.get("concern"),
+                "subs": [
+                    ("Why", " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
+                            + ": " + (flag.get("concern") or "")
+                            if (flag.get("doc") or flag.get("section")) else flag.get("concern")),
+                    ("Reference", flag.get("evidence")),
+                ],
+            } for flag in flags]),
+            expanded=bool(flags),
+        )
 
     for title, key in (("Documentation", "documentation"), ("Testing", "testing")):
         block = data.get(key) or {}
-        lines += ["", f"### {title}", ""]
         if not quality_ran:
-            lines.append(pr_not_evaluated(gate))
+            lines += pr_section(title, "not evaluated", [pr_not_evaluated(gate)], expanded=False)
             continue
-        lines.append(f"**{block.get('status') or 'unknown'}**")
         gaps = block.get("gaps") or []
-        if gaps:
-            lines += [""] + pr_todo_lines([{
+        lines += pr_section(
+            title, block.get("status") or "unknown",
+            pr_todo_lines([{
                 "action": gap.get("action"),
                 "fallback": gap.get("what"),
                 "subs": [("Gap", gap.get("what")), ("Where", gap.get("where")), ("Why", gap.get("policy"))],
-            } for gap in gaps])
-        else:
-            lines += pr_checked_line(evidence, key)
+            } for gap in gaps]) if gaps else pr_checked_line(evidence, key),
+            expanded=bool(gaps),
+        )
 
-    lines += ["", "### Breaking changes", ""]
+    breaking = data.get("breaking_changes") or []
     if not quality_ran:
-        lines.append(pr_not_evaluated(gate))
-    elif not (data.get("breaking_changes") or []):
-        lines.append("None found.")
-        lines += pr_checked_line(evidence, "breaking_changes")
+        lines += pr_section("Breaking changes", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
     else:
-        for change in data["breaking_changes"]:
+        unresolved = [change for change in breaking if not breaking_change_cleared(change)]
+        body = []
+        for change in breaking:
             summary = f"({change.get('surface', '')}) {change.get('change', '')}"
             if breaking_change_cleared(change):
-                lines.append(f"- {summary} — {breaking_change_status(change)}")
-                continue
-            lines += pr_todo_lines([{
-                "action": change.get("action"),
-                "fallback": "Document this break and get a maintainer sign-off.",
-                "subs": [("Change", summary), ("Status", breaking_change_status(change))],
-            }])
+                body.append(f"- {summary} — {breaking_change_status(change)}")
+            else:
+                body += pr_todo_lines([{
+                    "action": change.get("action"),
+                    "fallback": "Document this break and get a maintainer sign-off.",
+                    "subs": [("Change", summary), ("Status", breaking_change_status(change))],
+                }])
+        if not breaking:
+            body = pr_checked_line(evidence, "breaking_changes")
+        lines += pr_section(
+            "Breaking changes",
+            "None found" if not breaking else f"{len(unresolved)} to resolve" if unresolved else "all cleared",
+            body, expanded=bool(unresolved),
+        )
 
     reviewers = data.get("suggested_reviewers") or []
     areas = data.get("maintainer_needed_areas") or []
     # A covered PR needs no slate, and the readiness line above has already said so. A gated
-    # one still gets the heading, because "covered" and "never asked" are different answers.
+    # one still gets the section, because "covered" and "never asked" are different answers.
     covered = bool((coverage or {}).get("adequate"))
     if not (covered and pr_tier_ran(tier, "reviewers")):
-        lines += ["", "### Suggested reviewers", ""]
         if not pr_tier_ran(tier, "reviewers"):
-            lines.append(pr_not_evaluated(gate))
-        elif not (reviewers or areas):
-            lines.append("None.")
+            lines += pr_section("Suggested reviewers", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
         else:
+            body = []
             for item in reviewers:
                 note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
-                lines.append(
+                body.append(
                     f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
                     f" — {item.get('reason', '')}"
                 )
             for area in areas:
-                lines.append(f"- No maintainer listed for: {area}")
+                body.append(f"- No maintainer listed for: {area}")
+            count = len(reviewers)
+            lines += pr_section(
+                "Suggested reviewers",
+                "none" if not body else f"{count} suggested" if count else "no maintainer listed",
+                body, expanded=bool(body),
+            )
 
     lines += [
         "",
