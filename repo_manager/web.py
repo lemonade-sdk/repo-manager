@@ -11,7 +11,6 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
 
-
 def connect(db_file):
     conn = sqlite3.connect(db_file)
     conn.row_factory = sqlite3.Row
@@ -19,7 +18,6 @@ def connect(db_file):
     ensure_pr_schema(conn)
     ensure_generation_schema(conn)
     return conn
-
 
 def ensure_generation_schema(conn):
     for table in ("commit_reviews", "release_reviews", "release_announcements", "pr_reviews"):
@@ -33,14 +31,11 @@ def ensure_generation_schema(conn):
     if pr_columns and "testing_status" not in pr_columns:
         conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
 
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-
 def db_file(workspace):
     return workspace / ".repo-manager" / "repo-manager.sqlite"
-
 
 def ensure_range_schema(conn):
     for table in ("commit_reviews", "release_reviews", "release_announcements"):
@@ -75,7 +70,6 @@ def ensure_range_schema(conn):
                         WHERE release_highlights_path=''
                         """
                     )
-
 
 def ensure_pr_schema(conn):
     conn.execute(
@@ -122,7 +116,6 @@ def ensure_pr_schema(conn):
         """
     )
 
-
 def ensure_todo_schema(conn):
     conn.execute(
         """
@@ -144,18 +137,24 @@ def ensure_todo_schema(conn):
         """
     )
 
-
 def ensure_read_schema(conn):
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_read_states (
           review_key TEXT PRIMARY KEY,
           is_read INTEGER NOT NULL DEFAULT 0,
+          acked_status TEXT NOT NULL DEFAULT '',
+          acked_viewer TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL
         )
         """
     )
-
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(review_read_states)")}
+    for column in ("acked_status", "acked_viewer"):
+        if column not in columns:
+            conn.execute(
+                f"ALTER TABLE review_read_states ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+            )
 
 def read_json_file(path):
     if not path:
@@ -169,7 +168,6 @@ def read_json_file(path):
     except (OSError, json.JSONDecodeError):
         return {}
 
-
 def read_text_file(path):
     if not path:
         return ""
@@ -181,13 +179,11 @@ def read_text_file(path):
     except OSError:
         return ""
 
-
 def markdown_heading_level(line):
     match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
     if not match:
         return None, ""
     return len(match.group(1)), match.group(2).strip()
-
 
 def extract_release_note_sections(markdown):
     wanted = {"headline", "breaking changes"}
@@ -215,7 +211,6 @@ def extract_release_note_sections(markdown):
             ordered.append(text)
     return "\n\n".join(ordered)
 
-
 def parse_json_text(value, fallback):
     if not value:
         return fallback
@@ -224,14 +219,12 @@ def parse_json_text(value, fallback):
     except json.JSONDecodeError:
         return fallback
 
-
 def todo_display_text(item):
     if isinstance(item, str):
         return item
     if isinstance(item, dict):
         return item.get("text") or item.get("reason") or json.dumps(item, sort_keys=True)
     return str(item)
-
 
 def todo_id(review_kind, review_key, index, item):
     payload = json.dumps(
@@ -240,7 +233,6 @@ def todo_id(review_kind, review_key, index, item):
         ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
 
 def normalize_todos(conn, review_kind, review_key, todos):
     ensure_todo_schema(conn)
@@ -278,7 +270,6 @@ def normalize_todos(conn, review_kind, review_key, todos):
         )
     return normalized
 
-
 def read_state(conn, review_key):
     ensure_read_schema(conn)
     row = conn.execute(
@@ -287,11 +278,9 @@ def read_state(conn, review_key):
     ).fetchone()
     return bool(row["is_read"]) if row else False
 
-
 def review_data(row):
     data = read_json_file(row.get("json_path")) or parse_json_text(row.get("raw_output"), {})
     return data if isinstance(data, dict) else {}
-
 
 def normalize_handle(value):
     if not value:
@@ -301,11 +290,9 @@ def normalize_handle(value):
         return ""
     return handle if handle.startswith("@") else f"@{handle}"
 
-
 def is_ai_reviewer(handle):
     lowered = str(handle or "").lower()
     return any(token in lowered for token in ("chatgpt", "claude", "copilot"))
-
 
 def reviewer_handles(item, data):
     reviewers = data.get("reviewers")
@@ -323,7 +310,6 @@ def reviewer_handles(item, data):
     author = normalize_handle(data.get("author") or item.get("author"))
     return sorted(handle for handle in handles if handle and handle != author and not is_ai_reviewer(handle))
 
-
 def parse_iso_datetime(value):
     if not value:
         return None
@@ -331,7 +317,6 @@ def parse_iso_datetime(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-
 
 def format_date_range(rows):
     dates = [parse_iso_datetime(row.get("merge_date") or row.get("commit_date") or row.get("reviewed_at")) for row in rows]
@@ -346,13 +331,11 @@ def format_date_range(rows):
         "days": (end - start).days + 1,
     }
 
-
 def tag_sort_key(tag):
     if tag == "vNext":
         return (1, ())
     parts = tuple(int(part) for part in re.findall(r"\d+", str(tag or "")))
     return (0, parts)
-
 
 def commit_dates(workspace, shas):
     checkout = workspace / ".repo-manager" / "checkout"
@@ -379,7 +362,6 @@ def commit_dates(workspace, shas):
         sha, commit_date = line.split("\x00", 1)
         dates[sha] = commit_date.strip()
     return dates
-
 
 def commit_reviews(workspace):
     rows = []
@@ -417,7 +399,6 @@ def commit_reviews(workspace):
         row["commit_date"] = dates.get(row.get("commit_sha")) or row.get("reviewed_at")
     return rows
 
-
 def release_reviews(workspace):
     rows = []
     seen = set()
@@ -449,10 +430,8 @@ def release_reviews(workspace):
             rows.append(item)
     return rows
 
-
 _PR_STATE_CACHE = {}
 PR_STATE_TTL_SECONDS = 60
-
 
 def live_pr_states(repo, numbers):
     """Current state, base branch, and review activity for the given PRs, in one cached GraphQL call.
@@ -541,6 +520,25 @@ def live_pr_states(repo, numbers):
         return states
     return cached[1] if cached else {}
 
+def coverage_participants(latest, comments, author_login, maintainers):
+    """{login: "review" | "comment"} for everyone whose engagement counts toward the rung.
+
+    A maintainer who writes their review into the conversation box instead of the review
+    box is still in the loop, so their comments count the same as a formal review — the
+    rung asks how many people are looking, not which button they pressed. Comments only
+    earn credit for people in the maintainer table; a drive-by "+1" from a passer-by is
+    not the review the guide is asking for. The viewer is deliberately not excluded here:
+    my own review is coverage, even though the status label speaks from my perspective.
+    """
+    participants = {}
+    for login, review in latest.items():
+        if login != author_login and not is_ai_reviewer(login) and review.get("state") != "DISMISSED":
+            participants[login] = "review"
+    for comment in comments or []:
+        login = str(comment.get("login") or "").lower()
+        if login and login != author_login and not is_ai_reviewer(login) and login in maintainers:
+            participants.setdefault(login, "comment")
+    return participants
 
 def review_coverage(reviewer_logins, requirement, maintainers):
     """Does the review this PR has actually satisfy the rung contribute.md puts it on?
@@ -548,7 +546,8 @@ def review_coverage(reviewer_logins, requirement, maintainers):
     Answers the two questions "needs a core maintainer" never did: whether someone reviewing
     holds the subject-area expertise this PR calls for, and whether the guide's top rung
     names someone who has not weighed in. Admin status is deliberately not consulted — it is
-    a repo permission, not evidence that a person knows this code.
+    a repo permission, not evidence that a person knows this code. Callers pass the logins
+    coverage_participants found, which is a wider net than GitHub's formal reviewers.
     """
     rung = (requirement or {}).get("rung") or ""
     expert_areas = [area for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
@@ -570,6 +569,32 @@ def review_coverage(reviewer_logins, requirement, maintainers):
         "named_reviewed": bool(named) and named in reviewers,
     }
 
+def expert_names(coverage):
+    """Who fills the rung's subject-expert slot, as "login (area, area)", or "" if nobody."""
+    return ", ".join(
+        f"{login} ({', '.join(areas)})" for login, areas in sorted(coverage["experts"].items())
+    )
+
+def coverage_note(coverage, participants):
+    """How a satisfied rung is satisfied, in one clause.
+
+    A rung that is met says so with its arithmetic, because the labels that follow name
+    only the people other than me — which left a two-reviewer PR reading as though one
+    reviewer had covered it, in flat contradiction of the rung shown beside it.
+    """
+    if not coverage["rung"]:
+        return ""
+    who = ", ".join(sorted(participants))
+    plural = "" if coverage["count"] == 1 else "s"
+    parts = [f"{coverage['count']} reviewer{plural}, {coverage['needed']} required"]
+    experts = expert_names(coverage)
+    if experts:
+        parts.append(f"expert slot covered by {experts}")
+    if coverage["named"] and coverage["named_reviewed"]:
+        parts.append(f"@{coverage['named']} has reviewed")
+    # "Covered", not "met" — this counts who is looking, which is what the rung asks.
+    # Whether they approved is the review decision, and a different question.
+    return f"Reviewer coverage for the {coverage['rung']} rung: {who} — {'; '.join(parts)}."
 
 def coverage_status(coverage, names):
     """(label, detail) for a PR that already has reviewers, or None to fall through."""
@@ -591,8 +616,8 @@ def coverage_status(coverage, names):
             "this rung needs a subject-area expert.",
         )
     if coverage["count"] < coverage["needed"]:
-        who = ", ".join(f"{login} covers {', '.join(areas)}" for login, areas in coverage["experts"].items())
-        satisfied = f" Subject expert satisfied: {who}." if who else ""
+        experts = expert_names(coverage)
+        satisfied = f" The expert slot is covered by {experts}." if experts else ""
         return (
             f"Needs {coverage['needed'] - coverage['count']} more",
             f"In review by {names} — this rung needs {coverage['needed']} reviewers."
@@ -600,6 +625,13 @@ def coverage_status(coverage, names):
         )
     return None
 
+def latest_reviews(info):
+    """{login: their most recent review} — one verdict per person, in submission order."""
+    latest = {}
+    for review in sorted(info.get("reviews", []), key=lambda review: review.get("at") or ""):
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"):
+            latest[review["login"].lower()] = review
+    return latest
 
 def derive_review_status(info, author, viewer_override="", requirement=None, maintainers=None):
     """Map live review activity to a (short label, tooltip detail) pair.
@@ -612,10 +644,7 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         return "", ""
     viewer = str(viewer_override or info.get("viewer") or "").lstrip("@").lower()
     author_login = str(author or "").lstrip("@").lower()
-    latest = {}
-    for review in sorted(info.get("reviews", []), key=lambda review: review.get("at") or ""):
-        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"):
-            latest[review["login"].lower()] = review
+    latest = latest_reviews(info)
     mine = latest.get(viewer)
     if mine and mine.get("state") == "CHANGES_REQUESTED":
         my_time = mine.get("at") or ""
@@ -631,23 +660,22 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         return "Requests", "I requested changes — waiting for the author to respond."
     if info.get("review_decision") == "APPROVED":
         return "Approved", "Approved but not merged yet."
-    others = {
-        login: review
-        for login, review in latest.items()
-        if login not in (viewer, author_login)
-        and not is_ai_reviewer(login)
-        and review.get("state") != "DISMISSED"
-    }
-    if others:
-        names = ", ".join(sorted(others))
-        coverage = review_coverage(list(others), requirement, maintainers or {})
-        verdict = coverage_status(coverage, names)
+    participants = coverage_participants(latest, info.get("comments"), author_login, maintainers or {})
+    coverage = review_coverage(list(participants), requirement, maintainers or {})
+    if participants:
+        verdict = coverage_status(coverage, ", ".join(sorted(participants)))
         if verdict:
             return verdict
-        blocking = sorted(login for login, review in others.items() if review.get("state") == "CHANGES_REQUESTED")
+    others = sorted(login for login in participants if login != viewer)
+    if others:
+        note = coverage_note(coverage, participants)
+        suffix = f" {note}" if note else ""
+        blocking = sorted(
+            login for login in others if (latest.get(login) or {}).get("state") == "CHANGES_REQUESTED"
+        )
         if blocking:
-            return "Waiting", f"{', '.join(blocking)} requested changes — waiting for the author."
-        return "Handled", f"Being handled by another reviewer: {names}."
+            return "Waiting", f"{', '.join(blocking)} requested changes — waiting for the author.{suffix}"
+        return "Handled", f"Being handled by another reviewer: {', '.join(others)}.{suffix}"
     requested = [handle for handle in info.get("requested", []) if not is_ai_reviewer(handle)]
     if any(handle.lower() == viewer for handle in requested):
         return "Waiting for me", "I am assigned as a reviewer and have not reviewed yet."
@@ -656,6 +684,84 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         return "Waiting", f"Reviewer assigned but no review yet: {', '.join(sorted(requested_others))}."
     return "Needs triage", "No reviewer assigned and no reviews yet — needs triage by me."
 
+def reviewer_coverage(workspace, repo, pr_number, author, requirement):
+    """Whether this PR already has the review its rung asks for, and who is providing it.
+
+    This is the same question the Status column answers, off the same cached GraphQL call
+    and the same coverage rules, so a PR the dashboard calls Handled is never simultaneously
+    told by our own PR comment that it needs reviewers.
+
+    Not knowable is reported as not covered — gh unreachable, the PR closed, no rung on the
+    stored review. Suggesting reviewers a PR turns out not to need is a smaller harm than
+    withholding the slate from one that does.
+    """
+    info = live_pr_states(repo, [pr_number]).get(int(pr_number)) or {}
+    maintainers = load_maintainer_context(workspace, repo).get("table", {})
+    return coverage_verdict(info, author, requirement, maintainers)
+
+def pr_comment_preview(repo, item):
+    """The comment this PR's review would post, for the dashboard to show verbatim.
+
+    The pane is a preview, not a second rendering: it is the same call the Post review
+    comment button makes, minus the HTML marker, which GitHub does not display either.
+    """
+    # Derived the way post_pr_review derives it, not the way the dashboard reads artifacts:
+    # normalize_pr_review_data recomputes fields the raw artifact can disagree with — the
+    # attention level among them — and a preview that skipped it showed a different level
+    # from the one that would be posted.
+    data = pr_review_data_from_row(item) or item.get("details") or {}
+    body = render_pr_review_comment(
+        repo, item["pr_number"], data, item.get("head_sha", ""), item.get("coverage")
+    )
+    return "\n".join(
+        line for line in body.splitlines() if not line.startswith(PR_REVIEW_COMMENT_MARKER)
+    ).strip()
+
+def coverage_verdict(info, author, requirement, maintainers):
+    """reviewer_coverage's answer, for callers that already hold the live state and table."""
+    if info.get("state") != "OPEN":
+        return {"adequate": False, "who": []}
+    author_login = str(author or "").lstrip("@").lower()
+    participants = coverage_participants(
+        latest_reviews(info), info.get("comments"), author_login, maintainers
+    )
+    who = sorted(participants)
+    if info.get("review_decision") == "APPROVED":
+        return {"adequate": True, "who": who}
+    if not participants or not (requirement or {}).get("rung"):
+        return {"adequate": False, "who": who}
+    coverage = review_coverage(list(participants), requirement, maintainers)
+    # coverage_status names what is still missing, and returns None once nothing is.
+    return {"adequate": coverage_status(coverage, ", ".join(who)) is None, "who": who}
+
+def reconcile_pr_read_states(workspace, rows, viewer):
+    """Fill in each PR row's check-off, clearing any whose Status moved since it was checked.
+
+    The clear is written back rather than merely displayed, so a Status that later returns
+    to its acknowledged value stays unchecked: something happened on that PR while I was
+    not looking, and the box is a claim about a review I have actually read.
+
+    A blank Status means gh told us nothing — an unreachable network is not a change, so
+    those rows keep whatever they had. The perspective is part of the acknowledgement for
+    the same reason: retyping the Status as box re-labels the whole column without
+    anything happening on GitHub, and that must not sweep the checkmarks away.
+    """
+    with connect(db_file(workspace)) as conn:
+        ensure_read_schema(conn)
+        for item in rows:
+            row = conn.execute(
+                "SELECT is_read, acked_status, acked_viewer FROM review_read_states WHERE review_key=?",
+                (item["review_key"],),
+            ).fetchone()
+            is_read = bool(row["is_read"]) if row else False
+            status = item.get("review_status") or ""
+            if is_read and status and row["acked_viewer"] == viewer and row["acked_status"] != status:
+                conn.execute(
+                    "UPDATE review_read_states SET is_read=0, updated_at=? WHERE review_key=?",
+                    (now_iso(), item["review_key"]),
+                )
+                is_read = False
+            item["is_read"] = is_read
 
 def pr_reviews(workspace, pr_viewer=""):
     rows = []
@@ -694,11 +800,23 @@ def pr_reviews(workspace, pr_viewer=""):
             item["review_requirement"] = data.get("review_requirement", {})
             item["focus"] = data.get("focus", {})
             item["tier_reached"] = data.get("tier_reached", item.get("tier_reached") or "")
-            item["gate"] = data.get("gate", {})
+            # The stored columns are the fallback: a row whose artifact went missing still
+            # reports the gate rather than reading as a review that ran end to end.
+            item["gate"] = data.get("gate") or {
+                "stopped_at": item.get("gate_stopped_at") or None,
+                "reason": "",
+            }
             item["evidence"] = data.get("evidence", {})
             item["description_check"] = data.get("description_check", {})
             item["attention_reasons"] = data.get("attention_reasons", [])
+            item["attention_meaning"] = attention_meaning(data)
+            item["coverage"] = {"adequate": False, "who": []}
+            item["comment_markdown"] = ""
+            item["attention_todos"] = attention_todo_reasons(data)
             item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
+            # One check-off per PR, not per rubric version: the list already collapses a
+            # PR's older reviews, so a re-review under a new rubric is the same row to me.
+            item["review_key"] = f"{item['repo']}|pr|{item['pr_number']}"
             rows.append(item)
     by_repo = {}
     for item in rows:
@@ -722,8 +840,13 @@ def pr_reviews(workspace, pr_viewer=""):
                 )
                 item["review_status"] = status
                 item["review_status_detail"] = detail
-    return rows, (effective_viewer or authenticated)
-
+                item["coverage"] = coverage_verdict(
+                    info, item.get("author"), item.get("review_requirement"), maintainers
+                )
+                item["comment_markdown"] = pr_comment_preview(repo, item)
+    viewer = effective_viewer or authenticated
+    reconcile_pr_read_states(workspace, rows, viewer)
+    return rows, viewer
 
 def release_announcements(workspace):
     rows = []
@@ -755,7 +878,6 @@ def release_announcements(workspace):
             rows.append(item)
     return rows
 
-
 def verdict_counts(rows):
     counts = {}
     for row in rows:
@@ -763,11 +885,9 @@ def verdict_counts(rows):
         counts[verdict] = counts.get(verdict, 0) + 1
     return counts
 
-
 def load_config(workspace):
     with (workspace / ".repo-manager" / "config.json").open("r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def app_data(workspace, pr_viewer=""):
     commits = commit_reviews(workspace)
@@ -808,7 +928,6 @@ def app_data(workspace, pr_viewer=""):
         "pr_viewer": effective_viewer,
     }
 
-
 def public_app_data(workspace):
     data = app_data(workspace)
     # PR reviews are transient pre-merge advisories and are not round-tripped by
@@ -835,7 +954,6 @@ def public_app_data(workspace):
         data[key] = cleaned
     return data
 
-
 def script_safe_json(value):
     # Inside JSON text, `<` only occurs within strings, so escaping it cannot change the
     # parsed value — but it prevents review/PR-controlled content (e.g. a literal
@@ -849,7 +967,6 @@ def script_safe_json(value):
         .replace("\u2029", "\\u2029")
     )
 
-
 def static_index_html(workspace):
     payload = script_safe_json(public_app_data(workspace))
     bootstrap = (
@@ -860,12 +977,10 @@ def static_index_html(workspace):
     )
     return INDEX_HTML.replace("</head>", f"{bootstrap}\n</head>", 1)
 
-
 def export_static_site(workspace, output_dir):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "index.html").write_text(static_index_html(workspace), encoding="utf-8")
-
 
 def update_todo(workspace, payload):
     todo = payload.get("todo_id")
@@ -882,26 +997,31 @@ def update_todo(workspace, payload):
             return {"ok": False, "error": "Unknown todo_id"}
     return {"ok": True}
 
-
 def update_read_state(workspace, payload):
     review_key = payload.get("review_key")
     is_read = 1 if payload.get("is_read") else 0
+    # The Status the browser was showing when the box was clicked, not the one a fresh
+    # gh call would return: the claim is about the review I just read, and if the two
+    # have already diverged the next refresh should say so by unchecking the box.
+    status = str(payload.get("status") or "")[:64]
+    viewer = str(payload.get("viewer") or "")[:64]
     if not review_key:
         return {"ok": False, "error": "Missing review_key"}
     with connect(db_file(workspace)) as conn:
         ensure_read_schema(conn)
         conn.execute(
             """
-            INSERT INTO review_read_states (review_key, is_read, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO review_read_states (review_key, is_read, acked_status, acked_viewer, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(review_key) DO UPDATE SET
               is_read=excluded.is_read,
+              acked_status=excluded.acked_status,
+              acked_viewer=excluded.acked_viewer,
               updated_at=excluded.updated_at
             """,
-            (review_key, is_read, now_iso()),
+            (review_key, is_read, status, viewer, now_iso()),
         )
     return {"ok": True}
-
 
 def run_pr_action(workspace, action, payload):
     """Run a gh-backed PR action from a request thread.
@@ -921,7 +1041,6 @@ def run_pr_action(workspace, action, payload):
         return cli.request_pr_reviewers(workspace, repo, pr_number)
     except SystemExit as exc:
         return {"ok": False, "error": str(exc) or "Command failed"}
-
 
 def make_handler(workspace):
     class RepoManagerHandler(BaseHTTPRequestHandler):
@@ -986,7 +1105,6 @@ def make_handler(workspace):
 
     return RepoManagerHandler
 
-
 def lan_address():
     """Best guess at this machine's LAN address, for the URL printed when binding a wildcard."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -998,7 +1116,6 @@ def lan_address():
         return ""
     finally:
         probe.close()
-
 
 def serve(workspace, host, port, open_browser):
     server = ThreadingHTTPServer((host, port), make_handler(workspace))
@@ -1020,7 +1137,6 @@ def serve(workspace, host, port, open_browser):
         print("\nStopped repo-manager UI.")
     finally:
         server.server_close()
-
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
@@ -1319,6 +1435,11 @@ INDEX_HTML = r"""<!doctype html>
       outline: 2px solid #83c5f3;
       outline-offset: 2px;
     }
+    .pr-read {
+      cursor: pointer;
+      vertical-align: middle;
+      accent-color: #1f77b4;
+    }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -1387,6 +1508,37 @@ INDEX_HTML = r"""<!doctype html>
       background: #fff0ee;
       border-color: #f4c4bd;
     }
+    /* A review that stopped at a gate reports less than a full one. These say so. */
+    .badge.not-ready, .badge.bundled {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.not-evaluated {
+      color: #5c6470;
+      background: #f0f1f3;
+      border-color: #d8dbe0;
+    }
+    .badge.focused, .badge.adequate, .badge.accurate, .badge.none-found {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.gaps, .badge.discrepancies {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.missing {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    .badge.not-applicable, .badge.unknown {
+      color: #5c6470;
+      background: #f0f1f3;
+      border-color: #d8dbe0;
+    }
     .detail {
       padding: 16px;
       display: grid;
@@ -1423,6 +1575,41 @@ INDEX_HTML = r"""<!doctype html>
     .section p {
       margin: 0;
       line-height: 1.5;
+    }
+    .pr-split {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 20px 0 18px;
+    }
+    .md > * + * {
+      margin-top: 10px;
+    }
+    .md > h4:first-child {
+      margin-top: 0;
+    }
+    .md h4 {
+      font-size: 13px;
+      text-transform: uppercase;
+      color: #435366;
+      margin: 18px 0 0;
+      letter-spacing: 0;
+    }
+    .md ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .md ul ul {
+      margin-top: 4px;
+      color: #5a6b7f;
+    }
+    .md li {
+      line-height: 1.5;
+    }
+    .md code {
+      background: rgba(31, 119, 180, 0.08);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 12px;
     }
     ul {
       margin: 0;
@@ -1619,6 +1806,7 @@ INDEX_HTML = r"""<!doctype html>
               <table>
                 <thead>
                   <tr>
+                    <th style="width: 34px;" title="Read: checked when you have read or acted on the review"></th>
                     <th style="width: 48px;">#</th>
                     <th style="width: 72px;">PR</th>
                     <th style="width: 118px;">Status</th>
@@ -1831,12 +2019,12 @@ INDEX_HTML = r"""<!doctype html>
       await reloadData();
     }
 
-    async function setReadState(reviewKey, isRead) {
+    async function setReadState(reviewKey, isRead, status = "", viewer = "") {
       if (isStatic) return;
       const response = await fetch("/api/read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ review_key: reviewKey, is_read: isRead })
+        body: JSON.stringify({ review_key: reviewKey, is_read: isRead, status, viewer })
       });
       if (!response.ok) {
         const text = await response.text();
@@ -2122,108 +2310,119 @@ INDEX_HTML = r"""<!doctype html>
       });
     }
 
-    const ATTENTION_MEANINGS = {
-      "High": "needs sign-off from a maintainer the guide names before it merges",
-      "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
-      "Routine": "nothing flagged; a standard review pass is enough"
-    };
-
-    function attentionSection(row) {
-      const meaning = ATTENTION_MEANINGS[row.attention_level] || "";
-      const reasons = (row.attention_reasons || []).join("; ");
-      return `<p>${badge(row.attention_level)} ${esc(meaning)}${reasons ? ` <span class="muted">(${esc(reasons)})</span>` : ""}</p>`;
-    }
-
     function generatedInField(row) {
       const seconds = Number(row.generation_seconds || (row.details || {}).generation_seconds || 0);
       if (!seconds || seconds <= 0) return "";
       return field("Generated in", `${Math.round(seconds)} seconds`);
     }
 
-    function basisNote(evidence, key) {
-      const value = (evidence || {})[key];
-      return value ? `<p class="muted">Checked: ${esc(value)}</p>` : "";
+    // The comment is markdown, and the pane is a preview of it, so the pane has to render
+    // markdown. Only the subset render_pr_review_comment actually emits is handled —
+    // headings, checklists, nested notes, and inline emphasis. Anything else falls through
+    // as a paragraph, which is the right failure for a preview: it shows the literal text.
+    function mdInline(text) {
+      return esc(text)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])\*([^*]+)\*/g, "$1<em>$2</em>")
+        .replace(/(^|[\s(])_([^_]+)_/g, "$1<em>$2</em>");
     }
 
-    function todoItems(items) {
-      return `<ul class="todo-issues">${items.map((item) => {
-        const subs = (item.subs || []).filter(([, value]) => value)
-          .map(([label, value]) => `<li><span class="muted">${esc(label)}:</span> ${esc(value)}</li>`).join("");
-        return `<li>☐ <strong>${esc(item.action || item.fallback || "")}</strong>${subs ? `<ul>${subs}</ul>` : ""}</li>`;
-      }).join("")}</ul>`;
-    }
+    // The verdicts the review speaks in. The comment writes them as markdown emphasis, which
+    // GitHub renders as bold; the dashboard upgrades the same words to the pills the list
+    // column already uses, so a section's answer reads at a glance instead of being read.
+    // The markdown is untouched — only its rendering here differs.
+    const MD_VERDICTS = {
+      "accurate": "accurate",
+      "discrepancies": "discrepancies",
+      "missing": "missing",
+      "focused": "focused",
+      "bundled": "bundled",
+      "adequate": "adequate",
+      "gaps": "gaps",
+      "not-applicable": "not applicable",
+      "not-evaluated": "not evaluated",
+      "unknown": "unknown",
+      "ready for review": "ready",
+      "not ready for review yet": "not ready"
+    };
 
-    function descriptionCheckSection(check, evidence) {
-      if (!check || !check.verdict) return `<p class="muted">Not assessed by this review.</p>`;
-      const missingTodo = check.verdict === "missing" && !(check.discrepancies || []).length
-        ? todoItems([{ action: "Ask the author to describe the change — the PR has no usable description.", subs: [] }])
-        : "";
-      const todos = (check.discrepancies || []).length ? todoItems(check.discrepancies.map((item) => ({
-        action: item.action,
-        fallback: "Reconcile the description with the diff.",
-        subs: [["Described", item.described], ["In the diff", item.actual], ["Reference", item.evidence]]
-      }))) : "";
-      return `<p>${badge(check.verdict)} ${esc(check.notes || "")}</p>${missingTodo}${todos}`;
-    }
-
-    function alignmentList(flags, evidence) {
-      if (!flags || !flags.length) return `<p class="muted">None found.</p>` + basisNote(evidence, "alignment");
-      return todoItems(flags.map((flag) => {
-        const where = [flag.doc, flag.section].filter(Boolean).join(" — ");
-        const why = where ? `${where}: ${flag.concern || ""}` : (flag.concern || "");
-        return {
-          action: flag.action,
-          fallback: flag.concern,
-          subs: [["Why", why], ["Reference", flag.evidence]]
-        };
-      }));
-    }
-
-    function gapSection(block, evidence, evidenceKey) {
-      const status = (block || {}).status || "";
-      const gaps = (block || {}).gaps || [];
-      if (!gaps.length) return `<p>${badge(status || "unknown")}</p>${basisNote(evidence, evidenceKey)}`;
-      return `<p>${badge(status || "unknown")}</p>${todoItems(gaps.map((gap) => ({
-        action: gap.action,
-        fallback: gap.what,
-        subs: [["Gap", gap.what], ["Where", gap.where], ["Why", gap.policy]]
-      })))}`;
-    }
-
-    function breakingStatus(change) {
-      const documented = change.documented ? "documented in this PR" : "not documented in this PR";
-      const approval = change.maintainer_approval === "approved"
-        ? "maintainer-approved"
-        : change.maintainer_approval === "not-approved" ? "not maintainer-approved" : "needs maintainer confirmation";
-      return `${documented}; ${approval}`;
-    }
-
-    function breakingList(changes, evidence) {
-      if (!changes || !changes.length) return `<p class="muted">None found.</p>` + basisNote(evidence, "breaking_changes");
-      const items = changes.map((change) => {
-        const summary = `(${change.surface || ""}) ${change.change || ""}`;
-        if (change.documented === true && change.maintainer_approval === "approved") {
-          return `<li>${esc(summary)} — ${esc(breakingStatus(change))}</li>`;
+    function mdParagraph(line) {
+      if (line === "None found." || line === "None.") {
+        return `<p>${badge("none found")}</p>`;
+      }
+      // "*not evaluated* — the review stopped at ..." keeps its explanation muted: it is
+      // the absence of an answer, and should not read as loudly as one.
+      const skipped = line.match(/^\*not evaluated\*\s*—\s*(.*)$/);
+      if (skipped) {
+        return `<p>${badge("not evaluated")} <span class="muted">${mdInline(skipped[1])}</span></p>`;
+      }
+      // The level is the pill here, not the words "Attention level".
+      const attention = line.match(/^\*\*Attention level:\*\*\s*([A-Za-z][A-Za-z-]*)(?:\s*—\s*(.*))?$/);
+      if (attention) {
+        return `<p><strong>Attention level:</strong> ${badge(attention[1])} ${mdInline(attention[2] || "")}</p>`;
+      }
+      // "**verdict** — the reasoning", or a verdict standing alone.
+      const lead = line.match(/^\*\*([^*]+)\*\*(?:\s*—\s*(.*))?$/);
+      if (lead) {
+        const verdict = MD_VERDICTS[lead[1].trim().toLowerCase()];
+        if (verdict) {
+          return `<p>${badge(verdict)} ${mdInline(lead[2] || "")}</p>`;
         }
-        return `<li>☐ <strong>${esc(change.action || "Document this break and get a maintainer sign-off.")}</strong>
-          <ul><li>${esc(summary)}</li><li>${esc(breakingStatus(change))}</li></ul></li>`;
-      }).join("");
-      return `<ul class="todo-issues">${items}</ul>`;
+      }
+      // What was inspected to earn a clean bill is supporting evidence, not a finding.
+      if (/^Checked:/.test(line)) {
+        return `<p class="muted">${mdInline(line)}</p>`;
+      }
+      return `<p>${mdInline(line)}</p>`;
     }
 
-    function reviewerList(reviewers, areas, evidence) {
-      const items = [];
-      (reviewers || []).forEach((item) => {
-        const handle = String(item.handle || "").replace(/^@/, "");
-        const area = item.subject_area ? ` (${esc(item.subject_area)})` : "";
-        const reason = item.reason ? ` — ${esc(item.reason)}` : "";
-        items.push(`<li><strong>${esc(handle)}</strong>${area}${reason}</li>`);
-      });
-      (areas || []).forEach((area) => {
-        items.push(`<li class="muted">No maintainer listed for: ${esc(area)}</li>`);
-      });
-      if (!items.length) return `<p class="muted">None.</p>`;
-      return `<ul>${items.join("")}</ul>`;
+    function markdown(text) {
+      const out = [];
+      let depth = 0;        // how many <ul> are open
+      let itemOpen = false; // the <li> at the deepest level is not closed yet
+      // A nested list belongs inside its parent <li>, so the parent stays open across the
+      // deeper level and closes only when that level does.
+      const setDepth = (want) => {
+        while (depth > want) {
+          if (itemOpen) out.push("</li>");
+          out.push("</ul>");
+          depth--;
+          itemOpen = depth > 0;
+        }
+        while (depth < want) { out.push("<ul>"); depth++; itemOpen = false; }
+      };
+      const pushItem = (html) => {
+        if (itemOpen) out.push("</li>");
+        out.push(`<li>${html}`);
+        itemOpen = true;
+      };
+      for (const raw of String(text || "").split("\n")) {
+        const line = raw.replace(/\s+$/, "");
+        if (!line.trim()) { setDepth(0); continue; }
+        const heading = line.match(/^#{1,6}\s+(.*)$/);
+        if (heading) { setDepth(0); out.push(`<h4>${mdInline(heading[1])}</h4>`); continue; }
+        const item = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (item) {
+          setDepth(item[1].length >= 2 ? 2 : 1);
+          const task = item[2].match(/^\[([ xX])\]\s+(.*)$/);
+          pushItem(task
+            ? `${task[1].toLowerCase() === "x" ? "\u2611" : "\u2610"} ${mdInline(task[2])}`
+            : mdInline(item[2]));
+          continue;
+        }
+        setDepth(0);
+        out.push(mdParagraph(line));
+      }
+      setDepth(0);
+      return out.join("");
+    }
+
+    function prReadBox(row) {
+      const title = row.is_read
+        ? "Read \u2014 unchecks itself if the Status changes"
+        : "Mark this review read";
+      return `<input type="checkbox" class="pr-read" data-review-key="${esc(row.review_key || "")}" data-status="${esc(row.review_status || "")}" ${row.is_read ? "checked" : ""} ${isStatic ? "disabled" : ""} title="${title}" aria-label="${title}">`;
     }
 
     function renderPrReviews() {
@@ -2240,11 +2439,14 @@ INDEX_HTML = r"""<!doctype html>
       $("pr-count").textContent = `${rows.length} shown`;
       $("pr-rows").innerHTML = rows.map((row, index) => `
         <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}">
+          <td>${prReadBox(row)}</td>
           <td>${index + 1}</td>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
-          <td>${esc(row.review_rung || "")}</td>
+          <td>${esc(row.review_rung || "")}${(row.gate || {}).stopped_at
+            ? ` <span class="badge not-ready" title="Stopped at the ${esc(row.gate.stopped_at)} gate: ${esc(row.gate.reason || "")}">gated</span>`
+            : ""}</td>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>
@@ -2259,6 +2461,22 @@ INDEX_HTML = r"""<!doctype html>
           updateRoute();
         });
       });
+      if (!isStatic) {
+        $("pr-rows").querySelectorAll(".pr-read").forEach((box) => {
+          // Checking a box is not picking a row, so the click stops before the <tr>.
+          box.addEventListener("click", (event) => event.stopPropagation());
+          box.addEventListener("change", async () => {
+            box.disabled = true;
+            try {
+              await setReadState(box.dataset.reviewKey, box.checked, box.dataset.status, state.data.pr_viewer || "");
+            } catch (error) {
+              box.checked = !box.checked;
+              box.disabled = false;
+              alert(error.message);
+            }
+          });
+        });
+      }
       const row = rows[state.selectedPr] || rows[0];
       if (!row) {
         $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager review-pr N</code> or <code>repo-manager sweep-prs</code> to review open PRs.</div>`;
@@ -2275,22 +2493,14 @@ INDEX_HTML = r"""<!doctype html>
         field("Reviewed", row.reviewed_at),
         generatedInField(row),
         row.review_status ? section("Review Status", `<p>${statusBadge(row)} ${esc(row.review_status_detail || "")}</p>`) : "",
-        section("Description", `<p>${esc(row.summary)}</p>`),
-        section("Author's Description vs. the Diff", descriptionCheckSection(row.description_check, row.evidence)),
-        section("Attention", attentionSection(row)),
-        section("Review needed", (() => {
-          const req = row.review_requirement || {};
-          const areas = (req.expert_areas || []).join(", ");
-          return `<p><strong>${esc(req.rung || row.review_rung || "")}</strong> — ${esc(req.surface || "")}. ${esc(req.rationale || "")}</p>`
-            + (areas ? `<p>Subject-area expertise this calls for: ${esc(areas)}</p>` : "")
-            + (req.named_approver ? `<p>The guide names ${esc(req.named_approver)} for this rung.</p>` : "");
-        })()),
-        section("Alignment Issues", alignmentList(row.alignment_flags, row.evidence)),
-        section("Documentation", gapSection(row.documentation, row.evidence, "documentation")),
-        section("Testing", gapSection(row.testing, row.evidence, "testing")),
-        section("Breaking Changes", breakingList(row.breaking_changes, row.evidence)),
-        section("Suggested Reviewers", reviewerList(row.suggested_reviewers, row.maintainer_needed_areas, row.evidence)),
-        section("Actions", prActions(row))
+        section("Actions", prActions(row)),
+        // The rule is the line between the two audiences. Above it is the dashboard's own:
+        // things GitHub already shows on the PR itself (number, author, state) but that a
+        // dashboard reader cannot see, plus the Status this viewer's perspective computes,
+        // plus the buttons. Below it is the review, and the review is the comment — what is
+        // rendered there is exactly what Post review comment submits, with nothing after it.
+        `<hr class="pr-split">`,
+        `<div class="md">${markdown(row.comment_markdown)}</div>`
       ].join("");
       attachPrActionHandlers(row);
     }
@@ -2438,11 +2648,15 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
-
 # The maintainer table parser lives in cli.py so tier-1 validation and the dashboard agree
 # on what a valid subject area is.
 from repo_manager.cli import (  # noqa: E402
     PR_RUNG_REVIEWERS,
+    attention_meaning,
+    attention_todo_reasons,
     covers_any_area,
     load_maintainer_context,
+    pr_review_data_from_row,
+    render_pr_review_comment,
+    PR_REVIEW_COMMENT_MARKER,
 )

@@ -1172,11 +1172,8 @@ def normalize_pr_review_data(data):
     ]
     reasons = []
     rung_now = data["review_requirement"]["rung"]
-    if rung_now == "named-approver":
-        named = data["review_requirement"].get("named_approver") or "the maintainer the guide names"
-        reasons.append(f"needs {named}")
-    elif rung_now == "two-with-expert":
-        reasons.append("needs 2 reviewers including a subject-area expert")
+    if rung_now in ("named-approver", "two-with-expert"):
+        reasons.append(attention_requirement_reason(data["review_requirement"]))
     if uncleared:
         reasons.append(f"{len(uncleared)} breaking change(s) without docs or maintainer sign-off")
     elif breaking:
@@ -1572,6 +1569,17 @@ def cited_areas(reviewer):
     return [part.strip() for part in str(reviewer.get("subject_area", "")).split(",") if part.strip()]
 
 
+def asserts_novelty(area):
+    """Does this subject area describe work that did not exist before the PR?
+
+    Matched on the word rather than the prefix. "large new features" asserts novelty
+    exactly as "new endpoints" does, and it is the one term in the table where "new" is
+    not the first word — which is how a PR whose surface was "a field on an existing
+    route" came to be staffed, and reported, as a large new feature.
+    """
+    return "new" in re.split(r"[^a-z0-9]+", str(area).lower())
+
+
 def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainers=None):
     """Tier 3: the slate."""
     errors = []
@@ -1669,12 +1677,17 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
         # already exists. Only complain when they had a non-novel term to cite instead:
         # a maintainer whose cell offers nothing else would otherwise be uncitable, which is
         # the same unsatisfiable-by-construction trap as an author-owned expert area.
-        if non_novel_rung and any(part.lower().startswith("new ") for part in cited):
-            if any(not area.startswith("new ") for area in owned):
+        novel = [part for part in cited if asserts_novelty(part)]
+        if non_novel_rung and novel:
+            if any(not asserts_novelty(area) for area in owned):
                 errors.append(
-                    f"Suggested reviewer {handle} is justified by a 'new ...' area, but this PR's surface "
-                    f"is {(requirement or {}).get('surface')!r} — it changes something that already exists. "
-                    "Cite one of their other listed areas, or use basis 'code-author'."
+                    f"Suggested reviewer {handle} is justified by {', '.join(repr(a) for a in novel)}, "
+                    f"which describes work that did not exist before — but this PR's surface is "
+                    f"{(requirement or {}).get('surface')!r}, which changes something that already does. "
+                    "The rung is a lookup off the surface table, not an impression of how large the diff "
+                    "is, so do not re-argue it here: cite one of their other listed areas, or use basis "
+                    "'code-author'. If the surface itself is wrong, that is a triage finding, not a "
+                    "reason to staff the PR above its rung."
                 )
 
     # A slate with no maintainer-table entry means no row matched any surface this PR touches.
@@ -1911,18 +1924,65 @@ def pr_review_data_from_row(row):
     return None
 
 
-ATTENTION_MEANINGS = {
-    "High": "needs sign-off from a maintainer the guide names before it merges",
-    "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
-    "Routine": "nothing flagged; a standard review pass is enough",
-}
+def attention_requirement_reason(requirement):
+    """The who-must-review clause for a rung, generated in exactly one place.
+
+    Both the attention reasons and the attention meaning are built from this, because the
+    two used to be written independently — a fixed sentence per level against a rung
+    computed from contribute.md — and drifted into contradicting each other. A level is a
+    severity; only the rung knows who has to look. "Any reviewer can take it" belongs to
+    one-reviewer and nowhere else.
+    """
+    rung = (requirement or {}).get("rung") or ""
+    if rung == "named-approver":
+        named = (requirement or {}).get("named_approver") or "the maintainer the guide names"
+        # The guide asks that this rung "should have @handle review" — not that they sign
+        # off. Saying "sign-off" here asked for more than contribute.md does.
+        return f"needs a review from {named}"
+    if rung == "two-with-expert":
+        areas = [str(area) for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
+        clause = "needs 2 reviewers including 1 subject-area expert"
+        return f"{clause} in {', '.join(areas)}" if areas else clause
+    if rung == "one-reviewer":
+        return "needs any 1 reviewer"
+    return ""
+
+
+def attention_todo_reasons(data):
+    """The attention reasons that are work someone owes, minus the rung requirement.
+
+    The requirement is stated once, in the meaning; repeating it in the parenthetical is
+    how the same PR ended up telling the reader two different things about its rung. The
+    "needs " prefix also catches rows stored before this wording, whose rung reason the
+    exact match would miss; no to-do reason is phrased that way — they are all counts of
+    work outstanding.
+    """
+    requirement = attention_requirement_reason(data.get("review_requirement"))
+    return [
+        reason
+        for reason in data.get("attention_reasons") or []
+        if reason != requirement and not str(reason).startswith("needs ")
+    ]
+
+
+def attention_meaning(data):
+    """One sentence for what this PR's attention level asks of a reviewer."""
+    who = attention_requirement_reason(data.get("review_requirement"))
+    todos = attention_todo_reasons(data)
+    if who and todos:
+        return f"{who}, and the to-dos below need resolving before approval"
+    if who:
+        return who
+    if todos:
+        return "the to-dos below need resolving before approval"
+    return "nothing flagged; a standard review pass is enough"
 
 
 def attention_display(data):
     level = data.get("attention_level", "")
-    meaning = ATTENTION_MEANINGS.get(level, "")
+    meaning = attention_meaning(data)
     text = f"{level} — {meaning}" if meaning else level
-    reasons = "; ".join(data.get("attention_reasons") or [])
+    reasons = "; ".join(attention_todo_reasons(data))
     if reasons:
         text += f" ({reasons})"
     return text
@@ -1948,7 +2008,104 @@ def breaking_change_status(change):
     return f"{documented}; {approval_text}"
 
 
-def render_pr_review_comment(repo, pr_number, data, head_sha):
+def rung_notes(data):
+    """Why this PR sits on its rung, as {"why", "notes"} — the one source both renderers use.
+
+    This used to be a "Review needed" section of its own, which restated the rung three
+    times over: the attention line already names it in the guide's words, and
+    attention_requirement_reason folds the expert areas into the two-with-expert clause
+    and the handle into the named-approver one. Each restatement is dropped only for the
+    rung that actually duplicates it — a named-approver PR's expert areas appear nowhere
+    else, so dropping them wholesale would lose them. What is left is the one thing the
+    attention line cannot carry: the surface and rationale that put the PR on that rung.
+
+    Computed here rather than in each renderer because the dashboard and the posted comment
+    have to say the same thing, and two copies of a rule this conditional will not stay equal.
+    """
+    requirement = data.get("review_requirement") or {}
+    rung = requirement.get("rung")
+    if not rung:
+        return {"why": "", "notes": []}
+    why = ". ".join(
+        part for part in (requirement.get("surface"), requirement.get("rationale")) if part
+    )
+    notes = []
+    areas = ", ".join(requirement.get("expert_areas") or [])
+    if areas and rung != "two-with-expert":
+        notes.append(f"Subject-area expertise this calls for: {areas}")
+    if requirement.get("named_approver") and rung != "named-approver":
+        notes.append(f"The guide names {display_handle(requirement['named_approver'])} for this rung.")
+    return {"why": why, "notes": notes}
+
+
+def rung_rationale_lines(data):
+    """rung_notes rendered as the comment's markdown, under the attention level."""
+    rung = rung_notes(data)
+    lines = ["", f"Why this rung: {rung['why']}"] if rung["why"] else []
+    for note in rung["notes"]:
+        lines += ["", f"- {note}"]
+    return lines
+
+
+def ready_line(coverage):
+    """The "Ready for review" sentence, which must not promise a slate we then withhold."""
+    if not (coverage or {}).get("adequate"):
+        return "**Ready for review** — the checks below passed, and suggested reviewers are at the end."
+    who = ", ".join(display_handle(login) for login in coverage.get("who") or [])
+    # Handles are rendered bare, like the slate's, so naming who has it does not ping them.
+    covered = f" ({who})" if who else ""
+    return (
+        "**Ready for review** — the checks below passed. No reviewers are suggested: this PR "
+        f"already has the review contribute.md's rung asks for{covered}."
+    )
+
+
+PR_TIER_ORDER = ("triage", "quality", "reviewers")
+
+
+def pr_tier_ran(tier_reached, tier):
+    """Did the review get far enough to have actually looked at this check?"""
+    order = list(PR_TIER_ORDER)
+    return order.index(tier_reached or "reviewers") >= order.index(tier)
+
+
+def pr_not_evaluated(gate):
+    """What a section says when its tier never ran.
+
+    "None found" would be a lie about a check nobody performed, so a gated section names
+    the gate instead. This is the whole reason the comment cannot just omit the section.
+    """
+    where = f"the {gate.get('stopped_at')} gate" if gate.get("stopped_at") else "an earlier tier"
+    why = f" because {gate['reason']}" if gate.get("reason") else ""
+    return f"*not evaluated* — the review stopped at {where}{why}. This check runs once that is resolved."
+
+
+def pr_todo_lines(items):
+    """One checklist entry per finding, its supporting notes indented underneath."""
+    lines = []
+    for item in items:
+        lines.append(f"- [ ] {item.get('action') or item.get('fallback') or ''}")
+        for label, value in item.get("subs") or []:
+            if value:
+                lines.append(f"  - {label}: {value}")
+    return lines
+
+
+def pr_checked_line(evidence, key):
+    """The "Checked:" note that earns a clean bill — what was inspected to find nothing."""
+    value = (evidence or {}).get(key)
+    return ["", f"Checked: {value}"] if value else []
+
+
+def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
+    """The review rendered as its PR comment.
+
+    This is the single artifact: the dashboard previews exactly this text and the Post
+    review comment button submits exactly this text. It used to be a deliberately lean
+    subset of what the dashboard showed, which meant the two could — and did — disagree
+    about what the review had found, and no amount of aligning them section by section
+    fixed that. There is now one renderer, so there is nothing left to align.
+    """
     marker_payload = json.dumps(
         {"repo": repo, "pr_number": pr_number, "rubric_version": PR_RUBRIC_VERSION},
         sort_keys=True,
@@ -1956,6 +2113,7 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
     tier = data.get("tier_reached", "reviewers")
     gate = data.get("gate") or {}
     stopped_at = gate.get("stopped_at")
+    evidence = data.get("evidence") or {}
     lines = [
         f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->",
         "**[AI-assisted review]** Automated pre-review from repo-manager — flags for the human reviewer, not a replacement for one.",
@@ -1974,113 +2132,119 @@ def render_pr_review_comment(repo, pr_number, data, head_sha):
             "contribute.md asks a PR to meet the Reviewer Expectation before a human is assigned.",
         ]
     else:
-        lines += ["**Ready for review** — the checks below passed, and suggested reviewers are at the end."]
-    lines += ["", f"**Attention level:** {attention_display(data)}"]
-    description = data.get("description_check") or {}
-    bundled = (data.get("focus") or {}).get("verdict") == "bundled"
-    if not bundled and description.get("verdict") in ("discrepancies", "missing"):
-        lines += ["", "### Author's description vs. the diff", ""]
-        if description.get("notes"):
-            notes = description["notes"]
-            lines.append(notes[:1].upper() + notes[1:])
-        if description.get("verdict") == "missing" and not (description.get("discrepancies") or []):
-            lines.append("- [ ] Ask the author to describe the change — the PR has no usable description.")
-        for item in description.get("discrepancies") or []:
-            lines.append(f"- [ ] {item.get('action') or 'Reconcile the description with the diff.'}")
-            if item.get("described"):
-                lines.append(f"  - Described: {item['described']}")
-            if item.get("actual"):
-                lines.append(f"  - In the diff: {item['actual']}")
-            if item.get("evidence"):
-                lines.append(f"  - Reference: {item['evidence']}")
-    focus = data.get("focus") or {}
-    if focus.get("verdict") == "bundled":
-        lines += ["", "### Unrelated changes bundled together", ""]
-        lines.append(f"- [ ] {focus.get('action') or 'Split the unrelated work into its own PR.'}")
-        if focus.get("rationale"):
-            lines.append(f"  - Why: {focus['rationale']}")
-    flags = data.get("alignment_flags") or []
-    if flags:
-        lines += ["", "### Alignment issues", ""]
-        for flag in flags:
-            where = " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
-            lines.append(f"- [ ] {flag.get('action') or flag.get('concern', '')}")
-            if flag.get("concern"):
-                prefix = f"{where}: " if where else ""
-                lines.append(f"  - Why: {prefix}{flag['concern']}")
-            if flag.get("evidence"):
-                lines.append(f"  - Reference: {flag['evidence']}")
-    documentation = data.get("documentation") or {}
-    if documentation.get("status") == "gaps":
-        lines += ["", "### Documentation gaps", ""]
-        for gap in documentation.get("gaps") or []:
-            lines.append(f"- [ ] {gap.get('action') or gap.get('what', '')}")
-            if gap.get("what"):
-                lines.append(f"  - Gap: {gap['what']}")
-            if gap.get("where"):
-                lines.append(f"  - Where: `{gap['where']}`")
-            if gap.get("policy"):
-                lines.append(f"  - Why: {gap['policy']}")
-    testing = data.get("testing") or {}
-    if testing.get("status") == "gaps":
-        lines += ["", "### Testing gaps", ""]
-        for gap in testing.get("gaps") or []:
-            lines.append(f"- [ ] {gap.get('action') or gap.get('what', '')}")
-            if gap.get("what"):
-                lines.append(f"  - Gap: {gap['what']}")
-            if gap.get("where"):
-                lines.append(f"  - Where: `{gap['where']}`")
-            if gap.get("policy"):
-                lines.append(f"  - Why: {gap['policy']}")
-    requirement = data.get("review_requirement") or {}
-    if requirement.get("rung"):
-        areas = ", ".join(requirement.get("expert_areas") or [])
-        lines += ["", "### Review needed", ""]
-        lines.append(
-            f"**{PR_RUNG_LABEL.get(requirement['rung'], requirement['rung'])}** — "
-            f"{requirement.get('surface', '')}. {requirement.get('rationale', '')}"
-        )
-        if areas:
-            lines.append(f"- Subject-area expertise this calls for: {areas}")
-        if requirement.get("named_approver"):
-            lines.append(f"- The guide names {display_handle(requirement['named_approver'])} for this rung.")
+        lines += [ready_line(coverage)]
+    lines += ["", f"**Attention level:** {attention_display(data)}"] + rung_rationale_lines(data)
 
-    breaking = data.get("breaking_changes") or []
-    if breaking:
-        lines += ["", "### Breaking changes", ""]
-        for change in breaking:
+    if data.get("summary"):
+        lines += ["", "### Description", "", data["summary"]]
+
+    description = data.get("description_check") or {}
+    lines += ["", "### Author's description vs. the diff", ""]
+    if not description.get("verdict"):
+        lines.append("*Not assessed by this review.*")
+    else:
+        lines.append(f"**{description['verdict']}** — {description.get('notes', '')}")
+        todos = []
+        if description["verdict"] == "missing" and not (description.get("discrepancies") or []):
+            todos.append({"action": "Ask the author to describe the change — the PR has no usable description."})
+        for item in description.get("discrepancies") or []:
+            todos.append({
+                "action": item.get("action"),
+                "fallback": "Reconcile the description with the diff.",
+                "subs": [("Described", item.get("described")), ("In the diff", item.get("actual")),
+                         ("Reference", item.get("evidence"))],
+            })
+        if todos:
+            lines += [""] + pr_todo_lines(todos)
+
+    focus = data.get("focus") or {}
+    lines += ["", "### Focus", ""]
+    if not focus.get("verdict"):
+        lines.append("*Not assessed by this review.*")
+    else:
+        lines.append(f"**{focus['verdict']}** — {focus.get('rationale', '')}")
+        if focus["verdict"] == "bundled":
+            lines += [""] + pr_todo_lines([{
+                "action": focus.get("action"),
+                "fallback": "Split the unrelated work into its own PR.",
+            }])
+        else:
+            lines += pr_checked_line(evidence, "focus")
+
+    quality_ran = pr_tier_ran(tier, "quality")
+    lines += ["", "### Alignment issues", ""]
+    if not quality_ran:
+        lines.append(pr_not_evaluated(gate))
+    elif not (data.get("alignment_flags") or []):
+        lines.append("None found.")
+        lines += pr_checked_line(evidence, "alignment")
+    else:
+        lines += pr_todo_lines([{
+            "action": flag.get("action"),
+            "fallback": flag.get("concern"),
+            "subs": [
+                ("Why", " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part) + ": " + (flag.get("concern") or "")
+                        if (flag.get("doc") or flag.get("section")) else flag.get("concern")),
+                ("Reference", flag.get("evidence")),
+            ],
+        } for flag in data["alignment_flags"]])
+
+    for title, key in (("Documentation", "documentation"), ("Testing", "testing")):
+        block = data.get(key) or {}
+        lines += ["", f"### {title}", ""]
+        if not quality_ran:
+            lines.append(pr_not_evaluated(gate))
+            continue
+        lines.append(f"**{block.get('status') or 'unknown'}**")
+        gaps = block.get("gaps") or []
+        if gaps:
+            lines += [""] + pr_todo_lines([{
+                "action": gap.get("action"),
+                "fallback": gap.get("what"),
+                "subs": [("Gap", gap.get("what")), ("Where", gap.get("where")), ("Why", gap.get("policy"))],
+            } for gap in gaps])
+        else:
+            lines += pr_checked_line(evidence, key)
+
+    lines += ["", "### Breaking changes", ""]
+    if not quality_ran:
+        lines.append(pr_not_evaluated(gate))
+    elif not (data.get("breaking_changes") or []):
+        lines.append("None found.")
+        lines += pr_checked_line(evidence, "breaking_changes")
+    else:
+        for change in data["breaking_changes"]:
             summary = f"({change.get('surface', '')}) {change.get('change', '')}"
             if breaking_change_cleared(change):
                 lines.append(f"- {summary} — {breaking_change_status(change)}")
                 continue
-            lines.append(f"- [ ] {change.get('action') or 'Document this break and get a maintainer sign-off.'}")
-            lines.append(f"  - Change: {summary}")
-            lines.append(f"  - Status: {breaking_change_status(change)}")
+            lines += pr_todo_lines([{
+                "action": change.get("action"),
+                "fallback": "Document this break and get a maintainer sign-off.",
+                "subs": [("Change", summary), ("Status", breaking_change_status(change))],
+            }])
+
     reviewers = data.get("suggested_reviewers") or []
     areas = data.get("maintainer_needed_areas") or []
-    if reviewers or areas:
+    # A covered PR needs no slate, and the readiness line above has already said so. A gated
+    # one still gets the heading, because "covered" and "never asked" are different answers.
+    covered = bool((coverage or {}).get("adequate"))
+    if not (covered and pr_tier_ran(tier, "reviewers")):
         lines += ["", "### Suggested reviewers", ""]
-        for item in reviewers:
-            note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
-            lines.append(
-                f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
-                f" — {item.get('reason', '')}"
-            )
-        for area in areas:
-            lines.append(f"- No maintainer listed for: {area}")
-    if tier != "reviewers":
-        skipped = ["documentation", "testing", "alignment"] if tier == "triage" else []
-        lines += ["", "### Not checked yet", ""]
-        if skipped:
-            lines.append(
-                "The " + ", ".join(skipped) + ", and reviewer checks were skipped. "
-                "Re-request a review once the item above is resolved and they will run."
-            )
+        if not pr_tier_ran(tier, "reviewers"):
+            lines.append(pr_not_evaluated(gate))
+        elif not (reviewers or areas):
+            lines.append("None.")
         else:
-            lines.append(
-                "Reviewer suggestion was skipped. Re-request a review once the items above are "
-                "resolved and reviewers will be suggested."
-            )
+            for item in reviewers:
+                note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
+                lines.append(
+                    f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
+                    f" — {item.get('reason', '')}"
+                )
+            for area in areas:
+                lines.append(f"- No maintainer listed for: {area}")
+
     lines += [
         "",
         f"_Reviewed at head `{(head_sha or '')[:7]}` by repo-manager (tier: {tier}). "
@@ -2162,7 +2326,18 @@ def post_pr_review(workspace, repo, pr_number, dry_run=False):
             f"PR head has moved since the review ({row['head_sha'][:7]} -> {live_head[:7]}); "
             f"consider regenerating with `repo-manager review-pr {pr_number}`."
         )
-    body = render_pr_review_comment(repo, pr_number, data, row.get("head_sha", ""))
+    # web.py owns the coverage rules because the Status column is their other consumer;
+    # imported here rather than at module scope, since web.py imports back from cli.
+    from repo_manager.web import reviewer_coverage
+
+    coverage = reviewer_coverage(
+        workspace,
+        repo,
+        pr_number,
+        row.get("author") or data.get("author"),
+        data.get("review_requirement"),
+    )
+    body = render_pr_review_comment(repo, pr_number, data, row.get("head_sha", ""), coverage)
     existing = find_pr_review_comment(workspace, repo, pr_number)
     if dry_run:
         action = "update" if existing else "create"

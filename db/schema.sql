@@ -114,6 +114,8 @@ ON review_todos (review_kind, review_key);
 CREATE TABLE IF NOT EXISTS review_read_states (
   review_key TEXT PRIMARY KEY,
   is_read INTEGER NOT NULL DEFAULT 0,
+  acked_status TEXT NOT NULL DEFAULT '',
+  acked_viewer TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
 
