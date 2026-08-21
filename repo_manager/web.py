@@ -1719,6 +1719,11 @@ INDEX_HTML = r"""<!doctype html>
       padding: 7px 10px;
       cursor: pointer;
     }
+    .copy:disabled {
+      color: #98a2ae;
+      background: #f6f7f9;
+      cursor: not-allowed;
+    }
     .hidden {
       display: none;
     }
@@ -2271,8 +2276,9 @@ INDEX_HTML = r"""<!doctype html>
 
     function describePrActionResult(kind, result) {
       if (kind === "comment") {
-        const action = result.action === "updated" ? "Updated" : "Posted";
-        return `${action} review comment${result.url ? `: ${result.url}` : "."}`;
+        // Not the URL: the reload that follows puts the same link in the "Posted comment"
+        // line right below this one, and the two together read as two comments.
+        return result.action === "updated" ? "Updated the review comment." : "Posted the review comment.";
       }
       const parts = [];
       if ((result.requested || []).length) parts.push(`Requested: ${result.requested.join(", ")}`);
@@ -2288,12 +2294,22 @@ INDEX_HTML = r"""<!doctype html>
         ? `<p class="muted" id="pr-action-result">${esc(state.prActionMessage.text)}</p>`
         : `<p class="muted hidden" id="pr-action-result"></p>`;
       const commentLink = row.comment_url
-        ? `<p class="muted">Posted comment: <a href="${esc(row.comment_url)}" target="_blank" rel="noopener noreferrer">${esc(row.comment_url)}</a></p>`
+        ? `<p class="muted">Comment on GitHub: <a href="${esc(row.comment_url)}" target="_blank" rel="noopener noreferrer">${esc(row.comment_url)}</a></p>`
         : "";
+      // A covered rung has no slate below the rule, so the button would be acting on names
+      // that are not on screen — and on #3210 one of those names was a reviewer already
+      // requested on the PR. The tooltip says who is covering it, so the button explains
+      // itself rather than just refusing. `repo-manager request-pr-reviewers N` still works:
+      // typing the command is an explicit override, clicking a button you cannot read is not.
+      const covered = (row.coverage || {}).adequate;
+      const who = ((row.coverage || {}).who || []).join(", ");
+      const reviewersTitle = covered
+        ? `Not needed — this PR already has the reviewers its rung asks for${who ? ` (${who})` : ""}`
+        : "Request the suggested reviewers on GitHub";
       return `
         <div class="pr-actions">
           <button class="copy" id="pr-post-comment" data-pr="${row.pr_number}" ${disabled}>Post review comment</button>
-          <button class="copy" id="pr-request-reviewers" data-pr="${row.pr_number}" ${disabled}>Request reviewers</button>
+          <button class="copy" id="pr-request-reviewers" data-pr="${row.pr_number}" title="${esc(reviewersTitle)}" ${disabled || (covered ? "disabled" : "")}>Request reviewers</button>
         </div>
         ${message}
         ${commentLink}`;
