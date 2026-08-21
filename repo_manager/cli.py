@@ -1965,10 +1965,10 @@ def attention_todo_reasons(data):
     ]
 
 
-def attention_meaning(data):
+def attention_meaning(data, with_todos=True):
     """One sentence for what this PR's attention level asks of a reviewer."""
     who = attention_requirement_reason(data.get("review_requirement"))
-    todos = attention_todo_reasons(data)
+    todos = attention_todo_reasons(data) if with_todos else []
     if who and todos:
         return f"{who}, and the to-dos below need resolving before approval"
     if who:
@@ -1978,11 +1978,18 @@ def attention_meaning(data):
     return "nothing flagged; a standard review pass is enough"
 
 
-def attention_display(data):
+def attention_display(data, terse=False):
+    """Level, what it asks of a reviewer, and — unless the caller already said it — why.
+
+    The PR comment goes terse on a gated review, where the gate's own line has just said both
+    halves: "the author owes 3 documentation gap(s), 1 testing gap(s)" followed by "and the
+    to-dos below need resolving before approval (2 alignment issue(s); 3 documentation
+    gap(s); 1 testing gap(s))" is one fact told three times, in three orders.
+    """
     level = data.get("attention_level", "")
-    meaning = attention_meaning(data)
+    meaning = attention_meaning(data, with_todos=not terse)
     text = f"{level} — {meaning}" if meaning else level
-    reasons = "; ".join(attention_todo_reasons(data))
+    reasons = "" if terse else "; ".join(attention_todo_reasons(data))
     if reasons:
         text += f" ({reasons})"
     return text
@@ -2047,25 +2054,32 @@ def rung_rationale_lines(data):
     return lines
 
 
-def ready_line(coverage):
-    """The "Ready for review" sentence, which must not promise a slate we then withhold."""
+def coverage_clause(coverage, tier):
+    """Whether the rung this PR sits on is already answered, said where the rung is stated.
+
+    This used to sit on the readiness line, which meant a PR read "no reviewers are suggested,
+    these two cover it" and then, on the very next line, "needs 2 reviewers including an
+    expert in X" — the requirement and its answer split across two lines that each told half
+    of it. The requirement is the attention line's business, so its answer belongs there too.
+
+    Handles stay bare, like the slate's, so naming who is covering a PR does not ping them.
+    """
+    if not pr_tier_ran(tier, "reviewers"):
+        return ""
     if not (coverage or {}).get("adequate"):
-        return "**Ready for review** — the checks below passed, and suggested reviewers are at the end."
-    who = ", ".join(display_handle(login) for login in coverage.get("who") or [])
-    # Handles are rendered bare, like the slate's, so naming who has it does not ping them.
-    covered = f" ({who})" if who else ""
-    # Someone requested but not yet answering staffs the rung without satisfying it, and the
-    # sentence has to say which — "already has the review" would be a claim about work nobody
-    # has done yet, on a PR whose Status column is still reporting Waiting.
-    if coverage.get("pending"):
-        return (
-            "**Ready for review** — the checks below passed. No reviewers are suggested: the "
-            f"reviewers contribute.md's rung asks for are already on this PR{covered}."
-        )
-    return (
-        "**Ready for review** — the checks below passed. No reviewers are suggested: this PR "
-        f"already has the review contribute.md's rung asks for{covered}."
-    )
+        # Nothing to add: the Suggested reviewers fold below already says the rung is short,
+        # and repeating it here is the same doubling this clause exists to remove.
+        return ""
+    who = ", ".join(display_handle(login) for login in (coverage or {}).get("who") or [])
+    # Requested and not yet answering staffs the rung without satisfying it, and the sentence
+    # has to say which: "reviewed by" would claim work nobody has done on a PR still Waiting.
+    verb = "Already on this PR" if (coverage or {}).get("pending") else "Covered by"
+    return f" {verb}: {who}." if who else ""
+
+
+def ready_line(coverage):
+    """The "Ready for review" sentence. Who must review is the attention line's business."""
+    return "**Ready for review** — the checks below passed."
 
 
 PR_TIER_ORDER = ("triage", "quality", "reviewers")
@@ -2150,21 +2164,25 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
         "**[AI-assisted review]** Automated pre-review from repo-manager — flags for the human reviewer, not a replacement for one.",
         "",
     ]
+    # One clause of rationale each. Which checks were skipped is on their own folded lines,
+    # and what the author owes is enumerated in the reason itself.
     if stopped_at == "triage":
         lines += [
             f"**Not ready for review yet** — {gate.get('reason', '')}. "
-            "Fixing the item below is the next step; the documentation, testing, and reviewer checks "
-            "have not run yet and will follow once this is resolved.",
+            "The remaining checks run once this is resolved.",
         ]
     elif stopped_at == "quality":
         lines += [
             f"**Not ready for review yet** — {gate.get('reason', '')}. "
-            "These are for the author to resolve. No reviewer has been suggested yet: "
-            "contribute.md asks a PR to meet the Reviewer Expectation before a human is assigned.",
+            "contribute.md asks a PR to meet the Reviewer Expectation before a reviewer is assigned.",
         ]
     else:
         lines += [ready_line(coverage)]
-    lines += ["", f"**Attention level:** {attention_display(data)}"] + rung_rationale_lines(data)
+    lines += [
+        "",
+        f"**Attention level:** {attention_display(data, terse=bool(stopped_at)).rstrip('.')}."
+        f"{coverage_clause(coverage, tier)}",
+    ] + rung_rationale_lines(data)
 
     if data.get("summary"):
         lines += ["", f"**Description:** {data['summary']}"]

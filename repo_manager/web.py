@@ -828,11 +828,8 @@ def pr_reviews(workspace, pr_viewer=""):
             }
             item["evidence"] = data.get("evidence", {})
             item["description_check"] = data.get("description_check", {})
-            item["attention_reasons"] = data.get("attention_reasons", [])
-            item["attention_meaning"] = attention_meaning(data)
             item["coverage"] = {"adequate": False, "who": [], "pending": []}
             item["comment_markdown"] = ""
-            item["attention_todos"] = attention_todo_reasons(data)
             item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
             # One check-off per PR, not per rubric version: the list already collapses a
             # PR's older reviews, so a re-review under a new rubric is the same row to me.
@@ -2748,8 +2745,6 @@ INDEX_HTML = r"""<!doctype html>
 # on what a valid subject area is.
 from repo_manager.cli import (  # noqa: E402
     PR_RUNG_REVIEWERS,
-    attention_meaning,
-    attention_todo_reasons,
     covers_any_area,
     load_maintainer_context,
     pr_review_data_from_row,
