@@ -2184,9 +2184,6 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
         f"{coverage_clause(coverage, tier)}",
     ] + rung_rationale_lines(data)
 
-    if data.get("summary"):
-        lines += ["", f"**Description:** {data['summary']}"]
-
     description = data.get("description_check") or {}
     verdict = description.get("verdict") or "not assessed"
     todos = []

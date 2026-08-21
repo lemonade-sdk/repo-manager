@@ -2580,6 +2580,10 @@ INDEX_HTML = r"""<!doctype html>
       const prUrl = `https://github.com/${state.data.config.repo}/pull/${row.pr_number}`;
       $("pr-detail").innerHTML = [
         linkedField("PR", prUrl, `#${row.pr_number} — ${row.pr_title || ""}`),
+        // Dashboard-only by the same test as the rest of this block: a reader of the comment
+        // is already on the PR, whose own body says what it does. A reader skimming the
+        // dashboard has no other way to tell one row from another.
+        row.summary ? field("Description", row.summary) : "",
         field("Author", row.author),
         row.pr_state ? field("State", `${row.pr_state}${row.base_ref ? ` → ${row.base_ref}` : ""}`) : "",
         field("Head", shortSha(row.head_sha)),
