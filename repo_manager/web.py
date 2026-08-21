@@ -89,6 +89,8 @@ def ensure_pr_schema(conn):
           attention_level TEXT NOT NULL DEFAULT '',
           review_rung TEXT NOT NULL DEFAULT '',
           reviewers_needed INTEGER NOT NULL DEFAULT 1,
+          tier_reached TEXT NOT NULL DEFAULT '',
+          gate_stopped_at TEXT NOT NULL DEFAULT '',
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -556,7 +558,7 @@ def review_coverage(reviewer_logins, requirement, maintainers):
         covered = covers_any_area(maintainers.get(login), expert_areas)
         if covered:
             experts[login] = covered
-    needed = 2 if rung in ("two-with-expert", "named-approver") else 1
+    needed = PR_RUNG_REVIEWERS.get(rung, 1)
     return {
         "rung": rung,
         "count": len(reviewers),
@@ -598,7 +600,7 @@ def coverage_status(coverage, names):
     return None
 
 
-def derive_review_status(info, author, attention_level, viewer_override="", requirement=None, maintainers=None):
+def derive_review_status(info, author, viewer_override="", requirement=None, maintainers=None):
     """Map live review activity to a (short label, tooltip detail) pair.
 
     The perspective is the gh-authenticated viewer unless viewer_override names another
@@ -713,7 +715,6 @@ def pr_reviews(workspace, pr_viewer=""):
                 status, detail = derive_review_status(
                     info,
                     item.get("author"),
-                    item.get("attention_level"),
                     effective_viewer,
                     requirement=item.get("review_requirement"),
                     maintainers=maintainers,
@@ -2102,7 +2103,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     const ATTENTION_MEANINGS = {
-      "High": "a core maintainer should look at this before it merges",
+      "High": "needs sign-off from a maintainer the guide names before it merges",
       "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
       "Routine": "nothing flagged; a standard review pass is enough"
     };
@@ -2421,9 +2422,7 @@ INDEX_HTML = r"""<!doctype html>
 # The maintainer table parser lives in cli.py so tier-1 validation and the dashboard agree
 # on what a valid subject area is.
 from repo_manager.cli import (  # noqa: E402
-    contribute_doc_path,
+    PR_RUNG_REVIEWERS,
     covers_any_area,
     load_maintainer_context,
-    parse_maintainer_table,
-    parse_named_approver,
 )

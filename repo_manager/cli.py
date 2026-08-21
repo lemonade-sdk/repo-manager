@@ -134,14 +134,14 @@ def ensure_db_schema(conn):
                 conn.execute(f"ALTER TABLE pr_reviews DROP COLUMN {dead}")
             except sqlite3.OperationalError:
                 pass
-    if pr_columns and "review_rung" not in pr_columns:
-        conn.execute("ALTER TABLE pr_reviews ADD COLUMN review_rung TEXT NOT NULL DEFAULT ''")
-    if pr_columns and "reviewers_needed" not in pr_columns:
-        conn.execute("ALTER TABLE pr_reviews ADD COLUMN reviewers_needed INTEGER NOT NULL DEFAULT 1")
-    if pr_columns and "tier_reached" not in pr_columns:
-        conn.execute("ALTER TABLE pr_reviews ADD COLUMN tier_reached TEXT NOT NULL DEFAULT ''")
-    if pr_columns and "gate_stopped_at" not in pr_columns:
-        conn.execute("ALTER TABLE pr_reviews ADD COLUMN gate_stopped_at TEXT NOT NULL DEFAULT ''")
+    for column, decl in (
+        ("review_rung", "TEXT NOT NULL DEFAULT ''"),
+        ("reviewers_needed", "INTEGER NOT NULL DEFAULT 1"),
+        ("tier_reached", "TEXT NOT NULL DEFAULT ''"),
+        ("gate_stopped_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if pr_columns and column not in pr_columns:
+            conn.execute(f"ALTER TABLE pr_reviews ADD COLUMN {column} {decl}")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS review_todos (
@@ -194,6 +194,8 @@ def ensure_db_schema(conn):
           attention_level TEXT NOT NULL DEFAULT '',
           review_rung TEXT NOT NULL DEFAULT '',
           reviewers_needed INTEGER NOT NULL DEFAULT 1,
+          tier_reached TEXT NOT NULL DEFAULT '',
+          gate_stopped_at TEXT NOT NULL DEFAULT '',
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -267,12 +269,15 @@ def project_docs_cache_dir(workspace):
 PR_TIERS_WITHOUT_REVIEW_STATE = ("pr-triage", "pr-reviewers")
 
 
-def run_pi(skill_name, prompt, cwd):
+def run_pi(skill_name, prompt, cwd, base_ref=""):
     pi = shutil.which("pi")
     if not pi:
         raise SystemExit("`pi` was not found on PATH.")
     env = dict(os.environ)
     env["REPO_MANAGER_CACHE_DIR"] = str(project_docs_cache_dir(cwd))
+    env["REPO_MANAGER_CHECKOUT"] = str(Path(cwd).resolve() / CONFIG_DIR / "checkout")
+    if base_ref:
+        env["REPO_MANAGER_BASE_REF"] = base_ref
     if skill_name in PR_TIERS_WITHOUT_REVIEW_STATE:
         env["REPO_MANAGER_WITHHOLD_REVIEWS"] = "1"
     cmd = [pi, "--mode", "json", "--skill", str(skill_path(skill_name))]
@@ -1282,6 +1287,9 @@ def latest_pr_review(workspace, repo, pr_number):
     return dict(row) if row else None
 
 
+_REFRESHED_DOCS = set()
+
+
 def refresh_project_docs(workspace, repo, ref):
     """Re-fetch the project docs at `ref` before the skill runs.
 
@@ -1291,6 +1299,8 @@ def refresh_project_docs(workspace, repo, ref):
     tree is lying around, which for a PR review is the PR's own branch: its contribution
     guide is the one from the branch point, not the one the PR will merge into.
     """
+    if (str(workspace), repo, ref) in _REFRESHED_DOCS:
+        return
     script = repo_root() / "skills" / "pr-review" / "scripts" / "get-pr-review-docs.sh"
     if not script.exists():
         print(f"Warning: doc fetch script not found at {script}; the skill will fetch its own.")
@@ -1307,7 +1317,9 @@ def refresh_project_docs(workspace, repo, ref):
         stderr=subprocess.PIPE,
         text=True,
     )
-    if result.returncode != 0:
+    if result.returncode == 0:
+        _REFRESHED_DOCS.add((str(workspace), repo, ref))
+    else:
         print(
             f"Warning: could not refresh project docs at {ref} "
             f"({(result.stderr or '').strip() or 'unknown error'}). "
@@ -1315,7 +1327,6 @@ def refresh_project_docs(workspace, repo, ref):
         )
 
 
-PR_TIERS = ("triage", "quality", "reviewers")
 PR_TIER_SKILLS = {"triage": "pr-triage", "quality": "pr-quality", "reviewers": "pr-reviewers"}
 
 
@@ -1326,12 +1337,10 @@ PR_TIER_SKILLS = {"triage": "pr-triage", "quality": "pr-quality", "reviewers": "
 # outlived the concept it described.
 
 MAINTAINER_ROW = re.compile(r"^\|\s*@([A-Za-z0-9-]+)\s*\|([^|]*)\|(.*)\|\s*$")
-NAMED_APPROVER = re.compile(r"should have\s+@([A-Za-z0-9-]+)\s+review", re.IGNORECASE)
 
 
 def contribute_doc_path(workspace, repo, ref="main"):
-    safe = str(repo).replace("/", "__")
-    return Path(workspace) / ".repo-manager" / "cache" / "project-docs" / safe / ref / "docs__dev__contribute.md"
+    return project_docs_cache_dir(workspace) / safe_repo_name(repo) / ref / "docs__dev__contribute.md"
 
 
 def parse_maintainer_table(text):
@@ -1353,22 +1362,11 @@ def parse_maintainer_table(text):
     return table
 
 
-def parse_named_approver(text):
-    """The handle the guide's top review rung names, or '' when it names none."""
-    match = NAMED_APPROVER.search(text)
-    return f"@{match.group(1)}" if match else ""
-
-
 def load_maintainer_context(workspace, repo, ref="main"):
     path = contribute_doc_path(workspace, repo, ref)
     if not path.exists():
-        return {"table": {}, "named_approver": "", "source": ""}
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return {
-        "table": parse_maintainer_table(text),
-        "named_approver": parse_named_approver(text),
-        "source": str(path),
-    }
+        return {"table": {}}
+    return {"table": parse_maintainer_table(path.read_text(encoding="utf-8", errors="replace"))}
 
 
 def covers_any_area(entry, expert_areas):
@@ -1552,8 +1550,7 @@ def pr_quality_validation_errors(data, pr_author):
             )
             break
     for change in breaking:
-        cleared = change.get("documented") is True and change.get("maintainer_approval") == "approved"
-        if not cleared and not change.get("action"):
+        if not breaking_change_cleared(change) and not change.get("action"):
             errors.append(
                 "Every breaking change that is undocumented or lacks maintainer approval needs an "
                 "imperative 'action' that clears it."
@@ -1570,17 +1567,22 @@ def pr_quality_validation_errors(data, pr_author):
     return errors
 
 
+def cited_areas(reviewer):
+    """The subject-area terms a suggestion cites, as a list."""
+    return [part.strip() for part in str(reviewer.get("subject_area", "")).split(",") if part.strip()]
+
+
 def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainers=None):
     """Tier 3: the slate."""
     errors = []
-    author_key = str(pr_author or "").lower()
+    author_key = str(pr_author or "").lstrip("@").lower()
     for reviewer in data.get("suggested_reviewers", []):
         if not VALID_HANDLE.match(reviewer.get("handle", "")):
             errors.append(
                 f"Suggested reviewer handle {reviewer.get('handle', '')!r} is not a plain GitHub handle — "
                 "use '@handle' only; a surface no row covers belongs in maintainer_needed_areas."
             )
-        elif author_key and reviewer["handle"].lower() == author_key:
+        elif author_key and reviewer["handle"].lstrip("@").lower() == author_key:
             errors.append(
                 f"Suggested reviewer {reviewer['handle']} is the PR author — pick another candidate, or "
                 "say in evidence.reviewers that the author is the sole candidate for that surface."
@@ -1609,7 +1611,6 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
         # because the author is never suggestable. Demanding it would make this check
         # unsatisfiable by construction, so those areas are excluded and belong in
         # maintainer_needed_areas instead.
-        author_key = str(pr_author or "").lstrip("@").lower()
         coverable = []
         for area in expert_areas:
             owners = {
@@ -1633,63 +1634,57 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
                 "does, or record the area in maintainer_needed_areas if nobody covers it."
             )
 
-    # A maintainer-table suggestion quotes one term from that maintainer's own row. Joining
-    # two terms, or naming one they do not list, is how a loose match gets dressed as a
-    # table lookup — the reader cannot audit a term that is not in the cell.
-    if maintainers:
-        for item in data.get("suggested_reviewers", []):
-            if item.get("basis") != "maintainer-table":
-                continue
-            handle = item.get("handle", "").lstrip("@").lower()
-            entry = maintainers.get(handle)
-            if not entry:
-                continue
-            owned = {a.lower() for a in entry.get("areas", [])}
-            cited = [part.strip() for part in str(item.get("subject_area", "")).split(",") if part.strip()]
-            if len(cited) > 3:
-                errors.append(
-                    f"Suggested reviewer {item.get('handle')} cites {len(cited)} subject areas. Name only the "
-                    "ones that make them relevant to this diff — quoting the whole cell says nothing about why "
-                    "they were chosen."
-                )
-            unknown = [part for part in cited if part.lower() not in owned]
-            if unknown:
-                errors.append(
-                    f"Suggested reviewer {item.get('handle')} cites subject area(s) {unknown!r} that do not "
-                    f"appear in their Subject Areas cell. Quote terms verbatim from it "
-                    f"({', '.join(sorted(entry.get('areas', []))[:6])}...) — citing more than one is fine when "
-                    "each is genuinely listed — or use basis 'code-author' if blame is the real reason."
-                )
-
-    # A term asserting novelty cannot justify a reviewer on a PR whose own surface says the
-    # thing already exists. Semantic fit is not checkable, but self-contradiction is.
-    # Every one-reviewer cell describes a change to something that already exists, so a term
-    # asserting novelty contradicts the rung itself — not just surfaces that say "existing".
+    # One pass over the slate, so every rule below reads the same derived facts instead of
+    # re-deriving them — and so no rule can demand a term another rule forbids.
+    rung = (requirement or {}).get("rung")
     surface = str((requirement or {}).get("surface", "")).lower()
-    if "existing" in surface or (requirement or {}).get("rung") == "one-reviewer":
-        for item in data.get("suggested_reviewers", []):
-            if item.get("basis") != "maintainer-table":
-                continue
-            cited = [part.strip() for part in str(item.get("subject_area", "")).split(",") if part.strip()]
-            novel = [part for part in cited if part.lower().startswith("new ")]
-            if novel:
+    non_novel_rung = "existing" in surface or rung == "one-reviewer"
+    table_entries = 0
+    for item in data.get("suggested_reviewers", []):
+        handle = item.get("handle", "")
+        cited = cited_areas(item)
+        if len(cited) > 3:
+            errors.append(
+                f"Suggested reviewer {handle} cites {len(cited)} subject areas. Name only the ones that "
+                "make them relevant to this diff — quoting the whole cell says nothing about why they "
+                "were chosen."
+            )
+        if item.get("basis") != "maintainer-table":
+            continue
+        table_entries += 1
+        entry = (maintainers or {}).get(handle.lstrip("@").lower())
+        if not entry:
+            continue
+        owned = {area.lower() for area in entry.get("areas", [])}
+        unknown = [part for part in cited if part.lower() not in owned]
+        if unknown:
+            errors.append(
+                f"Suggested reviewer {handle} cites subject area(s) {unknown!r} that do not appear in "
+                f"their Subject Areas cell. Quote terms verbatim from it "
+                f"({', '.join(sorted(entry.get('areas', []))[:6])}...) — citing more than one is fine when "
+                "each is genuinely listed — or use basis 'code-author' if blame is the real reason."
+            )
+            continue
+        # A term asserting novelty contradicts a rung that describes changing something which
+        # already exists. Only complain when they had a non-novel term to cite instead:
+        # a maintainer whose cell offers nothing else would otherwise be uncitable, which is
+        # the same unsatisfiable-by-construction trap as an author-owned expert area.
+        if non_novel_rung and any(part.lower().startswith("new ") for part in cited):
+            if any(not area.startswith("new ") for area in owned):
                 errors.append(
-                    f"Suggested reviewer {item.get('handle')} is justified by {novel!r}, but this PR's "
-                    f"surface is {(requirement or {}).get('surface')!r} — it changes something that already "
-                    "exists. Cite a term that matches what the diff does, or use basis 'code-author'."
+                    f"Suggested reviewer {handle} is justified by a 'new ...' area, but this PR's surface "
+                    f"is {(requirement or {}).get('surface')!r} — it changes something that already exists. "
+                    "Cite one of their other listed areas, or use basis 'code-author'."
                 )
-                break
 
     # A slate with no maintainer-table entry means no row matched any surface this PR touches.
     # That is a maintainer gap by definition, and saying so is the useful part for the reader.
-    slate_items = data.get("suggested_reviewers", [])
-    if slate_items and not any(item.get("basis") == "maintainer-table" for item in slate_items):
-        if not data.get("maintainer_needed_areas"):
-            errors.append(
-                "Every suggested reviewer is a code-author, which means no maintainer's Subject Areas "
-                "cell covers this PR — record those surfaces in maintainer_needed_areas. A reader who "
-                "learns nobody owns a surface can act on that; a slate that omits it hides the gap."
-            )
+    if data.get("suggested_reviewers") and not table_entries and not data.get("maintainer_needed_areas"):
+        errors.append(
+            "Every suggested reviewer is a code-author, which means no maintainer's Subject Areas "
+            "cell covers this PR — record those surfaces in maintainer_needed_areas. A reader who "
+            "learns nobody owns a surface can act on that; a slate that omits it hides the gap."
+        )
 
     basis_text = str(data.get("evidence", {}).get("reviewers", "")).strip()
     if not basis_text:
@@ -1764,7 +1759,7 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
             f"{feedback}"
         )
         try:
-            output = run_pi(skill, prompt, workspace)
+            output = run_pi(skill, prompt, workspace, base_ref=base_ref)
         except SystemExit as exc:
             if exc.code in (130, None) or attempt == max_attempts:
                 raise
@@ -1853,10 +1848,7 @@ def generate_pr_review(workspace, repo, meta):
         owed = pr_gate_after_quality(quality)
         # An uncleared break is the one author obligation that still needs a maintainer:
         # only a listed maintainer can sign it off, so withholding the slate would deadlock.
-        uncleared = [
-            change for change in quality["breaking_changes"]
-            if change["documented"] is not True or change["maintainer_approval"] != "approved"
-        ]
+        uncleared = [c for c in quality["breaking_changes"] if not breaking_change_cleared(c)]
         if meta.get("isDraft"):
             reason = "this PR is still a draft, so no human reviewer is assigned yet"
             if owed:
@@ -1886,10 +1878,6 @@ def generate_pr_review(workspace, repo, meta):
         data["testing"] = {"status": "not-evaluated", "gaps": []}
         data["alignment_flags"] = []
         data["breaking_changes"] = []
-    if tier_reached != "reviewers":
-        data.setdefault("suggested_reviewers", [])
-        data.setdefault("maintainer_needed_areas", [])
-
     data = normalize_pr_review_data(data)
     data["tier_reached"] = tier_reached
     data["gate"] = {"stopped_at": stopped_at, "reason": gate_reason or ""}
@@ -1924,7 +1912,7 @@ def pr_review_data_from_row(row):
 
 
 ATTENTION_MEANINGS = {
-    "High": "a core maintainer should look at this before it merges",
+    "High": "needs sign-off from a maintainer the guide names before it merges",
     "Elevated": "any reviewer can take it, but the to-dos below need resolving before approval",
     "Routine": "nothing flagged; a standard review pass is enough",
 }

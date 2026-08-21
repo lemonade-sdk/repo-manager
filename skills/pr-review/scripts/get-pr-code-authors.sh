@@ -33,7 +33,7 @@ fi
 cache_dir="${REPO_MANAGER_CACHE_DIR:-.repo-manager/cache/project-docs}/${repo//\//__}/authors"
 mkdir -p "$cache_dir"
 
-base="$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName)"
+base="${REPO_MANAGER_BASE_REF:-$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName)}"
 git -C "$checkout" fetch --quiet origin "$base"
 ref="origin/${base}"
 
@@ -46,7 +46,7 @@ handle_for() {
       --jq '"\(.author.login // "unknown")\t\(.commit.author.date[0:10])\t\(.commit.message | split("\n")[0])"' \
       > "$file" 2>/dev/null || printf 'unknown\t\t\n' > "$file"
   fi
-  cat "$file"
+  printf '%s' "$(<"$file")"
 }
 
 hits_file="$(mktemp)"
@@ -56,11 +56,8 @@ blame_range() {  # file, start, end, provenance label
   local file="$1" start="$2" end="$3" label="$4"
   [[ -n "$start" && "$start" -gt 0 ]] || return 0
   git -C "$checkout" blame "$ref" -L "${start},${end}" --porcelain -- "$file" 2>/dev/null \
-    | awk -v f="$file" -v lbl="$label" '
-        /^[0-9a-f]{40} /{ sha = substr($0, 1, 40) }
-        /^author-time /  { t = substr($0, 13) }
-        /^\t/ && sha    { print sha "\t" f "\t" lbl; sha = "" }
-      ' >> "$hits_file"
+    | grep -E '^[0-9a-f]{40} ' \
+    | awk -v f="$file" -v lbl="$label" '{ print $1 "\t" f "\t" lbl }' >> "$hits_file"
 }
 
 if [[ ${#terms[@]} -gt 0 ]]; then
@@ -115,8 +112,7 @@ while IFS=$'\t' read -r sha file term; do
   printf '%s\t%s\t%s\n' "$(handle_for "$sha")" "$file" "$term"
 done < "$hits_file" \
   | awk -F'\t' '
-      { rows[NR] = $0
-        handle[NR] = $1; date[NR] = $2; subj[NR] = $3; file[NR] = $4; term[NR] = $5
+      { handle[NR] = $1; date[NR] = $2; subj[NR] = $3; file[NR] = $4; term[NR] = $5
         if (!((file[NR] SUBSEP term[NR]) in seenft)) { seenft[file[NR] SUBSEP term[NR]] = 1; terms_in[file[NR]]++ }
       }
       END {
