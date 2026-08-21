@@ -8,6 +8,14 @@ repo-manager ui
 
 The UI serves the current workspace at `http://127.0.0.1:8765/` by default. Use `--no-open` to print the URL without opening a browser. Commit and release review to-dos can be checked off in the UI, and that state is persisted in SQLite.
 
+To reach the UI from another machine — a phone, a laptop on the same network — bind a wildcard address:
+
+```bash
+repo-manager ui --host 0.0.0.0 [--port 8765]
+```
+
+The startup banner then prints the LAN URL to hand to the other device. There is no authentication: anyone who can reach that address can browse the workspace and use the PR buttons, which act on GitHub with your `gh` credentials. Bind `0.0.0.0` only on networks you trust.
+
 Use the tag dropdown to browse `vNext` and historical releases.
 
 The **PR Reviews** tab has its own controls — the live Status column with a configurable perspective, hide toggles, and comment/reviewer-request actions — documented in [PR Reviews](pr-review.md#pr-reviews-in-the-web-ui).

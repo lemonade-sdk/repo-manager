@@ -4845,8 +4845,12 @@ def build_parser():
     pr_row.set_defaults(func=cmd_pr_row)
 
     ui = sub.add_parser("ui", help="Serve a local web UI for saved reviews and announcements.")
-    ui.add_argument("--host", default="127.0.0.1")
-    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Address to bind. Use 0.0.0.0 to serve the UI to other machines on your LAN.",
+    )
+    ui.add_argument("--port", type=int, default=8765, help="Port to bind (default: 8765).")
     ui.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser.")
     ui.set_defaults(func=cmd_ui)
 

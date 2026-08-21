@@ -1,6 +1,7 @@
 import json
 import hashlib
 import re
+import socket
 import sqlite3
 import subprocess
 import time
@@ -986,12 +987,31 @@ def make_handler(workspace):
     return RepoManagerHandler
 
 
+def lan_address():
+    """Best guess at this machine's LAN address, for the URL printed when binding a wildcard."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No packets are sent; connect() on UDP just picks the outbound interface.
+        probe.connect(("192.0.2.1", 9))
+        return probe.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        probe.close()
+
+
 def serve(workspace, host, port, open_browser):
     server = ThreadingHTTPServer((host, port), make_handler(workspace))
     actual_host, actual_port = server.server_address
-    display_host = "127.0.0.1" if actual_host in ("0.0.0.0", "") else actual_host
+    wildcard = actual_host in ("0.0.0.0", "", "::")
+    display_host = "127.0.0.1" if wildcard else actual_host
     url = f"http://{display_host}:{actual_port}/"
     print(f"Serving repo-manager UI at {url}")
+    if wildcard:
+        lan = lan_address()
+        if lan:
+            print(f"Reachable on the LAN at http://{lan}:{actual_port}/")
+        print("Anyone on this network can browse this workspace and act on GitHub as you.")
     if open_browser:
         webbrowser.open(url)
     try:
