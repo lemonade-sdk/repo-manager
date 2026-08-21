@@ -718,21 +718,41 @@ def pr_comment_preview(repo, item):
     ).strip()
 
 def coverage_verdict(info, author, requirement, maintainers):
-    """reviewer_coverage's answer, for callers that already hold the live state and table."""
+    """reviewer_coverage's answer, for callers that already hold the live state and table.
+
+    Counts everyone on the hook, not only everyone who has finished: a reviewer who has been
+    requested and has not answered yet is staffed on this PR, and naming more candidates will
+    not make them answer sooner. That makes this a wider net than the Status column's, which
+    asks whether the review has *happened* — a fully staffed PR can still read Waiting, and
+    those are not conflicting answers, they are answers to different questions.
+
+    Returns "pending" as well: the counted people who have not reviewed yet, so the sentence
+    that replaces the slate can say the rung is staffed without claiming it is satisfied.
+    """
     if info.get("state") != "OPEN":
-        return {"adequate": False, "who": []}
+        return {"adequate": False, "who": [], "pending": []}
     author_login = str(author or "").lstrip("@").lower()
-    participants = coverage_participants(
+    reviewing = coverage_participants(
         latest_reviews(info), info.get("comments"), author_login, maintainers
     )
-    who = sorted(participants)
+    requested = {
+        str(handle).lstrip("@").lower()
+        for handle in info.get("requested") or []
+        if handle and not is_ai_reviewer(handle) and str(handle).lstrip("@").lower() != author_login
+    }
+    who = sorted(set(reviewing) | requested)
+    pending = sorted(requested - set(reviewing))
     if info.get("review_decision") == "APPROVED":
-        return {"adequate": True, "who": who}
-    if not participants or not (requirement or {}).get("rung"):
-        return {"adequate": False, "who": who}
-    coverage = review_coverage(list(participants), requirement, maintainers)
+        return {"adequate": True, "who": who, "pending": pending}
+    if not who or not (requirement or {}).get("rung"):
+        return {"adequate": False, "who": who, "pending": pending}
+    coverage = review_coverage(who, requirement, maintainers)
     # coverage_status names what is still missing, and returns None once nothing is.
-    return {"adequate": coverage_status(coverage, ", ".join(who)) is None, "who": who}
+    return {
+        "adequate": coverage_status(coverage, ", ".join(who)) is None,
+        "who": who,
+        "pending": pending,
+    }
 
 def reconcile_pr_read_states(workspace, rows, viewer):
     """Fill in each PR row's check-off, clearing any whose Status moved since it was checked.
@@ -810,7 +830,7 @@ def pr_reviews(workspace, pr_viewer=""):
             item["description_check"] = data.get("description_check", {})
             item["attention_reasons"] = data.get("attention_reasons", [])
             item["attention_meaning"] = attention_meaning(data)
-            item["coverage"] = {"adequate": False, "who": []}
+            item["coverage"] = {"adequate": False, "who": [], "pending": []}
             item["comment_markdown"] = ""
             item["attention_todos"] = attention_todo_reasons(data)
             item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")

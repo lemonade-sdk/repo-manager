@@ -2054,6 +2054,14 @@ def ready_line(coverage):
     who = ", ".join(display_handle(login) for login in coverage.get("who") or [])
     # Handles are rendered bare, like the slate's, so naming who has it does not ping them.
     covered = f" ({who})" if who else ""
+    # Someone requested but not yet answering staffs the rung without satisfying it, and the
+    # sentence has to say which — "already has the review" would be a claim about work nobody
+    # has done yet, on a PR whose Status column is still reporting Waiting.
+    if coverage.get("pending"):
+        return (
+            "**Ready for review** — the checks below passed. No reviewers are suggested: the "
+            f"reviewers contribute.md's rung asks for are already on this PR{covered}."
+        )
     return (
         "**Ready for review** — the checks below passed. No reviewers are suggested: this PR "
         f"already has the review contribute.md's rung asks for{covered}."
