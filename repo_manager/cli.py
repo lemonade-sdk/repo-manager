@@ -2094,7 +2094,7 @@ def pr_tier_ran(tier_reached, tier):
 def pr_not_evaluated(gate):
     """What a section says when its tier never ran.
 
-    "None found" would be a lie about a check nobody performed, so a gated section names the
+    "none found" would be a lie about a check nobody performed, so a gated section names the
     gate instead. This is the whole reason the comment cannot simply omit the section. The
     verdict itself lives on the summary line, so this is only the explanation under it.
     """
@@ -2220,7 +2220,7 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
         lines += pr_section("Alignment issues", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
     else:
         lines += pr_section(
-            "Alignment issues", "None found" if not flags else f"{len(flags)} to resolve",
+            "Alignment issues", "none found" if not flags else f"{len(flags)} to resolve",
             pr_checked_line(evidence, "alignment") if not flags else pr_todo_lines([{
                 "action": flag.get("action"),
                 "fallback": flag.get("concern"),
@@ -2270,7 +2270,7 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
             body = pr_checked_line(evidence, "breaking_changes")
         lines += pr_section(
             "Breaking changes",
-            "None found" if not breaking else f"{len(unresolved)} to resolve" if unresolved else "all cleared",
+            "none found" if not breaking else f"{len(unresolved)} to resolve" if unresolved else "all cleared",
             body, expanded=bool(unresolved),
         )
 
