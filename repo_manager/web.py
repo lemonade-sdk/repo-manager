@@ -656,14 +656,13 @@ def coverage_note(coverage, participants):
     return f"Reviewer coverage for the {coverage['rung']} rung: {who} — {'; '.join(parts)}."
 
 def coverage_status(coverage, names):
-    if coverage.get("signoff_needed") and not coverage.get("signed_off"):
-        count = coverage["signoff_needed"]
-        return (
-            "Needs maintainer approval",
-            f"This PR makes {count} breaking change{'s' if count != 1 else ''} that no "
-            "maintainer listed in contribute.md has approved. Commenting on a PR is not "
-            "approving its breaking change.",
-        )
+    # The unapproved breaking change deliberately does *not* appear here. This column says
+    # whose turn it is — Needs triage, Waiting, Requests, Handled — and a merge requirement
+    # is not a turn. Announcing it here fired on #2307, where nobody had reviewed at all,
+    # and on #3277, where a maintainer had already requested changes; in both it buried the
+    # only thing the column is for. The requirement lives in the Attention level and the
+    # comment, and it is enforced below where it actually bites: a PR is not Approved while
+    # its break is unsigned.
     """(label, detail) for a PR that already has reviewers, or None to fall through."""
     rung = coverage["rung"]
     if not rung:
@@ -701,100 +700,133 @@ def latest_reviews(info):
     return latest
 
 def derive_review_status(info, author, viewer_override="", requirement=None, maintainers=None):
-    """Map live review activity to a (short label, tooltip detail) pair.
+    """Does this PR need something from me? Four answers, from my perspective.
 
-    The perspective is the gh-authenticated viewer unless viewer_override names another
-    GitHub login: "Waiting for me" means the ball is in that person's court. Returns
-    ('', '') when the PR is not open or live data is missing.
+    The column used to speak eleven statuses describing review *activity* — Handled,
+    Waiting, In discussion, Needs 1 more, Needs subject expert, Approved (1/2) — and a
+    maintainer scanning it still had to work out, per row, whether any of that meant they
+    should act. Worse, the activity words did not line up with action: "Handled" covered
+    PRs nobody had reviewed, and "In discussion" covered eighteen with no reviewer assigned
+    at all, which are exactly the ones that need attention.
+
+    So the axis is whether anyone is on the hook for the next move, and there are only four
+    outcomes: **Merge** (it is done, I merge it), **Review** (my turn), **Needs reviewer**
+    (nobody can satisfy this PR's requirement as staffed), and **In progress** (someone
+    else is on the hook — another reviewer, or the author). The tooltip keeps the detail
+    the labels used to carry.
+
+    Returns ('', '') when the PR is not open or live data is missing.
     """
     if not info or info.get("state") != "OPEN":
         return "", ""
     viewer = str(viewer_override or info.get("viewer") or "").lstrip("@").lower()
     author_login = str(author or "").lstrip("@").lower()
+    table = maintainers or {}
     latest = latest_reviews(info)
+
+    def counts(login):
+        return login != author_login and not is_ai_reviewer(login)
+
+    reviewed = {
+        login for login, review in latest.items()
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED") and counts(login)
+    }
+    approvals = sorted(
+        login for login, review in latest.items()
+        if review.get("state") == "APPROVED" and counts(login)
+    )
+    requested = {
+        str(handle).lstrip("@").lower() for handle in info.get("requested") or []
+        if handle and counts(str(handle).lstrip("@").lower())
+    }
+    named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
+
+    # --- 1. My turn. Only new code hands a change request back to me; talking is not
+    # changing, and a reply may well be aimed at another reviewer entirely.
     mine = latest.get(viewer)
     if mine and mine.get("state") == "CHANGES_REQUESTED":
         my_time = mine.get("at") or ""
-        # Only new code flips this back to me. "Changes requested" asks for changes, and
-        # talking is not changing: on #3182 the author answered a *different* reviewer in a
-        # side thread two hours after the request, and that read as "the author replied to
-        # my change request — my turn", on a PR where nothing had been addressed and no
-        # commit had been pushed since before the request. Counting any author activity
-        # cannot tell a fix from a chat with someone else, so it should not try; a push is
-        # unambiguous, and the discussion is reported without claiming the ball moved.
         pushed_at = info.get("last_commit_at") or ""
+        if pushed_at and pushed_at > my_time:
+            return "Review", (
+                f"I requested changes and the author pushed new commits on "
+                f"{pushed_at.replace('T', ' ')[:16]} UTC — my turn to re-review."
+            )
         replies = [
             comment for comment in info.get("comments", [])
             if (comment.get("login") or "").lower() == author_login
             and (comment.get("at") or "") > my_time
         ]
-        if pushed_at and pushed_at > my_time:
-            when = pushed_at.replace("T", " ")[:16]
-            return "Waiting for me", (
-                f"The author pushed new commits on {when} UTC after my change request — "
-                "my turn to re-review."
-            )
+        detail = "I requested changes — waiting for the author."
         if replies:
-            count = len(replies)
-            newest = max((comment.get("at") or "") for comment in replies).replace("T", " ")[:16]
-            return "Requests", (
-                f"I requested changes and nothing has been pushed since. The author has posted "
-                f"{count} {'reply' if count == 1 else 'replies'} in discussion (latest {newest} "
-                "UTC), which may be aimed at another reviewer — worth reading, but the code has "
-                "not changed."
+            detail += (
+                f" They have posted {len(replies)} "
+                f"{'reply' if len(replies) == 1 else 'replies'} in discussion without "
+                "pushing anything, which may be aimed at another reviewer."
             )
-        return "Requests", "I requested changes — waiting for the author to respond."
-    participants = coverage_participants(latest, info.get("comments"), author_login, maintainers or {})
-    approved_by = [
-        login for login, review in latest.items()
-        if review.get("state") == "APPROVED" and login != author_login and not is_ai_reviewer(login)
-    ]
-    coverage = review_coverage(list(participants), requirement, maintainers or {}, approved_by)
-    # GitHub calls a PR approved as soon as one approval lands, which says nothing about the
-    # rung contribute.md puts it on. #3293 needs two reviewers and had one, and a green
-    # "Approved" told a maintainer the PR was done being reviewed. Approval is only the end
-    # of the story once the rung is actually satisfied; short of that it is progress, and it
-    # says how far along it is.
-    if info.get("review_decision") == "APPROVED":
-        # Counted on approvals, not on participants. Coverage deliberately casts a wider net
-        # — a maintainer who comments is in the loop — and that is the right question for
-        # "is anyone looking at this". It is the wrong one here: commenting is not signing
-        # off, and #3293 had three people in the conversation and one approval against a
-        # rung that asks for two.
-        approvals = sorted(
-            login for login, review in latest.items()
-            if review.get("state") == "APPROVED"
-            and login != author_login and not is_ai_reviewer(login)
+        return "In progress", detail
+    if viewer and viewer in requested and viewer not in reviewed:
+        return "Review", "I am a requested reviewer and have not reviewed yet."
+    if named and named == viewer and viewer not in reviewed:
+        return "Review", "contribute.md names me as the approver for this PR's rung."
+
+    # --- 2. Blocked on the author: somebody's change request is outstanding.
+    blocking = sorted(
+        login for login in reviewed
+        if (latest.get(login) or {}).get("state") == "CHANGES_REQUESTED"
+    )
+    if blocking:
+        return "In progress", (
+            f"{', '.join(blocking)} requested changes — waiting for the author to respond."
         )
-        needed = coverage.get("needed") or 1
-        if len(approvals) >= needed:
-            return "Approved", "Approved but not merged yet."
-        return (
-            f"Approved ({len(approvals)}/{needed})",
-            f"Approved by {', '.join(approvals) or 'nobody yet'}, but this rung asks for "
-            f"{needed} approvals — not merged yet, and not finished being reviewed.",
+
+    # --- 3. Done: enough approvals, and a maintainer among them when a break needs clearing.
+    coverage = review_coverage(sorted(reviewed), requirement, table, approvals)
+    signoff_needed = coverage.get("signoff_needed") or 0
+    approving_maintainers = [login for login in approvals if login in table]
+    needed = coverage.get("needed") or 1
+    if approvals and len(approvals) >= needed and (not signoff_needed or approving_maintainers):
+        return "Merge", f"Approved by {', '.join(approvals)} and not merged yet."
+
+    # --- 4. Is anyone on the hook to close the gap? Counted over the people who have
+    # reviewed *plus* the ones who have been asked to, because a requested reviewer is a
+    # commitment — the PR resolves itself without me. If even that would not satisfy the
+    # requirement, no amount of waiting fixes it and somebody has to staff it.
+    prospective = sorted(reviewed | requested)
+    shortfall = coverage_status(review_coverage(prospective, requirement, table, approvals),
+                                ", ".join(prospective))
+    if shortfall is None:
+        if approvals:
+            missing = needed - len(approvals)
+            return "In progress", (
+                f"Approved by {', '.join(approvals)}; {missing} more approval"
+                f"{'s' if missing != 1 else ''} still to come from the reviewers on it."
+            )
+        who = ", ".join(prospective)
+        return "In progress", (
+            f"{who} {'is' if len(prospective) == 1 else 'are'} on this PR and between them "
+            "cover what it needs."
         )
-    if participants:
-        verdict = coverage_status(coverage, ", ".join(sorted(participants)))
-        if verdict:
-            return verdict
-    others = sorted(login for login in participants if login != viewer)
-    if others:
-        note = coverage_note(coverage, participants)
-        suffix = f" {note}" if note else ""
-        blocking = sorted(
-            login for login in others if (latest.get(login) or {}).get("state") == "CHANGES_REQUESTED"
-        )
-        if blocking:
-            return "Waiting", f"{', '.join(blocking)} requested changes — waiting for the author.{suffix}"
-        return "Handled", f"Being handled by another reviewer: {', '.join(others)}.{suffix}"
-    requested = [handle for handle in info.get("requested", []) if not is_ai_reviewer(handle)]
-    if any(handle.lower() == viewer for handle in requested):
-        return "Waiting for me", "I am assigned as a reviewer and have not reviewed yet."
-    requested_others = [handle for handle in requested if handle.lower() != viewer]
-    if requested_others:
-        return "Waiting", f"Reviewer assigned but no review yet: {', '.join(sorted(requested_others))}."
-    return "Needs triage", "No reviewer assigned and no reviews yet — needs triage by me."
+    # coverage_status decides *whether* there is a gap; its sentence was written for the old
+    # per-shortfall labels and reads badly reused ("In review by  — this rung needs 1
+    # reviewers"), so the tooltip is composed here from the coverage itself.
+    gap = review_coverage(prospective, requirement, table, approvals)
+    missing = []
+    if gap["rung"] == "named-approver" and not gap["named_reviewed"]:
+        missing.append(f"contribute.md names @{gap['named']} for this rung and they have not weighed in")
+    if gap["expert_areas"] and not gap["experts"]:
+        missing.append(f"nobody on it covers {', '.join(gap['expert_areas'])}")
+    if gap["count"] < gap["needed"]:
+        short = gap["needed"] - gap["count"]
+        missing.append(f"{short} more reviewer{'s' if short != 1 else ''}")
+    if gap.get("signoff_needed") and not gap.get("signed_off"):
+        missing.append("a listed maintainer to approve the breaking change")
+    engaged = ", ".join(prospective) or "nobody"
+    return "Needs reviewer", (
+        f"On this PR: {engaged}. Still needed: {'; '.join(missing) or 'a reviewer'}. "
+        "Waiting will not resolve this — somebody has to be assigned."
+    )
+
 
 def reviewer_coverage(workspace, repo, pr_number, author, requirement):
     """Whether this PR already has the review its rung asks for, and who is providing it.
@@ -1652,17 +1684,17 @@ INDEX_HTML = r"""<!doctype html>
     }
     /* Status colors answer "do I need to act?":
        green = no, gray = someone else is handling it, yellow = yes, red = urgent. */
-    .badge.approved, .badge.requests {
+    .badge.merge, .badge.approved, .badge.requests {
       color: var(--ok);
       background: #e9f7ef;
       border-color: #bfe7d0;
     }
-    .badge.handled, .badge.waiting {
+    .badge.in-progress, .badge.handled, .badge.waiting, .badge.in-discussion {
       color: #5c6470;
       background: #f0f1f3;
       border-color: #d8dbe0;
     }
-    .badge.needs-triage, .badge.waiting-for-me {
+    .badge.review, .badge.needs-reviewer, .badge.needs-triage, .badge.waiting-for-me {
       color: var(--warn);
       background: #fff5df;
       border-color: #f4d79a;
