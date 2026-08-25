@@ -105,6 +105,8 @@ An `action` is one imperative sentence naming **what to do and where**. "Documen
 
 The author is reading a checklist. Every clause past the instruction is a clause they have to parse before they can start, and the reasoning is already carried by `what`, `where` and `policy` beneath it — repeating it in the action says the same thing twice in adjacent lines.
 
+Aim under about a hundred characters. That is not a budget to game — it is what an action costs when it names the edit and nothing else. "Update docs/guide/cli.md to document that `lemonade backends` hides recipes whose built-in models are all filtered by the system-memory heuristic, and that `--all` shows them" is 175 characters, and "Document the new `lemonade backends` default and `--all` in docs/guide/cli.md" is 76 with nothing missing: the author knows what their own filter does, and the `what` line beneath spells it out for anyone who does not.
+
 Two habits do most of the damage. **One action, one edit**: an action joined by "and" is usually two to-dos, and if the two really are one commit, name the pair without explaining both. And **do not re-describe the feature**: the author wrote it. "Document the new default in docs/guide/cli.md" tells them everything "explain that `lemonade backends` now hides recipes whose every built-in model was filtered by the system-memory heuristic" does, in a tenth of the words.
 
 ## Cite only what you opened
