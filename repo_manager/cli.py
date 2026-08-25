@@ -2624,6 +2624,8 @@ def pr_reviewer_lines(data, pr_number, coverage):
     if (coverage or {}).get("adequate") and who:
         # Naming a slate for a PR that already has its reviewers is noise, and on a PR
         # whose reviewers are already requested it is noise that names those same people.
+        # "Already reviewed by" is a claim about work someone did, so it is only ever said
+        # of people who actually reviewed; anyone merely requested is on the PR, not done.
         verb = "Already on this PR" if (coverage or {}).get("pending") else "Already reviewed by"
         return [f"{verb}: {who}."]
     reviewers = data.get("suggested_reviewers") or []

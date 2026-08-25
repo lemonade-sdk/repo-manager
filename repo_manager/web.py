@@ -861,9 +861,16 @@ def coverage_verdict(info, author, requirement, maintainers):
     if info.get("state") != "OPEN":
         return {"adequate": False, "who": [], "pending": []}
     author_login = str(author or "").lstrip("@").lower()
-    reviewing = coverage_participants(
-        latest_reviews(info), info.get("comments"), author_login, maintainers
-    )
+    # Reviews, not comments. This was the last place still counting a maintainer's comment
+    # as coverage, which on #3330 dropped the reviewer slate and told the author "Already
+    # reviewed by: jeremyfowers" when he had only commented — while the Status column beside
+    # it correctly said the PR still needed a reviewer.
+    latest = latest_reviews(info)
+    reviewing = {
+        login for login, review in latest.items()
+        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED")
+        and login != author_login and not is_ai_reviewer(login)
+    }
     requested = {
         str(handle).lstrip("@").lower()
         for handle in info.get("requested") or []
@@ -872,7 +879,7 @@ def coverage_verdict(info, author, requirement, maintainers):
     who = sorted(set(reviewing) | requested)
     pending = sorted(requested - set(reviewing))
     approved_by = [
-        login for login, review in latest_reviews(info).items()
+        login for login, review in latest.items()
         if review.get("state") == "APPROVED" and login != author_login and not is_ai_reviewer(login)
     ]
     if not who or not (requirement or {}).get("rung"):
