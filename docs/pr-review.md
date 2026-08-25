@@ -145,11 +145,13 @@ The **Status** column answers one question — **does this PR need something fro
 | `Merge` | merge it | Enough qualifying approvals for the requirement, and a listed maintainer among them when a breaking change needs clearing. |
 | `Review` | review it | You are a requested reviewer who has not reviewed, the guide names you for this rung, or you requested changes and the author has since **pushed**. |
 | `Needs reviewer` | staff it | Even counting everyone already requested, the PR cannot meet its requirement — too few reviewers, no subject expert among them, the named approver absent, or a break with no maintainer to clear it. Waiting does not fix this. |
-| `In progress` | nothing | Somebody else is on the hook: another reviewer's change request is with the author, or the reviewers on it cover what it needs. |
+| `In progress` | nothing | The PR is in the merge queue or has auto-merge enabled, or somebody else is on the hook: another reviewer's change request is with the author, or the reviewers on it cover what it needs. |
 
 It used to speak eleven statuses describing review *activity* — `Handled`, `Waiting`, `In discussion`, `Needs 1 more`, `Needs subject expert`, `Approved (1/2)` — and a maintainer scanning the list still had to work out, row by row, whether any of it meant they should act. The words also failed to line up with action: `Handled` covered PRs nobody had reviewed, and `In discussion` covered eighteen with no reviewer assigned at all, which are precisely the ones needing attention. The axis is now whether anyone is on the hook for the next move, and the detail those eleven labels carried has moved into the tooltip.
 
 The distinction that does the work in `Needs reviewer` is counting **requested** reviewers as well as actual ones. A requested reviewer is a commitment: the PR resolves without you. If even the people already asked could not satisfy the requirement, no amount of waiting closes the gap and somebody has to be assigned.
+
+A PR already in the merge queue, or with auto-merge enabled, is checked before anything else: it needs nothing from anyone whatever its review state says, and #3327 sat in the queue reading `Merge`, asking the one person who had already done their part to do it again.
 
 Colors answer "do I need to act?": green means merge, yellow means you, grey means somebody else.
 

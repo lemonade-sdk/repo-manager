@@ -478,6 +478,7 @@ def live_pr_states(repo, numbers):
     fields = " ".join(
         f"pr{number}: pullRequest(number: {number}) {{ state baseRefName reviewDecision "
         "commits(last: 1) { nodes { commit { committedDate } } } "
+        "isInMergeQueue autoMergeRequest { enabledBy { login } } "
         "reviews(last: 50) { nodes { author { login } state submittedAt } } "
         "comments(last: 50) { nodes { author { login } createdAt } } "
         "reviewThreads(last: 30) { nodes { comments(last: 15) { nodes { author { login } createdAt } } } } "
@@ -510,6 +511,7 @@ def live_pr_states(repo, numbers):
             continue
         commits = ((entry.get("commits") or {}).get("nodes")) or []
         last_commit_at = ((commits[0].get("commit") or {}).get("committedDate", "")) if commits else ""
+        auto_merge = entry.get("autoMergeRequest") or {}
         reviews = [
             {"login": login_of(node), "state": node.get("state", ""), "at": node.get("submittedAt", "")}
             for node in ((entry.get("reviews") or {}).get("nodes")) or []
@@ -539,6 +541,8 @@ def live_pr_states(repo, numbers):
             "base": entry.get("baseRefName", ""),
             "review_decision": entry.get("reviewDecision") or "",
             "last_commit_at": last_commit_at,
+            "in_merge_queue": bool(entry.get("isInMergeQueue")),
+            "auto_merge_by": ((auto_merge.get("enabledBy") or {}).get("login") or "") if auto_merge else "",
             "reviews": reviews,
             "comments": comments,
             "requested": requested,
@@ -723,6 +727,14 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     author_login = str(author or "").lstrip("@").lower()
     table = maintainers or {}
     latest = latest_reviews(info)
+
+    # Checked before anything else: a PR on its way out needs nothing from anyone, whatever
+    # its review state says. #3327 sat in the merge queue reading "Merge", which asks the
+    # one person who has already done their part to do it again.
+    if info.get("in_merge_queue"):
+        return "In progress", "In the merge queue."
+    if info.get("auto_merge_by"):
+        return "In progress", f"Auto-merge enabled by {info['auto_merge_by']}; merges when checks pass."
 
     def counts(login):
         return login != author_login and not is_ai_reviewer(login)
