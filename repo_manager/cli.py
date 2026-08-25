@@ -1102,6 +1102,7 @@ def normalize_pr_review_data(data):
                     "concern": text_of(entry, "concern", "text", "issue", "description"),
                     "action": text_of(entry, "action", "todo", "fix"),
                     "evidence": text_of(entry, "evidence"),
+                    "advisory": coerce_bool(entry.get("advisory")) is True,
                 }
             )
         elif str(entry).strip():
@@ -2111,10 +2112,8 @@ def generate_pr_review(workspace, repo, meta):
     # was a trade nobody made while the tiers were gated, since tier 3 only ran on a PR that
     # was already clean; now it runs on every one. A tier that will not validate is recorded
     # as not having answered, never as having found nobody.
-    promote_requirement_for_breaks(data)
-    flag_unsatisfiable_expert_areas(
-        data, load_maintainer_context(workspace, repo, base_ref).get("table", {}), pr_author_handle(meta)
-    )
+    maintainer_table = load_maintainer_context(workspace, repo, base_ref).get("table", {})
+    pr_review_facts(data, maintainer_table, pr_author_handle(meta))
     tier_started = time.monotonic()
     authors_brief = code_authors_brief(workspace, repo, number, base_ref)
     try:
@@ -2134,7 +2133,7 @@ def generate_pr_review(workspace, repo, meta):
         data["maintainer_needed_areas"] = reviewers["maintainer_needed_areas"]
         data["evidence"].update(reviewers.get("evidence", {}))
 
-    data = normalize_pr_review_data(data)
+    data = pr_review_facts(data, maintainer_table, pr_author_handle(meta))
     data["repo"] = repo
     data["pr_number"] = number
     data["head_sha"] = meta.get("headRefOid", "")
@@ -2164,15 +2163,37 @@ def generate_pr_review(workspace, repo, meta):
     return data
 
 
-def pr_review_data_from_row(row):
+def pr_review_data_from_row(row, maintainer_table=None):
     if row.get("json_path") and Path(row["json_path"]).exists():
         parsed = extract_json_object(Path(row["json_path"]).read_text(encoding="utf-8"))
         if parsed is not None:
-            return normalize_pr_review_data(parsed)
+            return pr_review_facts(parsed, maintainer_table, parsed.get("author"))
     parsed = extract_json_object(row.get("raw_output") or "")
     if parsed is not None:
-        return normalize_pr_review_data(parsed)
+        return pr_review_facts(parsed, maintainer_table, parsed.get("author"))
     return None
+
+
+def pr_review_facts(data, maintainer_table=None, author=""):
+    """The one derivation of what a PR needs. Every consumer reads its output.
+
+    There were three. The CLI derived the requirement at generation time and wrote the
+    answers into DB columns; the dashboard's list columns read those columns; the dashboard's
+    Status column re-derived coverage from the *raw* artifact, which never carried the
+    promotions; and the comment preview normalized properly. One PR, four readings — #2864
+    showed Attention "High" beside Scope "one-reviewer" beside Status "1 required" beside a
+    comment asking for 2. Each was fixed where it was reported, which is what kept producing
+    the next contradiction.
+
+    `review_requirement` is the root fact: the rung is a surface lookup, then a break nobody
+    signed off and an expert area only the author owns adjust what the PR actually needs.
+    Attention level, the reviewer count, the Scope column and the Status column are all
+    summaries of it, so they cannot disagree unless someone derives one of them twice.
+    """
+    if not isinstance(data, dict):
+        return {}
+    flag_unsatisfiable_expert_areas(data, maintainer_table or {}, author or data.get("author") or "")
+    return normalize_pr_review_data(data)
 
 
 def flag_unsatisfiable_expert_areas(data, maintainer_table, author):
@@ -2345,10 +2366,11 @@ def pr_todo_items(data):
     """
     items = []
 
-    def add(section, action, fallback, subs=()):
+    def add(section, action, fallback, subs=(), advisory=False):
         items.append({
             "section": section,
             "action": action or fallback,
+            "advisory": advisory,
             "subs": [(label, value) for label, value in subs if value],
         })
 
@@ -2370,7 +2392,8 @@ def pr_todo_items(data):
         source = " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
         add("alignment", flag.get("action"), flag.get("concern"),
             (("Why", f"{source}: {flag.get('concern') or ''}" if source else flag.get("concern")),
-             ("Reference", flag.get("evidence"))))
+             ("Reference", flag.get("evidence"))),
+            advisory=bool(flag.get("advisory")))
 
     for section in ("documentation", "testing"):
         for gap in (data.get(section) or {}).get("gaps") or []:
@@ -2641,13 +2664,24 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
         sort_keys=True,
     )
     todos = pr_todo_items(data)
+    # "Not ready for review yet" is a gate, so only work the author actually owes may set it.
+    # An advisory item asks for something optional — a link to a discussion, if one exists —
+    # and #2864 held a PR at "not ready" on the strength of one, which is a hard verdict
+    # resting on a soft request. Suggestions still appear; they just do not block.
+    required = [item for item in todos if not item.get("advisory")]
+    advisory = [item for item in todos if item.get("advisory")]
     lines = [f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->"]
 
-    if todos:
+    if required:
         lines += ["**Not ready for review yet**", "", "**To-dos**", ""]
-        lines += [f"- [ ] {item['action']}" for item in todos]
+        lines += [f"- [ ] {item['action']}" for item in required]
+    elif advisory:
+        lines += ["**Ready for review** — the suggestions below are optional."]
     else:
         lines += ["**Ready for review**", "", "No to-dos."]
+    if advisory:
+        lines += ["", "**Suggestions**", ""]
+        lines += [f"- [ ] {item['action']}" for item in advisory]
 
     lines += pr_explanation_fold("Explanation", [
         (f"**{title}: {verdict}**", body)

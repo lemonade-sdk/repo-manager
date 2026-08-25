@@ -29,7 +29,8 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
       "section": "AI Contribution Policy",
       "concern": "What the PR does that the doc says not to do.",
       "action": "The imperative step that resolves it.",
-      "evidence": "The file, line, or quoted PR text that shows it."
+      "evidence": "The file, line, or quoted PR text that shows it.",
+      "advisory": "true when what you are asking for is optional or unverifiable, false when the PR owes it."
     }
   ],
   "documentation": {
@@ -120,6 +121,8 @@ Typical genuine flags: a feature with no evidence of the pre-agreement contribut
 Every flag's evidence must be something observable in the PR. The absence of a **required artifact** is observable and flaggable: an architectural or major-scope change with no linked issue — the Merging a Contribution step covers both — or a feature with no assigned reviewer from the pre-agreement. Cite what is missing and the clause that requires it.
 
 contribute.md asks for pre-agreement evidence in more than one place — Merging a Contribution asks a feature author to get a maintainer to agree, and Adding a Backend asks for a dev-channel post first. When several clauses want the same missing artifact, that is **one** flag, not one per clause: the author has a single thing to do, and splitting it across two to-dos makes the list look longer than the work is. Cite the clause that most specifically covers this PR and move on.
+
+**Mark it `advisory: true`.** A flag whose action is conditional is a suggestion, and the caller uses this to decide whether the PR reads "Not ready for review yet" — a hard verdict that should rest on work the author genuinely owes, never on a link that may not exist. The pre-agreement flag is the standing example: worth raising, never worth gating on. A missing required artifact you can actually point to — an absent doc, an untested surface — is `advisory: false`, because the PR really does owe it.
 
 Phrase the action as the **link you want to see**, and ask for it conditionally. "Link the issue or Discord thread where this was discussed, if available" is right. "Link the issue or Discord thread where a maintainer agreed to the design" is not: on a PR that is already open and already being reviewed, it asserts the agreement never happened — which you cannot see either way — and it tells a contributor who did the right thing that they did not. "Post in the dev channel on Discord" is worse for the same reason. The pre-agreement is context worth having, never the thing standing between this PR and a merge; what actually gates a risky change is the reviewer requirement, and the caller sets that from the rung and from any breaking change needing sign-off.
 

@@ -570,7 +570,7 @@ def coverage_participants(latest, comments, author_login, maintainers):
             participants.setdefault(login, "comment")
     return participants
 
-def review_coverage(reviewer_logins, requirement, maintainers):
+def review_coverage(reviewer_logins, requirement, maintainers, approvals=()):
     """Does the review this PR has actually satisfy the rung contribute.md puts it on?
 
     Answers the two questions "needs a core maintainer" never did: whether someone reviewing
@@ -598,11 +598,25 @@ def review_coverage(reviewer_logins, requirement, maintainers):
         covered = covers_any_area(maintainers.get(login), expert_areas)
         if covered:
             experts[login] = covered
-    needed = PR_RUNG_REVIEWERS.get(rung, 1)
+    # The requirement carries the count, because it can sit above the rung's own: an
+    # unapproved breaking change needs a maintainer who can clear it, on top of whatever the
+    # surface asks for. Reading the rung table directly is how the Status column came to say
+    # "1 required" on #2864 while the comment above it asked for 2.
+    needed = int((requirement or {}).get("reviewers_needed") or 0) or PR_RUNG_REVIEWERS.get(rung, 1)
+    # A break is cleared by a maintainer signing off, which commenting is not. Tracked
+    # separately from the count so a PR with two people talking on it does not read as
+    # "Handled" while the break it introduces is still waiting for someone to own.
+    signoff_needed = int((requirement or {}).get("breaking_signoff") or 0)
+    signed_off = sorted(
+        login for login in {str(login).lstrip("@").lower() for login in approvals}
+        if login in maintainers
+    )
     return {
         "rung": rung,
         "count": len(reviewers),
         "needed": needed,
+        "signoff_needed": signoff_needed,
+        "signed_off": signed_off,
         "experts": experts,
         "expert_areas": expert_areas,
         "named": named,
@@ -627,6 +641,11 @@ def coverage_note(coverage, participants):
     who = ", ".join(sorted(participants))
     plural = "" if coverage["count"] == 1 else "s"
     parts = [f"{coverage['count']} reviewer{plural}, {coverage['needed']} required"]
+    if coverage.get("signoff_needed"):
+        parts.append(
+            f"{', '.join(coverage['signed_off'])} signed off the breaking change"
+            if coverage.get("signed_off") else "the breaking change is not signed off"
+        )
     experts = expert_names(coverage)
     if experts:
         parts.append(f"expert slot covered by {experts}")
@@ -637,6 +656,13 @@ def coverage_note(coverage, participants):
     return f"Reviewer coverage for the {coverage['rung']} rung: {who} — {'; '.join(parts)}."
 
 def coverage_status(coverage, names):
+    if coverage.get("signoff_needed") and not coverage.get("signed_off"):
+        count = coverage["signoff_needed"]
+        return (
+            "Needs break sign-off",
+            f"{count} breaking change{'s' if count != 1 else ''} here still needs a listed "
+            "maintainer to approve it — comments do not clear a break.",
+        )
     """(label, detail) for a PR that already has reviewers, or None to fall through."""
     rung = coverage["rung"]
     if not rung:
@@ -718,7 +744,11 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
             )
         return "Requests", "I requested changes — waiting for the author to respond."
     participants = coverage_participants(latest, info.get("comments"), author_login, maintainers or {})
-    coverage = review_coverage(list(participants), requirement, maintainers or {})
+    approved_by = [
+        login for login, review in latest.items()
+        if review.get("state") == "APPROVED" and login != author_login and not is_ai_reviewer(login)
+    ]
+    coverage = review_coverage(list(participants), requirement, maintainers or {}, approved_by)
     # GitHub calls a PR approved as soon as one approval lands, which says nothing about the
     # rung contribute.md puts it on. #3293 needs two reviewers and had one, and a green
     # "Approved" told a maintainer the PR was done being reviewed. Approval is only the end
@@ -780,7 +810,7 @@ def reviewer_coverage(workspace, repo, pr_number, author, requirement):
     maintainers = load_maintainer_context(workspace, repo).get("table", {})
     return coverage_verdict(info, author, requirement, maintainers)
 
-def pr_comment_preview(repo, item):
+def pr_comment_preview(repo, item, maintainer_table=None):
     """The comment this PR's review would post, for the dashboard to show verbatim.
 
     The pane is a preview, not a second rendering: it is the same call the Post review
@@ -790,7 +820,7 @@ def pr_comment_preview(repo, item):
     # normalize_pr_review_data recomputes fields the raw artifact can disagree with — the
     # attention level among them — and a preview that skipped it showed a different level
     # from the one that would be posted.
-    data = pr_review_data_from_row(item) or item.get("details") or {}
+    data = pr_review_data_from_row(item, maintainer_table) or item.get("details") or {}
     body = render_pr_review_comment(
         repo, item["pr_number"], data, item.get("head_sha", ""), item.get("coverage")
     )
@@ -823,11 +853,16 @@ def coverage_verdict(info, author, requirement, maintainers):
     }
     who = sorted(set(reviewing) | requested)
     pending = sorted(requested - set(reviewing))
-    if info.get("review_decision") == "APPROVED":
-        return {"adequate": True, "who": who, "pending": pending}
+    approved_by = [
+        login for login, review in latest_reviews(info).items()
+        if review.get("state") == "APPROVED" and login != author_login and not is_ai_reviewer(login)
+    ]
     if not who or not (requirement or {}).get("rung"):
+        # A blanket "approved means covered" used to sit here too. GitHub calls a PR approved
+        # on the first approval, so it answered a question nobody asked — the rung's, and any
+        # break sign-off, are settled below against what the requirement actually says.
         return {"adequate": False, "who": who, "pending": pending}
-    coverage = review_coverage(who, requirement, maintainers)
+    coverage = review_coverage(who, requirement, maintainers, approved_by)
     # coverage_status names what is still missing, and returns None once nothing is.
     return {
         "adequate": coverage_status(coverage, ", ".join(who)) is None,
@@ -866,6 +901,9 @@ def reconcile_pr_read_states(workspace, rows, viewer):
 
 def pr_reviews(workspace, pr_viewer=""):
     rows = []
+    # Parsed once per repo: the derivation needs it to spot expert areas whose only listed
+    # maintainer is the PR's own author.
+    maintainer_tables = {}
     effective_viewer = str(pr_viewer or "").lstrip("@").strip()
     with connect(db_file(workspace)) as conn:
         comment_urls = {
@@ -885,8 +923,28 @@ def pr_reviews(workspace, pr_viewer=""):
             if key in seen:
                 continue
             seen.add(key)
-            data = review_data(item)
+            # One derivation, shared with the CLI. The list columns used to read the DB's
+            # frozen copies while the Status column re-derived coverage from the raw
+            # artifact, so Attention, Scope, Status and the comment could each answer
+            # differently about the same PR. Everything below now reads this object.
+            if item["repo"] not in maintainer_tables:
+                maintainer_tables[item["repo"]] = load_maintainer_context(
+                    workspace, item["repo"]
+                ).get("table", {})
+            data = cli_pr_review_facts(review_data(item), maintainer_tables[item["repo"]])
             item["details"] = data
+            requirement = data.get("review_requirement") or {}
+            item["attention_level"] = data.get("attention_level") or item.get("attention_level") or ""
+            item["review_rung"] = requirement.get("rung") or item.get("review_rung") or ""
+            item["reviewers_needed"] = requirement.get("reviewers_needed") or item.get("reviewers_needed") or 1
+            # The rung is a surface lookup and stays the compact, sortable form; but printed
+            # alone beside "High" it read as a contradiction on a PR needing two reviewers.
+            # The arrow says the requirement sits above the rung and by how much.
+            rung_base = PR_RUNG_REVIEWERS.get(item["review_rung"], 1)
+            item["scope_display"] = (
+                f"{item['review_rung']} → {item['reviewers_needed']}"
+                if item["reviewers_needed"] > rung_base else item["review_rung"]
+            )
             item["summary"] = data.get("summary", item.get("summary") or "")
             item["alignment_flags"] = data.get("alignment_flags", parse_json_text(item.get("alignment_flags"), []))
             item["breaking_changes"] = data.get("breaking_changes", parse_json_text(item.get("breaking_changes"), []))
@@ -934,7 +992,7 @@ def pr_reviews(workspace, pr_viewer=""):
                 item["coverage"] = coverage_verdict(
                     info, item.get("author"), item.get("review_requirement"), maintainers
                 )
-                item["comment_markdown"] = pr_comment_preview(repo, item)
+                item["comment_markdown"] = pr_comment_preview(repo, item, maintainers)
     viewer = effective_viewer or authenticated
     reconcile_pr_read_states(workspace, rows, viewer)
     return rows, viewer
@@ -2696,7 +2754,7 @@ INDEX_HTML = r"""<!doctype html>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
-          <td>${esc(row.review_rung || "")}</td>
+          <td title="${esc(row.review_rung ? `contribute.md rung: ${row.review_rung}; this PR needs ${row.reviewers_needed} reviewer(s)` : "")}">${esc(row.scope_display || row.review_rung || "")}</td>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>
@@ -2909,6 +2967,7 @@ from repo_manager.cli import (  # noqa: E402
     covers_any_area,
     load_maintainer_context,
     pr_review_data_from_row,
+    pr_review_facts as cli_pr_review_facts,
     render_pr_review_comment,
     PR_REVIEW_COMMENT_MARKER,
 )

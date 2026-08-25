@@ -114,6 +114,14 @@ REPO_MANAGER_REPLAY_SHA=abc1234 repo-manager review-pr 2603
 
 The stored artifact still records the PR's live head SHA, so replay reviews are for evaluation rather than posting. One limit to read replays with: only the diff is rewound. Files the PR does not touch — workflows, `CMakeLists.txt`, the docs tree — are still read at the base branch's current state, so a review of a long-merged PR may cite a line that landed after it.
 
+## One derivation
+
+`review_requirement` is the single source of truth for what a PR needs, and `pr_review_facts` is the only thing that derives it: the rung is a surface lookup, then an unapproved breaking change and an expert area whose only owner is the author adjust what the PR actually requires. The attention level, the reviewer count, the **Scope** column and the **Status** column are all summaries of that one object.
+
+They used to be three derivations. The CLI computed the requirement at generation time and wrote answers into database columns; the dashboard's list columns read those frozen copies; its Status column re-derived coverage from the *raw* artifact, which never carried the adjustments; and only the comment preview normalized properly. One PR could therefore show four answers — #2864 read Attention `High`, Scope `one-reviewer`, Status `Handled, 1 required`, and a comment asking for two reviewers. Each was fixed where it was reported, which is precisely what kept producing the next contradiction. The dashboard now runs every stored artifact through the same call the CLI does, and reads everything off the result.
+
+The Scope column still shows the rung, because it is the compact sortable form and it ties to contribute.md's own vocabulary — but when the requirement sits above it the cell says so: `one-reviewer → 2`.
+
 ## PR Reviews in the web UI
 
 The **PR Reviews** tab of the [web UI](web-ui.md) lists stored open-PR reviews with their status, attention level, and scope, and its detail pane includes the act half of the PR flow: **Post review comment** and **Request reviewers** buttons that run the same logic as `post-pr-review` and `request-pr-reviewers`. These buttons only work in the local UI (they use your `gh` credentials); the published static dashboard excludes PR reviews entirely.
