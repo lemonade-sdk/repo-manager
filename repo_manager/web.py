@@ -1821,6 +1821,17 @@ INDEX_HTML = r"""<!doctype html>
        inside a fold. A fold is subordinate to the section it explains, so it carries no rule
        of its own — a border-top there read as a divider between top-level parts and made
        "Explanation" outrank the "Review suggestion" it belongs to. */
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+    th.sortable:hover {
+      color: #1f2a37;
+    }
+    th.sorted {
+      color: #1f2a37;
+      font-weight: 700;
+    }
     .md-verdict {
       margin-bottom: 14px;
     }
@@ -2100,13 +2111,12 @@ INDEX_HTML = r"""<!doctype html>
                 <thead>
                   <tr>
                     <th style="width: 34px;" title="Read: checked when you have read or acted on the review"></th>
-                    <th style="width: 48px;">#</th>
-                    <th style="width: 72px;">PR</th>
-                    <th style="width: 118px;">Status</th>
-                    <th style="width: 110px;">Attention</th>
-                    <th style="width: 70px;">Scope</th>
-                    <th>Description</th>
-                    <th style="width: 130px;">Author</th>
+                    <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
+                    <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
+                    <th style="width: 110px;" class="sortable" data-sort="attention" title="Sort by attention level">Attention</th>
+                    <th style="width: 84px;" class="sortable" data-sort="scope" title="Sort by review scope">Scope</th>
+                    <th class="sortable" data-sort="description">Description</th>
+                    <th style="width: 130px;" class="sortable" data-sort="author">Author</th>
                   </tr>
                 </thead>
                 <tbody id="pr-rows"></tbody>
@@ -2151,6 +2161,8 @@ INDEX_HTML = r"""<!doctype html>
       prActionMessage: null,
       hideClosedPrs: true,
       hideNonMainPrs: true,
+      prSort: "status",
+      prSortDesc: false,
       prViewer: ""
     };
     let suppressRouteUpdate = false;
@@ -2403,13 +2415,68 @@ INDEX_HTML = r"""<!doctype html>
       return true;
     }
 
+    // Ranked by how much the PR wants from *me*, which is the order the Status column is
+    // for: my own turn first, then the ones only I can staff, then everything already in
+    // somebody else's hands. Ascending is most-action-first, because that is what a
+    // maintainer opening the dashboard is looking for.
+    const STATUS_ACTION_RANK = {
+      "Review": 0,
+      "Merge": 1,
+      "Needs reviewer": 2,
+      "In progress": 3
+    };
+    const ATTENTION_RANK = { "High": 0, "Elevated": 1, "Routine": 2 };
+    const SCOPE_RANK = {
+      "named-approver": 0,
+      "two-with-maintainer": 1,
+      "two-with-expert": 2,
+      "one-reviewer": 3
+    };
+
+    function prSortValue(row, key) {
+      switch (key) {
+        case "pr": return Number(row.pr_number) || 0;
+        case "status": {
+          const rank = STATUS_ACTION_RANK[row.review_status];
+          // An unknown or absent status sorts with the quiet end rather than the top.
+          return rank === undefined ? 90 : rank;
+        }
+        case "attention": {
+          const rank = ATTENTION_RANK[row.attention_level];
+          return rank === undefined ? 90 : rank;
+        }
+        case "scope": {
+          const rank = SCOPE_RANK[row.scope_display || row.review_rung];
+          return rank === undefined ? 90 : rank;
+        }
+        case "author": return String(row.author || "").toLowerCase();
+        case "description": return String(row.pr_title || row.summary || "").toLowerCase();
+        default: return 0;
+      }
+    }
+
+    function sortPrs(rows) {
+      const key = state.prSort;
+      if (!key) return rows;
+      const dir = state.prSortDesc ? -1 : 1;
+      // Sorted on a copy: state.data.pr_reviews is the cached payload, and reordering it
+      // in place would make the next render depend on the previous one.
+      return rows.slice().sort((a, b) => {
+        const av = prSortValue(a, key), bv = prSortValue(b, key);
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        // Ties settle on PR number so the order never wobbles between refreshes.
+        return (Number(a.pr_number) || 0) - (Number(b.pr_number) || 0);
+      });
+    }
+
     function filteredPrs() {
       const rows = (state.data.pr_reviews || []).filter(prVisible);
       const query = state.filter.trim().toLowerCase();
-      if (!query) return rows;
-      return rows.filter((row) => [
+      if (!query) return sortPrs(rows);
+      return sortPrs(rows.filter((row) => [
         String(row.pr_number), row.pr_title, row.summary, row.author, row.attention_level, row.review_rung, row.review_status
-      ].join(" ").toLowerCase().includes(query));
+      ].join(" ").toLowerCase().includes(query)));
     }
 
     function filteredReleases() {
@@ -2775,6 +2842,35 @@ INDEX_HTML = r"""<!doctype html>
       return out.join("");
     }
 
+    // The arrow is drawn in the header text rather than by CSS, so it survives the innerHTML
+    // rewrite the table does on every render.
+    function markPrSortHeader() {
+      document.querySelectorAll('#view-prs th.sortable').forEach((th) => {
+        const active = th.dataset.sort === state.prSort;
+        th.classList.toggle("sorted", active);
+        const label = th.dataset.label || (th.dataset.label = th.textContent.trim());
+        th.textContent = active ? `${label} ${state.prSortDesc ? "\u25be" : "\u25b4"}` : label;
+      });
+    }
+
+    function attachPrSortHandlers() {
+      document.querySelectorAll('#view-prs th.sortable').forEach((th) => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.sort;
+          // Same column toggles direction; a new column starts in its natural order, which
+          // for status and attention means most-urgent-first.
+          if (state.prSort === key) {
+            state.prSortDesc = !state.prSortDesc;
+          } else {
+            state.prSort = key;
+            state.prSortDesc = false;
+          }
+          state.selectedPr = 0;
+          renderPrReviews();
+        });
+      });
+    }
+
     function prReadBox(row) {
       const title = row.is_read
         ? "Read \u2014 unchecks itself if the Status changes"
@@ -2782,7 +2878,10 @@ INDEX_HTML = r"""<!doctype html>
       return `<input type="checkbox" class="pr-read" data-review-key="${esc(row.review_key || "")}" data-status="${esc(row.review_status || "")}" ${row.is_read ? "checked" : ""} ${isStatic ? "disabled" : ""} title="${title}" aria-label="${title}">`;
     }
 
+    let prSortWired = false;
+
     function renderPrReviews() {
+      if (!prSortWired) { attachPrSortHandlers(); prSortWired = true; }
       const rows = filteredPrs();
       if (state.route.pr) {
         const routedIndex = rows.findIndex((row) => String(row.pr_number) === String(state.route.pr));
@@ -2797,7 +2896,6 @@ INDEX_HTML = r"""<!doctype html>
       $("pr-rows").innerHTML = rows.map((row, index) => `
         <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}">
           <td>${prReadBox(row)}</td>
-          <td>${index + 1}</td>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
@@ -2806,6 +2904,7 @@ INDEX_HTML = r"""<!doctype html>
           <td>${esc(row.author || "")}</td>
         </tr>
       `).join("");
+      markPrSortHeader();
       scrollSelected($("pr-rows"));
       $("pr-rows").querySelectorAll("tr").forEach((tr) => {
         tr.addEventListener("click", () => {
