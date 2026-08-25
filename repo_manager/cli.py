@@ -2282,8 +2282,8 @@ def attention_requirement_reason(requirement):
         # who sees "any 1 reviewer" and a separate sign-off line has to work out whether
         # that is one person or two.
         if (requirement or {}).get("breaking_signoff"):
-            return ("needs 2 reviewers: any 1, plus a maintainer who can sign off the "
-                    "breaking change")
+            return ("needs 2 reviewers, one of them a maintainer listed in contribute.md, "
+                    "because this PR makes a breaking change nobody has approved")
         return "needs any 1 reviewer"
     return ""
 

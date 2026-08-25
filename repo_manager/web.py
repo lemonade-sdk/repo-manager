@@ -659,9 +659,10 @@ def coverage_status(coverage, names):
     if coverage.get("signoff_needed") and not coverage.get("signed_off"):
         count = coverage["signoff_needed"]
         return (
-            "Needs break sign-off",
-            f"{count} breaking change{'s' if count != 1 else ''} here still needs a listed "
-            "maintainer to approve it — comments do not clear a break.",
+            "Needs maintainer approval",
+            f"This PR makes {count} breaking change{'s' if count != 1 else ''} that no "
+            "maintainer listed in contribute.md has approved. Commenting on a PR is not "
+            "approving its breaking change.",
         )
     """(label, detail) for a PR that already has reviewers, or None to fall through."""
     rung = coverage["rung"]
@@ -940,9 +941,13 @@ def pr_reviews(workspace, pr_viewer=""):
             # The rung is a surface lookup and stays the compact, sortable form; but printed
             # alone beside "High" it read as a contradiction on a PR needing two reviewers.
             # The arrow says the requirement sits above the rung and by how much.
+            # "one-reviewer → 2" was a private notation: it rendered fine and told the
+            # reader nothing. A PR whose breaking change needs signing off wants two people,
+            # one of them a listed maintainer, so it says that in the same slug vocabulary
+            # the other rungs use.
             rung_base = PR_RUNG_REVIEWERS.get(item["review_rung"], 1)
             item["scope_display"] = (
-                f"{item['review_rung']} → {item['reviewers_needed']}"
+                "two-with-maintainer"
                 if item["reviewers_needed"] > rung_base else item["review_rung"]
             )
             item["summary"] = data.get("summary", item.get("summary") or "")
@@ -2130,6 +2135,16 @@ INDEX_HTML = r"""<!doctype html>
       return `<span class="badge ${cls}">${esc(value || "Unknown")}</span>`;
     }
 
+    // Scope is a slug, so the whole sentence lives in the tooltip.
+    function scopeTitle(row) {
+      if (!row.review_rung) return "";
+      const base = `contribute.md puts this PR's surface on the ${row.review_rung} rung`;
+      if ((row.scope_display || "") === "two-with-maintainer") {
+        return `${base}, raised to 2 reviewers — one of them a listed maintainer — because it makes a breaking change nobody has approved.`;
+      }
+      return `${base}: ${row.reviewers_needed} reviewer(s).`;
+    }
+
     function statusBadge(row) {
       if (!row.review_status) return `<span class="muted">—</span>`;
       // "Approved (1/2)" is not the green "Approved": the rung still wants someone.
@@ -2754,7 +2769,7 @@ INDEX_HTML = r"""<!doctype html>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
-          <td title="${esc(row.review_rung ? `contribute.md rung: ${row.review_rung}; this PR needs ${row.reviewers_needed} reviewer(s)` : "")}">${esc(row.scope_display || row.review_rung || "")}</td>
+          <td title="${esc(scopeTitle(row))}">${esc(row.scope_display || row.review_rung || "")}</td>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>

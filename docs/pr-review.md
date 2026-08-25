@@ -120,7 +120,9 @@ The stored artifact still records the PR's live head SHA, so replay reviews are 
 
 They used to be three derivations. The CLI computed the requirement at generation time and wrote answers into database columns; the dashboard's list columns read those frozen copies; its Status column re-derived coverage from the *raw* artifact, which never carried the adjustments; and only the comment preview normalized properly. One PR could therefore show four answers — #2864 read Attention `High`, Scope `one-reviewer`, Status `Handled, 1 required`, and a comment asking for two reviewers. Each was fixed where it was reported, which is precisely what kept producing the next contradiction. The dashboard now runs every stored artifact through the same call the CLI does, and reads everything off the result.
 
-The Scope column still shows the rung, because it is the compact sortable form and it ties to contribute.md's own vocabulary — but when the requirement sits above it the cell says so: `one-reviewer → 2`.
+The Scope column shows the rung, because it is the compact sortable form and ties to contribute.md's own vocabulary. A PR whose breaking change raises the requirement reads `two-with-maintainer` — the same slug shape as `two-with-expert`, saying what it needs rather than encoding it. It briefly read `one-reviewer → 2`, which rendered perfectly and communicated nothing: the arrow was a private notation for a number the reader had no way to interpret.
+
+`reviewers_needed` rising to 2 on a breaking change is contribute.md's rule, not the tool's. It was the tool's for one afternoon, and that was a mistake worth recording: the guide implies *one* reviewer who must be a maintainer, since a single maintainer reviewing satisfies the rung and clears the break at once. Turning a constraint on **who** into a constraint on **how many** invented a second reviewer nobody had asked for — and then the Scope column had to invent notation to display the invented number. The two-reviewer rule now lives in the guide, where a tool enforcing it is reading policy instead of making it.
 
 ## PR Reviews in the web UI
 
