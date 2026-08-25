@@ -199,6 +199,14 @@ The failure this exists to stop is not inventing a fact — it is knowing a real
 
 The same applies in the other direction, to the clean bill. "The workflow runs test_tray_supervisor.py on Linux and macOS" is a claim about a file you can read, and the same PR's review asserted it about a workflow where that script does not appear at all. If you did not grep the workflow, you do not know what it runs, and `adequate` is not yet the honest answer.
 
+## Write the action, not an essay
+
+An `action` is one imperative sentence naming **what to do and where**. "Document `unavailable_recipes` in docs/api/lemonade.md" is an action. "Add the `unavailable_recipes` field description to docs/api/lemonade.md under the `/v1/system-info` response format, and update docs/guide/cli.md to explain that `lemonade backends` now hides recipes whose every built-in model was filtered by the system-memory heuristic by default, with `--all` to include them" is a paragraph wearing a checkbox.
+
+The author is reading a checklist. Every clause past the instruction is a clause they have to parse before they can start, and the reasoning is already carried by `what`, `where` and `policy` beneath it — repeating it in the action says the same thing twice in adjacent lines.
+
+Two habits do most of the damage. **One action, one edit**: an action joined by "and" is usually two to-dos, and if the two really are one commit, name the pair without explaining both. And **do not re-describe the feature**: the author wrote it. "Document the new default in docs/guide/cli.md" tells them everything "explain that `lemonade backends` now hides recipes whose every built-in model was filtered by the system-memory heuristic" does, in a tenth of the words.
+
 ## Output rules
 
 - **One missing artifact is one finding, whatever number of sections could claim it.** A breaking change whose documentation is absent is already a documentation gap; writing "add a note to docs/guide/concepts.md about the macOS restriction" as a gap and "document the macOS-only restriction in the user-facing docs" as the break's action is one edit split across two checkboxes, and the author counts two. File it once, in the section that owns the surface, and let the other section's `evidence` refer to it.

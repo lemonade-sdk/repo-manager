@@ -99,6 +99,14 @@ Fetch each referenced issue — `scripts/get-linked-discussion.sh OWNER/REPO NUM
 
 The reverse is not a discrepancy: a PR that fixes an issue without a closing keyword has simply not opted into auto-closing, which is the author's call. And when a referenced issue is unreadable or does not exist, say so in `evidence.description` rather than guessing at what it contained.
 
+## Write the action, not an essay
+
+An `action` is one imperative sentence naming **what to do and where**. "Document `unavailable_recipes` in docs/api/lemonade.md" is an action. "Add the `unavailable_recipes` field description to docs/api/lemonade.md under the `/v1/system-info` response format, and update docs/guide/cli.md to explain that `lemonade backends` now hides recipes whose every built-in model was filtered by the system-memory heuristic by default, with `--all` to include them" is a paragraph wearing a checkbox.
+
+The author is reading a checklist. Every clause past the instruction is a clause they have to parse before they can start, and the reasoning is already carried by `what`, `where` and `policy` beneath it — repeating it in the action says the same thing twice in adjacent lines.
+
+Two habits do most of the damage. **One action, one edit**: an action joined by "and" is usually two to-dos, and if the two really are one commit, name the pair without explaining both. And **do not re-describe the feature**: the author wrote it. "Document the new default in docs/guide/cli.md" tells them everything "explain that `lemonade backends` now hides recipes whose every built-in model was filtered by the system-memory heuristic" does, in a tenth of the words.
+
 ## Cite only what you opened
 
 Every file path, line number, and quoted string in your artifact is a claim a maintainer will click. Read the file before you name it, and quote only text you copied out of what you read.

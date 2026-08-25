@@ -1944,8 +1944,7 @@ def salvage_reviewer_slate(candidate, errors, validator_args, validator):
             evidence = dict(kept.get("evidence") or {})
             evidence["reviewers"] = (
                 str(evidence.get("reviewers", "")).rstrip(". ")
-                + ". (The code-authorship pass was not run for this slate, so it is "
-                  "maintainer-table only; a contributor who wrote this code may be missing.)"
+                + ". (Maintainer-table only — the code-authorship pass was not run.)"
             )
             kept["evidence"] = evidence
             print("Keeping a maintainer-table-only slate; the blame pass was skipped.", flush=True)
@@ -2272,9 +2271,8 @@ def attention_requirement_reason(requirement):
         author_owned = [str(area) for area in (requirement or {}).get("author_owned_expert_areas") or []]
         remaining = [area for area in areas if area not in author_owned]
         if author_owned and not remaining:
-            return ("needs 2 reviewers; the guide lists no expert for "
-                    f"{', '.join(author_owned)} other than the author, so the closest "
-                    "adjacent area is the practical bar")
+            return ("needs 2 reviewers; the author is the only listed "
+                    f"{', '.join(author_owned)} expert, so an adjacent area will do")
         clause = "needs 2 reviewers including 1 subject-area expert"
         return f"{clause} in {', '.join(remaining or areas)}" if (remaining or areas) else clause
     if rung == "one-reviewer":
@@ -2282,8 +2280,7 @@ def attention_requirement_reason(requirement):
         # who sees "any 1 reviewer" and a separate sign-off line has to work out whether
         # that is one person or two.
         if (requirement or {}).get("breaking_signoff"):
-            return ("needs 2 reviewers, one of them a maintainer listed in contribute.md, "
-                    "because this PR makes a breaking change nobody has approved")
+            return "needs 2 reviewers, one a maintainer (unapproved breaking change)"
         return "needs any 1 reviewer"
     return ""
 
@@ -2344,9 +2341,8 @@ def rung_notes(data):
     breaks = requirement.get("breaking_signoff")
     if breaks:
         notes.append(
-            f"The surface puts this on the {rung} rung, but {breaks} breaking change"
-            f"{'s' if breaks != 1 else ''} nobody has signed off raises what the PR needs to "
-            "2 reviewers — only a maintainer listed in the guide can clear a break."
+            f"{breaks} unapproved breaking change{'s' if breaks != 1 else ''} raises this from "
+            f"the {rung} rung to 2 reviewers; only a listed maintainer can clear a break."
         )
     areas = ", ".join(requirement.get("expert_areas") or [])
     if areas and rung != "two-with-expert":
@@ -2622,8 +2618,8 @@ def pr_reviewer_lines(data, pr_number, coverage):
     """Who should look at this PR, or who already is."""
     if data.get("reviewer_search") == "failed":
         # "none found" would be a clean bill for a search that never returned one.
-        return [f"Suggested reviewers: the reviewer search did not finish. "
-                f"Rerun `repo-manager review-pr {pr_number}` to try again."]
+        return [f"Suggested reviewers: search did not finish — rerun "
+                f"`repo-manager review-pr {pr_number}`."]
     who = ", ".join(display_handle(login) for login in (coverage or {}).get("who") or [])
     if (coverage or {}).get("adequate") and who:
         # Naming a slate for a PR that already has its reviewers is noise, and on a PR
@@ -2676,7 +2672,7 @@ def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
         lines += ["**Not ready for review yet**", "", "**To-dos**", ""]
         lines += [f"- [ ] {item['action']}" for item in required]
     elif advisory:
-        lines += ["**Ready for review** — the suggestions below are optional."]
+        lines += ["**Ready for review**"]
     else:
         lines += ["**Ready for review**", "", "No to-dos."]
     if advisory:

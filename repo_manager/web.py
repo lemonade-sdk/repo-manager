@@ -748,27 +748,20 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         my_time = mine.get("at") or ""
         pushed_at = info.get("last_commit_at") or ""
         if pushed_at and pushed_at > my_time:
-            return "Review", (
-                f"I requested changes and the author pushed new commits on "
-                f"{pushed_at.replace('T', ' ')[:16]} UTC — my turn to re-review."
-            )
+            return "Review", f"Author pushed {pushed_at.replace('T', ' ')[:16]} UTC, after your change request."
         replies = [
             comment for comment in info.get("comments", [])
             if (comment.get("login") or "").lower() == author_login
             and (comment.get("at") or "") > my_time
         ]
-        detail = "I requested changes — waiting for the author."
+        detail = "Your change request is out; no push since."
         if replies:
-            detail += (
-                f" They have posted {len(replies)} "
-                f"{'reply' if len(replies) == 1 else 'replies'} in discussion without "
-                "pushing anything, which may be aimed at another reviewer."
-            )
+            detail += f" {len(replies)} repl{'y' if len(replies) == 1 else 'ies'}, no code change."
         return "In progress", detail
     if viewer and viewer in requested and viewer not in reviewed:
-        return "Review", "I am a requested reviewer and have not reviewed yet."
+        return "Review", "You are a requested reviewer."
     if named and named == viewer and viewer not in reviewed:
-        return "Review", "contribute.md names me as the approver for this PR's rung."
+        return "Review", "contribute.md names you for this rung."
 
     # --- 2. Blocked on the author: somebody's change request is outstanding.
     blocking = sorted(
@@ -776,9 +769,7 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         if (latest.get(login) or {}).get("state") == "CHANGES_REQUESTED"
     )
     if blocking:
-        return "In progress", (
-            f"{', '.join(blocking)} requested changes — waiting for the author to respond."
-        )
+        return "In progress", f"{', '.join(blocking)} requested changes."
 
     # --- 3. Done: enough approvals, and a maintainer among them when a break needs clearing.
     coverage = review_coverage(sorted(reviewed), requirement, table, approvals)
@@ -786,7 +777,7 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     approving_maintainers = [login for login in approvals if login in table]
     needed = coverage.get("needed") or 1
     if approvals and len(approvals) >= needed and (not signoff_needed or approving_maintainers):
-        return "Merge", f"Approved by {', '.join(approvals)} and not merged yet."
+        return "Merge", f"Approved by {', '.join(approvals)}."
 
     # --- 4. Is anyone on the hook to close the gap? Counted over the people who have
     # reviewed *plus* the ones who have been asked to, because a requested reviewer is a
@@ -799,33 +790,27 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         if approvals:
             missing = needed - len(approvals)
             return "In progress", (
-                f"Approved by {', '.join(approvals)}; {missing} more approval"
-                f"{'s' if missing != 1 else ''} still to come from the reviewers on it."
+                f"Approved by {', '.join(approvals)}; {missing} more to come."
             )
-        who = ", ".join(prospective)
-        return "In progress", (
-            f"{who} {'is' if len(prospective) == 1 else 'are'} on this PR and between them "
-            "cover what it needs."
-        )
+        return "In progress", f"On it: {', '.join(prospective)}."
     # coverage_status decides *whether* there is a gap; its sentence was written for the old
     # per-shortfall labels and reads badly reused ("In review by  — this rung needs 1
     # reviewers"), so the tooltip is composed here from the coverage itself.
     gap = review_coverage(prospective, requirement, table, approvals)
+    short = gap["needed"] - gap["count"]
     missing = []
     if gap["rung"] == "named-approver" and not gap["named_reviewed"]:
-        missing.append(f"contribute.md names @{gap['named']} for this rung and they have not weighed in")
+        missing.append(f"@{gap['named']}")
     if gap["expert_areas"] and not gap["experts"]:
-        missing.append(f"nobody on it covers {', '.join(gap['expert_areas'])}")
-    if gap["count"] < gap["needed"]:
-        short = gap["needed"] - gap["count"]
-        missing.append(f"{short} more reviewer{'s' if short != 1 else ''}")
+        missing.append(f"a {' / '.join(gap['expert_areas'])} expert")
+    if short > 0:
+        missing.append(f"{short} reviewer{'s' if short != 1 else ''}")
     if gap.get("signoff_needed") and not gap.get("signed_off"):
-        missing.append("a listed maintainer to approve the breaking change")
-    engaged = ", ".join(prospective) or "nobody"
-    return "Needs reviewer", (
-        f"On this PR: {engaged}. Still needed: {'; '.join(missing) or 'a reviewer'}. "
-        "Waiting will not resolve this — somebody has to be assigned."
-    )
+        missing.append("a maintainer to approve the breaking change")
+    detail = f"Needs {', '.join(missing) or 'a reviewer'}."
+    if prospective:
+        detail += f" On it: {', '.join(prospective)}."
+    return "Needs reviewer", detail
 
 
 def reviewer_coverage(workspace, repo, pr_number, author, requirement):
@@ -2182,11 +2167,11 @@ INDEX_HTML = r"""<!doctype html>
     // Scope is a slug, so the whole sentence lives in the tooltip.
     function scopeTitle(row) {
       if (!row.review_rung) return "";
-      const base = `contribute.md puts this PR's surface on the ${row.review_rung} rung`;
+
       if ((row.scope_display || "") === "two-with-maintainer") {
-        return `${base}, raised to 2 reviewers — one of them a listed maintainer — because it makes a breaking change nobody has approved.`;
+        return `${row.review_rung} rung, raised to 2 (one a maintainer) by an unapproved breaking change.`;
       }
-      return `${base}: ${row.reviewers_needed} reviewer(s).`;
+      return `${row.review_rung} rung: ${row.reviewers_needed} reviewer(s).`;
     }
 
     function statusBadge(row) {
