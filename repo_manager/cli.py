@@ -1165,6 +1165,14 @@ def normalize_pr_review_data(data):
         "named_approver": clean_github_handle(text_of(requirement, "named_approver")) if rung == "named-approver" else "",
         "rationale": text_of(requirement, "rationale", "reason"),
         "reviewers_needed": PR_RUNG_REVIEWERS.get(rung, 1),
+        # Carried through rather than recomputed: this rebuild would otherwise drop what the
+        # caller worked out from the maintainer table, and the clause would go back to
+        # asking for an expert who does not exist.
+        "author_owned_expert_areas": [
+            str(area).strip()
+            for area in requirement.get("author_owned_expert_areas") or []
+            if str(area).strip()
+        ],
     }
 
 
@@ -1238,11 +1246,12 @@ def normalize_pr_review_data(data):
     # alarm and fill the checklist at the same time.
     unapproved = [change for change in breaking if change["maintainer_approval"] != "approved"]
     reasons = []
+    promote_requirement_for_breaks(data)
     rung_now = data["review_requirement"]["rung"]
     requirement_reason = attention_requirement_reason(data["review_requirement"])
     if requirement_reason:
         reasons.append(requirement_reason)
-    if unapproved:
+    if unapproved and not (rung_now == "one-reviewer" and requirement_reason):
         count = len(unapproved)
         reasons.append(
             f"a maintainer sign-off on {count} breaking change{'s' if count != 1 else ''}"
@@ -1819,8 +1828,44 @@ PR_TIER_VALIDATORS = {
 }
 
 
+def code_authors_brief(workspace, repo, number, base_ref):
+    """Run the code-authorship pass here and hand tier 3 the answer.
+
+    This was the single most expensive thing in a sweep. The skill is told to run
+    `get-pr-code-authors.sh` and report it, and it kept doing a maintainer-table lookup
+    instead — 52 bounces across 88 PRs, each one re-running the whole tier, which is why
+    retries came to 34% of total wall clock. Instruction cannot fix a step that gets
+    skipped; running it here can, because there is nothing left to skip.
+
+    File mode deliberately: it blames the lines the PR's own hunks touch and needs no
+    judgment about which identifiers matter. The skill can still run subject mode with
+    better terms on top of this — this is the floor, not the ceiling.
+    """
+    script = repo_root() / "skills" / "pr-review" / "scripts" / "get-pr-code-authors.sh"
+    if not script.exists():
+        return ""
+    env = dict(os.environ)
+    env["REPO_MANAGER_CACHE_DIR"] = str(project_docs_cache_dir(workspace))
+    env["REPO_MANAGER_CHECKOUT"] = str(Path(workspace).resolve() / CONFIG_DIR / "checkout")
+    env["REPO_MANAGER_BASE_REF"] = base_ref
+    try:
+        result = subprocess.run(
+            ["bash", str(script), repo, str(number)],
+            cwd=workspace, env=env, capture_output=True, text=True, timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    output = (result.stdout or "").strip()
+    if result.returncode != 0 or not output:
+        # An honest empty answer is still an answer, and saying so keeps the tier from
+        # concluding the pass was never run.
+        return "The code-authorship pass returned no usable blame hits for this PR."
+    return output[:6000]
+
+
 def rung_brief(requirement):
     """The line tier 3 needs: how many reviewers, what expertise, who is named."""
+    author_owned = [str(area) for area in (requirement or {}).get("author_owned_expert_areas") or []]
     rung = (requirement or {}).get("rung") or ""
     if not rung:
         return ""
@@ -1836,6 +1881,13 @@ def rung_brief(requirement):
     named = (requirement or {}).get("named_approver") or ""
     if named:
         parts.append(f"The guide names {named} for this rung; include them unless they authored the PR.")
+    if author_owned:
+        parts.append(
+            f"The guide lists no maintainer for {', '.join(author_owned)} other than this PR's "
+            "author, so that expert slot cannot be filled as written. Do not name the author, and "
+            "do not return an empty slate: name the closest adjacent area the table does cover "
+            "and say in evidence.reviewers which area you substituted and why."
+        )
     return " ".join(parts)
 
 
@@ -1926,7 +1978,7 @@ def stamp_maintainer_membership(candidate, maintainer_table):
             reviewer["in_maintainer_table"] = handle in (maintainer_table or {})
 
 
-def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
+def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None, authors_brief=""):
     """Run one tier's skill and return its validated, normalized fragment.
 
     Each tier validates only its own fields, so a bounced tier re-runs that tier's judgment
@@ -1955,6 +2007,13 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
             f"read them only via scripts/get-pr-review-docs.sh, never from a working tree)\n"
             f"Author: {author} (never suggest the author as a reviewer)\n"
             + (f"{rung_brief(requirement)}\n" if tier == "reviewers" and requirement else "")
+            + (
+                "\nCode-authorship pass (already run for you, file mode — you do not need to "
+                "run get-pr-code-authors.sh again unless you want subject mode with your own "
+                "terms). Report what it shows in evidence.reviewers, including when it found "
+                f"nothing useful:\n{authors_brief}\n"
+                if tier == "reviewers" and authors_brief else ""
+            )
             + f"\nWrite the machine-readable JSON result to: {pending_json}\n\n"
             f"{feedback}"
         )
@@ -2052,10 +2111,16 @@ def generate_pr_review(workspace, repo, meta):
     # was a trade nobody made while the tiers were gated, since tier 3 only ran on a PR that
     # was already clean; now it runs on every one. A tier that will not validate is recorded
     # as not having answered, never as having found nobody.
+    promote_requirement_for_breaks(data)
+    flag_unsatisfiable_expert_areas(
+        data, load_maintainer_context(workspace, repo, base_ref).get("table", {}), pr_author_handle(meta)
+    )
     tier_started = time.monotonic()
+    authors_brief = code_authors_brief(workspace, repo, number, base_ref)
     try:
         reviewers = run_pr_tier(
-            workspace, repo, meta, "reviewers", base_ref, requirement=data.get("review_requirement")
+            workspace, repo, meta, "reviewers", base_ref,
+            requirement=data.get("review_requirement"), authors_brief=authors_brief,
         )
     except SystemExit as exc:
         if exc.code in (130, None):
@@ -2110,6 +2175,62 @@ def pr_review_data_from_row(row):
     return None
 
 
+def flag_unsatisfiable_expert_areas(data, maintainer_table, author):
+    """Mark expert areas whose only owner is the PR author.
+
+    45 of this table's 60 Subject Areas cells have exactly one maintainer behind them, so a
+    maintainer contributing in their own area routinely produces a requirement nobody alive
+    can satisfy — #3327 asks for a `thenoise` expert and @bitgamma, the author, is the only
+    one. Left alone that PR sits on "Needs subject expert" forever, and the reviewer tier
+    either returns nothing or names the author it was told never to name.
+
+    Recording it here, once, keeps the comment, the reviewer tier and the dashboard's Status
+    column reading the same fact instead of each deciding for itself.
+    """
+    requirement = data.get("review_requirement") or {}
+    areas = [area for area in requirement.get("expert_areas") or [] if str(area).strip()]
+    if not areas or not maintainer_table:
+        return data
+    handle = str(author or "").lstrip("@").lower()
+    unsatisfiable = []
+    for area in areas:
+        owners = {
+            login for login, entry in maintainer_table.items()
+            if any(str(owned).strip().lower() == area.strip().lower()
+                   for owned in (entry or {}).get("areas") or [])
+        }
+        if owners and owners <= {handle}:
+            unsatisfiable.append(area)
+    if unsatisfiable:
+        requirement["author_owned_expert_areas"] = unsatisfiable
+    return data
+
+
+def promote_requirement_for_breaks(data):
+    """A break nobody has signed off raises what the PR *needs*, not just how loud it is.
+
+    The rung is a lookup off the surface the diff touches, and it should stay one — a flag
+    on an existing command really is a flag on an existing command. But a user-visible break
+    needs a maintainer's sign-off, and only a maintainer can give it, so a PR asking for
+    "any 1 reviewer" can be fully satisfied by someone who cannot clear it. That is how
+    #2864 and #3259 came to read `High` next to a one-reviewer requirement: the alarm went
+    up and the staffing did not, which tells a reader something is serious and then asks
+    them for nothing extra.
+
+    Called before the reviewer tier so the slate is picked for the requirement that applies.
+    """
+    requirement = data.get("review_requirement") or {}
+    unapproved = [
+        change for change in data.get("breaking_changes") or []
+        if (change or {}).get("maintainer_approval") != "approved"
+    ]
+    if not unapproved or not requirement.get("rung"):
+        return data
+    requirement["breaking_signoff"] = len(unapproved)
+    requirement["reviewers_needed"] = max(int(requirement.get("reviewers_needed") or 1), 2)
+    return data
+
+
 def attention_requirement_reason(requirement):
     """The who-must-review clause for a rung, generated in exactly one place.
 
@@ -2127,9 +2248,21 @@ def attention_requirement_reason(requirement):
         return f"needs a review from {named}"
     if rung == "two-with-expert":
         areas = [str(area) for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
+        author_owned = [str(area) for area in (requirement or {}).get("author_owned_expert_areas") or []]
+        remaining = [area for area in areas if area not in author_owned]
+        if author_owned and not remaining:
+            return ("needs 2 reviewers; the guide lists no expert for "
+                    f"{', '.join(author_owned)} other than the author, so the closest "
+                    "adjacent area is the practical bar")
         clause = "needs 2 reviewers including 1 subject-area expert"
-        return f"{clause} in {', '.join(areas)}" if areas else clause
+        return f"{clause} in {', '.join(remaining or areas)}" if (remaining or areas) else clause
     if rung == "one-reviewer":
+        # The two halves are one requirement, so they are stated as one clause: a reader
+        # who sees "any 1 reviewer" and a separate sign-off line has to work out whether
+        # that is one person or two.
+        if (requirement or {}).get("breaking_signoff"):
+            return ("needs 2 reviewers: any 1, plus a maintainer who can sign off the "
+                    "breaking change")
         return "needs any 1 reviewer"
     return ""
 
@@ -2187,6 +2320,13 @@ def rung_notes(data):
     )
     why = why[:1].upper() + why[1:]
     notes = []
+    breaks = requirement.get("breaking_signoff")
+    if breaks:
+        notes.append(
+            f"The surface puts this on the {rung} rung, but {breaks} breaking change"
+            f"{'s' if breaks != 1 else ''} nobody has signed off raises what the PR needs to "
+            "2 reviewers — only a maintainer listed in the guide can clear a break."
+        )
     areas = ", ".join(requirement.get("expert_areas") or [])
     if areas and rung != "two-with-expert":
         notes.append(f"Subject-area expertise this calls for: {areas}")

@@ -581,6 +581,16 @@ def review_coverage(reviewer_logins, requirement, maintainers):
     """
     rung = (requirement or {}).get("rung") or ""
     expert_areas = [area for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
+    # An area whose only listed maintainer is the PR author cannot be covered by anyone, so
+    # holding the PR at "Needs subject expert" is asking for a person who does not exist.
+    # Dropping it leaves the reviewer *count* as the bar, which is a requirement someone can
+    # actually meet; the review comment says which area went unstaffed and why.
+    author_owned = {
+        str(area).strip().lower()
+        for area in (requirement or {}).get("author_owned_expert_areas") or []
+    }
+    if author_owned:
+        expert_areas = [area for area in expert_areas if area.strip().lower() not in author_owned]
     named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
     reviewers = [login.lower() for login in reviewer_logins]
     experts = {}
@@ -707,10 +717,32 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
                 "not changed."
             )
         return "Requests", "I requested changes — waiting for the author to respond."
-    if info.get("review_decision") == "APPROVED":
-        return "Approved", "Approved but not merged yet."
     participants = coverage_participants(latest, info.get("comments"), author_login, maintainers or {})
     coverage = review_coverage(list(participants), requirement, maintainers or {})
+    # GitHub calls a PR approved as soon as one approval lands, which says nothing about the
+    # rung contribute.md puts it on. #3293 needs two reviewers and had one, and a green
+    # "Approved" told a maintainer the PR was done being reviewed. Approval is only the end
+    # of the story once the rung is actually satisfied; short of that it is progress, and it
+    # says how far along it is.
+    if info.get("review_decision") == "APPROVED":
+        # Counted on approvals, not on participants. Coverage deliberately casts a wider net
+        # — a maintainer who comments is in the loop — and that is the right question for
+        # "is anyone looking at this". It is the wrong one here: commenting is not signing
+        # off, and #3293 had three people in the conversation and one approval against a
+        # rung that asks for two.
+        approvals = sorted(
+            login for login, review in latest.items()
+            if review.get("state") == "APPROVED"
+            and login != author_login and not is_ai_reviewer(login)
+        )
+        needed = coverage.get("needed") or 1
+        if len(approvals) >= needed:
+            return "Approved", "Approved but not merged yet."
+        return (
+            f"Approved ({len(approvals)}/{needed})",
+            f"Approved by {', '.join(approvals) or 'nobody yet'}, but this rung asks for "
+            f"{needed} approvals — not merged yet, and not finished being reviewed.",
+        )
     if participants:
         verdict = coverage_status(coverage, ", ".join(sorted(participants)))
         if verdict:
@@ -2042,6 +2074,10 @@ INDEX_HTML = r"""<!doctype html>
 
     function statusBadge(row) {
       if (!row.review_status) return `<span class="muted">—</span>`;
+      // "Approved (1/2)" is not the green "Approved": the rung still wants someone.
+      if (/\(\d+\/\d+\)/.test(row.review_status)) {
+        return `<span class="badge tone-neutral" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
+      }
       const cls = row.review_status.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
       return `<span class="badge ${cls}" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
     }
