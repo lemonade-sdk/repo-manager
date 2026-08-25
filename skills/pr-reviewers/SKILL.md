@@ -1,6 +1,6 @@
 ---
 name: pr-reviewers
-description: Tier 3 of the PR review pipeline. Suggest two to three human reviewers for a pull request from the contribute.md maintainer table and from who actually wrote the code the PR acts on. Use once a PR has passed triage and quality checks.
+description: Tier 3 of the PR review pipeline. Suggest two to three human reviewers for a pull request from the contribute.md maintainer table and from who actually wrote the code the PR acts on. Runs on every PR: who should review it is a question worth answering even while the author still owes to-dos.
 ---
 
 # PR Reviewers

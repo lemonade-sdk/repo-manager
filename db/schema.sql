@@ -68,8 +68,6 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
   attention_level TEXT NOT NULL DEFAULT '',
   review_rung TEXT NOT NULL DEFAULT '',
   reviewers_needed INTEGER NOT NULL DEFAULT 1,
-  tier_reached TEXT NOT NULL DEFAULT '',
-  gate_stopped_at TEXT NOT NULL DEFAULT '',
   documentation_status TEXT NOT NULL DEFAULT '',
   testing_status TEXT NOT NULL DEFAULT '',
   alignment_flags TEXT NOT NULL DEFAULT '[]',

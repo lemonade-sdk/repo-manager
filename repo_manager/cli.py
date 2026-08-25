@@ -128,7 +128,7 @@ def ensure_db_schema(conn):
         conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
     # The major/minor scope taxonomy predates contribute.md's Review Process rungs and is
     # gone, not shimmed: drop the columns so nothing can read a stale verdict.
-    for dead in ("scope_verdict", "second_review_required"):
+    for dead in ("scope_verdict", "second_review_required", "tier_reached", "gate_stopped_at"):
         if dead in pr_columns:
             try:
                 conn.execute(f"ALTER TABLE pr_reviews DROP COLUMN {dead}")
@@ -137,8 +137,6 @@ def ensure_db_schema(conn):
     for column, decl in (
         ("review_rung", "TEXT NOT NULL DEFAULT ''"),
         ("reviewers_needed", "INTEGER NOT NULL DEFAULT 1"),
-        ("tier_reached", "TEXT NOT NULL DEFAULT ''"),
-        ("gate_stopped_at", "TEXT NOT NULL DEFAULT ''"),
     ):
         if pr_columns and column not in pr_columns:
             conn.execute(f"ALTER TABLE pr_reviews ADD COLUMN {column} {decl}")
@@ -194,8 +192,6 @@ def ensure_db_schema(conn):
           attention_level TEXT NOT NULL DEFAULT '',
           review_rung TEXT NOT NULL DEFAULT '',
           reviewers_needed INTEGER NOT NULL DEFAULT 1,
-          tier_reached TEXT NOT NULL DEFAULT '',
-          gate_stopped_at TEXT NOT NULL DEFAULT '',
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -269,6 +265,23 @@ def project_docs_cache_dir(workspace):
 PR_TIERS_WITHOUT_REVIEW_STATE = ("pr-triage", "pr-reviewers")
 
 
+# Where a review's wall clock actually goes. Populated per `run_pi` call and read by the
+# caller immediately after, so a tier can record its own breakdown without threading a
+# stats object through every signature.
+PI_RUN_STATS = {}
+
+
+def reset_pi_stats():
+    global PI_RUN_STATS
+    PI_RUN_STATS = {
+        "tool_seconds": 0.0,
+        "tool_calls": {},
+        "tool_seconds_by_name": {},
+        "tool_errors": 0,
+        "generated_chars": 0,
+    }
+
+
 def run_pi(skill_name, prompt, cwd, base_ref=""):
     pi = shutil.which("pi")
     if not pi:
@@ -307,11 +320,37 @@ def run_pi(skill_name, prompt, cwd, base_ref=""):
         writer = threading.Thread(target=feed_prompt, args=(proc,), daemon=True)
         writer.start()
         print(f"Running Pi skill: {skill_name}", flush=True)
+        reset_pi_stats()
+        # The agent loop is strictly sequential — one tool runs at a time — so a single
+        # "when did the current tool start" is enough to attribute its duration.
+        tool_started, tool_name_open = None, ""
         for line in proc.stdout:
+            # Cheap substring guard first: text_delta events are by far the most numerous
+            # and none of them need parsing for stats.
+            if "tool_execution_" in line:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = {}
+                kind = event.get("type")
+                name = event.get("toolName", "tool")
+                if kind == "tool_execution_start":
+                    tool_started, tool_name_open = time.monotonic(), name
+                elif kind == "tool_execution_end":
+                    if tool_started is not None:
+                        spent = time.monotonic() - tool_started
+                        PI_RUN_STATS["tool_seconds"] += spent
+                        by_name = PI_RUN_STATS["tool_seconds_by_name"]
+                        by_name[tool_name_open] = round(by_name.get(tool_name_open, 0.0) + spent, 2)
+                        tool_started = None
+                    PI_RUN_STATS["tool_calls"][name] = PI_RUN_STATS["tool_calls"].get(name, 0) + 1
+                    if event.get("isError"):
+                        PI_RUN_STATS["tool_errors"] += 1
             rendered = render_pi_event(line)
             if rendered:
                 saw_text = True
                 assistant_text.append(rendered)
+                PI_RUN_STATS["generated_chars"] += len(rendered)
         returncode = proc.wait()
         writer.join(timeout=1)
     except KeyboardInterrupt:
@@ -959,9 +998,32 @@ def list_open_prs(repo, limit):
 DISCORD_ANNOTATION = re.compile(r"\s*\(discord:[^)]*\)", re.IGNORECASE)
 VALID_HANDLE = re.compile(r"^@[A-Za-z0-9-]+$")
 
+# The release review has carried a false-green guard for its canonical breaking-change list
+# since the beginning; PR reviews never got one, and #3277 is what that costs — an empty
+# `breaking_changes` under an evidence line reading "the default parallelism shift is a
+# UX-level behavioral change ... no maintainer has yet signed off". The list and the prose
+# describing it disagreed, and the reader is shown the list.
+PR_BREAKING_CLAIM = re.compile(
+    r"\b(breaking change|behaviou?ral change|ux[- ]level|user-visible change|"
+    r"signed off|sign-?off|maintainer approval)\b",
+    re.IGNORECASE,
+)
+PR_NO_BREAKING = re.compile(
+    r"\b(no|none|zero|not any|nothing|without|isn['’]?t|aren['’]?t)\b[^.]{0,60}"
+    r"(breaking|behaviou?ral|user-visible|ux)",
+    re.IGNORECASE,
+)
+
+# An author cannot approve their own breaking change, and asking them to go and collect an
+# approval duplicates the reviewer slate the comment already carries.
+APPROVAL_ACTION_PATTERN = re.compile(
+    r"\b(approval|approve[sd]?|sign[- ]?off|signs? off|confirm with a .{0,30}maintainer)\b",
+    re.IGNORECASE,
+)
+
 PR_DOC_VOCAB = ("contribute.md", "philosophy.md")
-PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable", "not-evaluated")
-PR_TEST_STATUS_VOCAB = ("adequate", "gaps", "not-applicable", "not-evaluated")
+PR_DOC_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
+PR_TEST_STATUS_VOCAB = ("adequate", "gaps", "not-applicable")
 PR_FOCUS_VOCAB = ("focused", "bundled")
 # contribute.md's Review Process rungs. These replace the old major/minor scope verdict,
 # which predated the guide and encoded a size taxonomy the guide does not use.
@@ -1166,47 +1228,30 @@ def normalize_pr_review_data(data):
 
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
 
-    uncleared = [
-        change for change in breaking
-        if change["documented"] is not True or change["maintainer_approval"] != "approved"
-    ]
+    # The level answers one question: how much scrutiny does a human owe this PR? That is
+    # the rung, plus a break nobody has signed off. What the *author* still owes is the
+    # to-do list, and it used to be folded in here too — which is how a PR whose only
+    # problem was an undescribed flag came out labelled "Elevated", a word that reads like
+    # a security review when the fix is one paragraph in the PR body.
+    # Only the sign-off half raises the level. Whether the break is *documented* is work the
+    # author owes, and it is already a to-do; counting it here too made one fact raise the
+    # alarm and fill the checklist at the same time.
+    unapproved = [change for change in breaking if change["maintainer_approval"] != "approved"]
     reasons = []
     rung_now = data["review_requirement"]["rung"]
-    if rung_now in ("named-approver", "two-with-expert"):
-        reasons.append(attention_requirement_reason(data["review_requirement"]))
-    if uncleared:
-        reasons.append(f"{len(uncleared)} breaking change(s) without docs or maintainer sign-off")
-    elif breaking:
-        reasons.append(f"{len(breaking)} documented, maintainer-approved breaking change(s)")
-    if flags:
-        reasons.append(f"{len(flags)} alignment issue(s)")
-    if data["documentation"]["status"] == "gaps":
-        reasons.append(f"{len(gaps)} documentation gap(s)")
-    if data["testing"]["status"] == "gaps":
-        reasons.append(f"{len(test_gaps)} testing gap(s)")
-    verdict = data["description_check"]["verdict"]
-    # Bundling outranks a description omission — see pr_gate_after_triage. Reporting both
-    # gives the reader two reasons for one problem.
-    if data["focus"]["verdict"] == "bundled":
-        reasons.append("unrelated changes bundled together")
-    elif verdict == "discrepancies":
-        reasons.append("PR description does not match the diff")
-    elif verdict == "missing":
-        reasons.append("PR description is missing")
+    requirement_reason = attention_requirement_reason(data["review_requirement"])
+    if requirement_reason:
+        reasons.append(requirement_reason)
+    if unapproved:
+        count = len(unapproved)
+        reasons.append(
+            f"a maintainer sign-off on {count} breaking change{'s' if count != 1 else ''}"
+        )
     data["attention_reasons"] = reasons
 
-    if rung_now == "named-approver" or uncleared:
+    if rung_now == "named-approver" or unapproved:
         data["attention_level"] = "High"
     elif rung_now == "two-with-expert":
-        data["attention_level"] = "Elevated"
-    elif (
-        breaking
-        or flags
-        or data["focus"]["verdict"] == "bundled"
-        or data["documentation"]["status"] == "gaps"
-        or data["testing"]["status"] == "gaps"
-        or verdict in ("discrepancies", "missing")
-    ):
         data["attention_level"] = "Elevated"
     else:
         data["attention_level"] = "Routine"
@@ -1222,9 +1267,8 @@ def store_pr_review(workspace, repo, meta, data, json_file):
               repo, pr_number, head_sha, pr_title, author, summary, attention_level,
               review_rung, reviewers_needed, documentation_status, testing_status,
               alignment_flags, breaking_changes, suggested_reviewers, maintainer_needed_areas,
-              raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds,
-              tier_reached, gate_stopped_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              raw_output, json_path, reviewed_at, skill_version, rubric_version, generation_seconds
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
               generation_seconds=excluded.generation_seconds,
               head_sha=excluded.head_sha,
@@ -1243,9 +1287,7 @@ def store_pr_review(workspace, repo, meta, data, json_file):
               raw_output=excluded.raw_output,
               json_path=excluded.json_path,
               reviewed_at=excluded.reviewed_at,
-              skill_version=excluded.skill_version,
-              tier_reached=excluded.tier_reached,
-              gate_stopped_at=excluded.gate_stopped_at
+              skill_version=excluded.skill_version
             """,
             (
                 repo,
@@ -1269,8 +1311,6 @@ def store_pr_review(workspace, repo, meta, data, json_file):
                 __version__,
                 PR_RUBRIC_VERSION,
                 float(data.get("generation_seconds") or 0),
-                data.get("tier_reached", ""),
-                (data.get("gate") or {}).get("stopped_at") or "",
             ),
         )
 
@@ -1374,7 +1414,7 @@ def covers_any_area(entry, expert_areas):
     return [area for area in expert_areas if area.strip().lower() in owned]
 
 def pr_triage_validation_errors(data, pr_author, maintainer_areas=None):
-    """Tier 1: the shape checks. Their verdicts gate the rest of the pipeline."""
+    """Tier 1: the shape checks — does the description match the diff, and is the PR one thing."""
     errors = []
     if not str(data.get("summary", "")).strip():
         errors.append("summary is required: one sentence on what the PR does.")
@@ -1478,7 +1518,7 @@ def pr_quality_validation_errors(data, pr_author):
         block = data.get(section, {})
         status = block.get("status")
         gaps = block.get("gaps", [])
-        if status not in vocab or status == "not-evaluated":
+        if status not in vocab:
             errors.append(f"{section}.status must be 'adequate', 'gaps', or 'not-applicable'.")
         elif status == "gaps" and not gaps:
             errors.append(f"{section}.status is 'gaps' but {section}.gaps is empty — list each gap.")
@@ -1547,14 +1587,47 @@ def pr_quality_validation_errors(data, pr_author):
             )
             break
     for change in breaking:
-        if not breaking_change_cleared(change) and not change.get("action"):
+        if change.get("documented") is not True and not change.get("action"):
             errors.append(
-                "Every breaking change that is undocumented or lacks maintainer approval needs an "
-                "imperative 'action' that clears it."
+                "Every undocumented breaking change needs an imperative 'action' naming where to "
+                "document it. A documented one needs no action, whatever its maintainer_approval says."
+            )
+            break
+    # The old rule asked for an action whenever a change was undocumented *or* unapproved, so
+    # on a documented-but-unapproved break the only action left to write was "get approval" —
+    # which is not something the author can do. Reject it wherever it still appears.
+    for change in breaking:
+        if APPROVAL_ACTION_PATTERN.search(str(change.get("action") or "")):
+            errors.append(
+                "A breaking change's 'action' is the documentation step the author owes, never "
+                "obtaining approval: the PR review is the approval, and the maintainers who can "
+                "give it are named by the reviewer tier. Record the sign-off state in "
+                "maintainer_approval and approval_evidence, and drop it from the action."
             )
             break
 
     evidence = data.get("evidence", {})
+    breaking_prose = str(evidence.get("breaking_changes", ""))
+    # Both directions. #2864 listed a break under evidence opening "No breaking changes:",
+    # which is the same disagreement pointing the other way.
+    # Only the opening claim counts. "The API change is breaking; no other user-visible
+    # surface moved" is a coherent evidence line, and matching anywhere in it would reject
+    # the honest answer — the failure is an evidence line that *opens* by denying the list.
+    breaking_opener = re.split(r"(?<=[.;])\s", breaking_prose.strip(), maxsplit=1)[0]
+    if breaking and PR_NO_BREAKING.search(breaking_opener):
+        errors.append(
+            f"breaking_changes lists {len(breaking)} change(s) but evidence.breaking_changes says "
+            "nothing broke. The evidence explains the list it belongs to — describe what the "
+            "listed break is and how you judged it, or drop the entry."
+        )
+    if (not breaking and PR_BREAKING_CLAIM.search(breaking_prose)
+            and not PR_NO_BREAKING.search(breaking_prose)):
+        errors.append(
+            "breaking_changes is empty but evidence.breaking_changes describes one. Either list "
+            "the change — a break the author has documented still belongs in the list, with an "
+            "empty action and its maintainer_approval recorded — or write evidence that says "
+            "plainly that nothing user-facing broke."
+        )
     for key in ("alignment", "documentation", "testing", "breaking_changes"):
         if not str(evidence.get(key, "")).strip():
             errors.append(
@@ -1567,6 +1640,26 @@ def pr_quality_validation_errors(data, pr_author):
 def cited_areas(reviewer):
     """The subject-area terms a suggestion cites, as a list."""
     return [part.strip() for part in str(reviewer.get("subject_area", "")).split(",") if part.strip()]
+
+
+def matched_area(cited, owned):
+    """The Subject Areas term a citation quotes, or None.
+
+    The point of the rule is that a cited term is traceable to the cell, and "Adding new
+    backends" traces to "new backends" perfectly well — the verb prefix costs nothing and
+    the term is right there. Rejecting it burned three tier-3 attempts on #2843 and then
+    left the PR with no slate at all.
+
+    Only that direction. A citation *narrower* than the term it claims — "CLI" against a
+    cell reading "new CLI commands" — is not auditable, because dropping the qualifier is
+    exactly how a low-rung PR gets staffed on a novelty term, which the novelty check below
+    exists to stop. So the citation may wrap a listed term, never trim one.
+    """
+    low = cited.strip().lower()
+    if low in owned:
+        return low
+    inside = [term for term in owned if term and term in low]
+    return max(inside, key=len) if inside else None
 
 
 def asserts_novelty(area):
@@ -1664,7 +1757,8 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
         if not entry:
             continue
         owned = {area.lower() for area in entry.get("areas", [])}
-        unknown = [part for part in cited if part.lower() not in owned]
+        matches = {part: matched_area(part, owned) for part in cited}
+        unknown = [part for part, hit in matches.items() if hit is None]
         if unknown:
             errors.append(
                 f"Suggested reviewer {handle} cites subject area(s) {unknown!r} that do not appear in "
@@ -1677,7 +1771,7 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
         # already exists. Only complain when they had a non-novel term to cite instead:
         # a maintainer whose cell offers nothing else would otherwise be uncitable, which is
         # the same unsatisfiable-by-construction trap as an author-owned expert area.
-        novel = [part for part in cited if asserts_novelty(part)]
+        novel = [part for part in cited if asserts_novelty(matches.get(part) or part)]
         if non_novel_rung and novel:
             if any(not asserts_novelty(area) for area in owned):
                 errors.append(
@@ -1702,7 +1796,12 @@ def pr_reviewers_validation_errors(data, pr_author, requirement=None, maintainer
     basis_text = str(data.get("evidence", {}).get("reviewers", "")).strip()
     if not basis_text:
         errors.append("evidence.reviewers is required: the surfaces you identified and how you got the slate.")
-    elif "blame" not in basis_text.lower() and not any(
+    # The rule is "report the pass", not "use the word blame". `get-pr-code-authors.sh` runs
+    # git log as well as git blame, and a run that says "git log over the PR range returned
+    # only the author" has reported it — bouncing that is the validator failing an honest
+    # answer for its wording, three times over, and taking the whole review down with it.
+    elif not any(term in basis_text.lower() for term in
+                 ("blame", "git log", "code-author", "code author", "authorship")) and not any(
         item.get("basis") == "code-author" for item in data.get("suggested_reviewers", [])
     ):
         errors.append(
@@ -1740,6 +1839,93 @@ def rung_brief(requirement):
     return " ".join(parts)
 
 
+_SKILL_CHARS = {}
+
+
+def skill_prompt_chars(skill_name):
+    """How much standing instruction this tier prefills on every single call."""
+    if skill_name not in _SKILL_CHARS:
+        try:
+            _SKILL_CHARS[skill_name] = len(Path(skill_path(skill_name)).read_text(encoding="utf-8"))
+        except OSError:
+            _SKILL_CHARS[skill_name] = 0
+    return _SKILL_CHARS[skill_name]
+
+
+def record_timings(workspace, rows):
+    """Append per-attempt timings so a sweep can be analysed after the fact."""
+    if not rows:
+        return
+    path = Path(workspace) / CONFIG_DIR / "review-timings.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps({**row, "at": now_iso()}, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def salvage_reviewer_slate(candidate, errors, validator_args, validator):
+    """Drop the reviewers a validator rejected rather than losing the whole slate.
+
+    Measured on the sweep: 5 of the first 21 PRs failed tier 3 three times over and ended
+    with no suggested reviewers at all, because one name in a slate of three cited a subject
+    area it could not justify. The other two names were fine. Losing them helps nobody — the
+    comment then tells a maintainer the reviewer search did not finish, which is true but
+    much less useful than two good names.
+
+    Only tried on the final attempt, so the model still gets its two chances to fix the
+    citation itself, and only when at least one reviewer survives.
+    """
+    blamed = {handle.lower() for error in errors
+              for handle in re.findall(r"Suggested reviewer (@[\w-]+)", error)}
+    if not blamed:
+        # The one non-reviewer error worth salvaging: the slate is sound, but the run did a
+        # table lookup and never ran the code-authorship pass. Three sweep PRs failed all
+        # three attempts on that alone and ended with no reviewers, which serves nobody —
+        # the names were valid maintainers. Keep them, and say in the evidence that the pass
+        # is missing so the gap stays visible instead of being silently forgiven.
+        if all("code-authorship pass" in error for error in errors) and candidate.get("suggested_reviewers"):
+            kept = dict(candidate)
+            evidence = dict(kept.get("evidence") or {})
+            evidence["reviewers"] = (
+                str(evidence.get("reviewers", "")).rstrip(". ")
+                + ". (The code-authorship pass was not run for this slate, so it is "
+                  "maintainer-table only; a contributor who wrote this code may be missing.)"
+            )
+            kept["evidence"] = evidence
+            print("Keeping a maintainer-table-only slate; the blame pass was skipped.", flush=True)
+            return kept
+        return None
+    kept = [item for item in candidate.get("suggested_reviewers") or []
+            if str(item.get("handle", "")).lower() not in blamed]
+    if not kept:
+        return None
+    trimmed = dict(candidate)
+    trimmed["suggested_reviewers"] = kept
+    if validator(trimmed, *validator_args):
+        return None
+    print(f"Dropped {len(blamed)} unjustifiable reviewer suggestion(s); keeping "
+          f"{len(kept)} that validate.", flush=True)
+    return trimmed
+
+
+def stamp_maintainer_membership(candidate, maintainer_table):
+    """Set `in_maintainer_table` from the table, whatever the model said.
+
+    Membership is a lookup, not a judgment — the caller is holding the parsed contribute.md
+    table, so asking the model to report it and then bouncing the whole tier when it forgets
+    the field spends a full re-run on a fact already in hand. It was the single most common
+    bounce in the sweep. Overriding rather than merely filling also closes the older failure
+    where a non-listed contributor got called a maintainer: the table is now the only source.
+    """
+    for reviewer in candidate.get("suggested_reviewers") or []:
+        handle = str(reviewer.get("handle") or "").lstrip("@").lower()
+        if handle:
+            reviewer["in_maintainer_table"] = handle in (maintainer_table or {})
+
+
 def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
     """Run one tier's skill and return its validated, normalized fragment.
 
@@ -1756,6 +1942,7 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
         maintainer_areas = {area.lower() for entry in maintainer_table.values() for area in entry.get("areas", [])}
     pending_dir = pr_artifact_path(workspace, repo, number).parent / ".pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
+    attempt_stats = []
     feedback = ""
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
@@ -1771,6 +1958,7 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
             + f"\nWrite the machine-readable JSON result to: {pending_json}\n\n"
             f"{feedback}"
         )
+        attempt_started = time.monotonic()
         try:
             output = run_pi(skill, prompt, workspace, base_ref=base_ref)
         except SystemExit as exc:
@@ -1778,6 +1966,17 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
                 raise
             print(f"Pi run failed (exit {exc.code}); retrying tier {tier}.", flush=True)
             continue
+        attempt_seconds = round(time.monotonic() - attempt_started, 1)
+        stats = dict(PI_RUN_STATS)
+        stats.update({
+            "repo": repo, "pr_number": number, "tier": tier, "attempt": attempt,
+            "seconds": attempt_seconds,
+            "model_seconds": round(max(0.0, attempt_seconds - stats.get("tool_seconds", 0.0)), 1),
+            "tool_seconds": round(stats.get("tool_seconds", 0.0), 1),
+            "prompt_chars": len(prompt),
+            "skill_chars": skill_prompt_chars(skill),
+        })
+        attempt_stats.append(stats)
         if not pending_json.exists() and write_json_artifact_from_output(pending_json, output):
             print(f"Wrote {tier} artifact from Pi output: {pending_json}")
         errors, candidate, artifact_raw = [], None, ""
@@ -1791,122 +1990,109 @@ def run_pr_tier(workspace, repo, meta, tier, base_ref, requirement=None):
                 if tier == "triage":
                     errors = validator(candidate, author, maintainer_areas)
                 elif tier == "reviewers":
+                    stamp_maintainer_membership(candidate, maintainer_table)
                     errors = validator(candidate, author, requirement, maintainer_table)
                 else:
                     errors = validator(candidate, author)
         else:
             errors.append(f"Expected {tier} JSON file was not created: {pending_json}")
+        attempt_stats[-1]["errors"] = len(errors)
+        attempt_stats[-1]["error_kinds"] = [error.split(".")[0][:70] for error in errors[:3]]
         if not errors:
+            record_timings(workspace, attempt_stats)
             return candidate
         error_list = "\n".join(f"- {error}" for error in errors)
         if attempt == max_attempts:
+            if tier == "reviewers" and candidate:
+                salvaged = salvage_reviewer_slate(
+                    candidate, errors, (author, requirement, maintainer_table), validator
+                )
+                if salvaged is not None:
+                    record_timings(workspace, attempt_stats)
+                    return salvaged
+            record_timings(workspace, attempt_stats)
             raise SystemExit(f"PR {tier} failed validation after {max_attempts} attempts:\n{error_list}")
         print(f"\nTier {tier} attempt {attempt} failed validation; asking Pi to revise:\n{error_list}\n", flush=True)
         feedback = build_release_review_feedback(error_list, artifact_raw)
     raise SystemExit(f"PR {tier} produced no usable artifact.")
 
 
-def pr_gate_after_triage(triage):
-    """contribute.md Reviewer Expectation 1-2: is this PR in a shape worth reviewing?
-
-    Bundling outranks a description omission. Both checks can see the same undescribed
-    extra work, and asking an author to both describe it and split it is two contradictory
-    to-dos for one problem — so when the PR is going to be split, the split is the finding
-    and the descriptions of the resulting PRs are a question for those PRs.
-    """
-    if triage["focus"]["verdict"] == "bundled":
-        return "the PR bundles unrelated changes"
-    if triage["description_check"]["verdict"] != "accurate":
-        verdict = triage["description_check"]["verdict"]
-        return (
-            "the PR description is missing"
-            if verdict == "missing"
-            else "the PR description does not match the diff"
-        )
-    return None
-
-
-def pr_gate_after_quality(quality):
-    """Reviewer Expectation 3-5: work the author owes before a human should read the code."""
-    reasons = []
-    if quality["documentation"]["status"] == "gaps":
-        reasons.append(f"{len(quality['documentation']['gaps'])} documentation gap(s)")
-    if quality["testing"]["status"] == "gaps":
-        reasons.append(f"{len(quality['testing']['gaps'])} testing gap(s)")
-    if quality["alignment_flags"]:
-        reasons.append(f"{len(quality['alignment_flags'])} alignment issue(s)")
-    return ", ".join(reasons) or None
-
-
 def generate_pr_review(workspace, repo, meta):
+    """Run all three tiers and return the stored artifact.
+
+    The tiers used to be gated: a bad description stopped the review before it read the
+    docs, and gaps stopped it before it named a reviewer. That produced a comment with more
+    "not evaluated" in it than findings, and an author who fixed the description had no way
+    to ask for the rest — editing a PR body does not move the head SHA, so nothing re-ran.
+    Every tier now runs on every PR, so one review is the whole answer: every to-do the
+    author owes, and who should look once they are done.
+    """
     number = meta["number"]
     base_ref = meta.get("baseRefName") or load_config(workspace).get("branch") or "main"
+    setup_started = time.monotonic()
     refresh_project_docs(workspace, repo, base_ref)
+    # Every `review-pr` is its own process, so the in-process _REFRESHED_DOCS guard never
+    # helps a sweep — this cost is paid once per PR, not once per run.
+    docs_seconds = round(time.monotonic() - setup_started, 1)
     started = time.monotonic()
 
-    triage = run_pr_tier(workspace, repo, meta, "triage", base_ref)
-    data = dict(triage)
-    tier_reached, stopped_at, gate_reason = "triage", None, None
+    tier_started = time.monotonic()
+    data = dict(run_pr_tier(workspace, repo, meta, "triage", base_ref))
+    triage_seconds = round(time.monotonic() - tier_started, 1)
 
-    blocked = pr_gate_after_triage(triage)
-    if blocked:
-        stopped_at, gate_reason = "triage", blocked
-        print(f"PR #{number}: stopped after triage — {blocked}.", flush=True)
+    tier_started = time.monotonic()
+    quality = run_pr_tier(workspace, repo, meta, "quality", base_ref)
+    quality_seconds = round(time.monotonic() - tier_started, 1)
+    for key in ("alignment_flags", "documentation", "testing", "breaking_changes"):
+        data[key] = quality[key]
+    data["evidence"].update(quality.get("evidence", {}))
+
+    # The slate is a suggestion, and losing triage and quality — ten minutes of work and the
+    # entire to-do list — because tier 3 could not satisfy its validator is a bad trade. It
+    # was a trade nobody made while the tiers were gated, since tier 3 only ran on a PR that
+    # was already clean; now it runs on every one. A tier that will not validate is recorded
+    # as not having answered, never as having found nobody.
+    tier_started = time.monotonic()
+    try:
+        reviewers = run_pr_tier(
+            workspace, repo, meta, "reviewers", base_ref, requirement=data.get("review_requirement")
+        )
+    except SystemExit as exc:
+        if exc.code in (130, None):
+            raise
+        print(f"PR #{number}: {exc}\nKeeping the review without a reviewer slate.", flush=True)
+        data["suggested_reviewers"] = []
+        data["maintainer_needed_areas"] = []
+        data["reviewer_search"] = "failed"
     else:
-        quality = run_pr_tier(workspace, repo, meta, "quality", base_ref)
-        for key in ("alignment_flags", "documentation", "testing", "breaking_changes"):
-            data[key] = quality[key]
-        data["evidence"].update(quality.get("evidence", {}))
-        tier_reached = "quality"
-        owed = pr_gate_after_quality(quality)
-        # An uncleared break is the one author obligation that still needs a maintainer:
-        # only a listed maintainer can sign it off, so withholding the slate would deadlock.
-        uncleared = [c for c in quality["breaking_changes"] if not breaking_change_cleared(c)]
-        if meta.get("isDraft"):
-            reason = "this PR is still a draft, so no human reviewer is assigned yet"
-            if owed:
-                reason += f", and the author owes {owed}"
-            stopped_at, gate_reason = "quality", reason
-            print(f"PR #{number}: draft — skipping reviewer assignment.", flush=True)
-        elif owed and not uncleared:
-            stopped_at, gate_reason = "quality", f"the author owes {owed}"
-            print(f"PR #{number}: stopped after quality — author owes {owed}.", flush=True)
-        else:
-            if owed and uncleared:
-                print(
-                    f"PR #{number}: {owed} outstanding, but an uncleared breaking change needs a "
-                    "maintainer sign-off — assigning reviewers anyway.",
-                    flush=True,
-                )
-            reviewers = run_pr_tier(
-                workspace, repo, meta, "reviewers", base_ref, requirement=data.get("review_requirement")
-            )
-            data["suggested_reviewers"] = reviewers["suggested_reviewers"]
-            data["maintainer_needed_areas"] = reviewers["maintainer_needed_areas"]
-            data["evidence"].update(reviewers.get("evidence", {}))
-            tier_reached = "reviewers"
+        data["suggested_reviewers"] = reviewers["suggested_reviewers"]
+        data["maintainer_needed_areas"] = reviewers["maintainer_needed_areas"]
+        data["evidence"].update(reviewers.get("evidence", {}))
 
-    if tier_reached == "triage":
-        data["documentation"] = {"status": "not-evaluated", "gaps": []}
-        data["testing"] = {"status": "not-evaluated", "gaps": []}
-        data["alignment_flags"] = []
-        data["breaking_changes"] = []
     data = normalize_pr_review_data(data)
-    data["tier_reached"] = tier_reached
-    data["gate"] = {"stopped_at": stopped_at, "reason": gate_reason or ""}
     data["repo"] = repo
     data["pr_number"] = number
     data["head_sha"] = meta.get("headRefOid", "")
     data["title"] = meta.get("title", "")
     data["author"] = pr_author_handle(meta)
     data["generation_seconds"] = round(time.monotonic() - started, 1)
+    data["phase_seconds"] = {
+        "docs_refresh": docs_seconds,
+        "triage": triage_seconds,
+        "quality": quality_seconds,
+        "reviewers": round(time.monotonic() - tier_started, 1),
+    }
+    record_timings(workspace, [{
+        "repo": repo, "pr_number": number, "tier": "TOTAL",
+        "seconds": data["generation_seconds"], **data["phase_seconds"],
+    }])
 
     json_file = pr_artifact_path(workspace, repo, number)
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     store_pr_review(workspace, repo, meta, data, json_file)
     reviewers_line = ", ".join(item["handle"] for item in data.get("suggested_reviewers", [])) or "none"
     print(
-        f"PR #{number}: tier {tier_reached}, attention {data['attention_level']}, "
+        f"PR #{number}: {len(pr_todo_items(data))} to-do(s), attention {data['attention_level']}, "
         f"rung {data['review_requirement']['rung'] or 'n/a'}, suggested reviewers: {reviewers_line}",
         flush=True,
     )
@@ -1948,59 +2134,26 @@ def attention_requirement_reason(requirement):
     return ""
 
 
-def attention_todo_reasons(data):
-    """The attention reasons that are work someone owes, minus the rung requirement.
+def attention_meaning(data):
+    """One sentence for what this PR's attention level asks of a reviewer.
 
-    The requirement is stated once, in the meaning; repeating it in the parenthetical is
-    how the same PR ended up telling the reader two different things about its rung. The
-    "needs " prefix also catches rows stored before this wording, whose rung reason the
-    exact match would miss; no to-do reason is phrased that way — they are all counts of
-    work outstanding.
+    Level and rung are different questions — how much scrutiny, versus who has to look —
+    and a level maps to more than one rung, so a fixed sentence per level could only ever
+    describe one of them. That is how a two-with-expert PR came to be labelled "any
+    reviewer can take it". Both halves are read off the rung instead.
     """
-    requirement = attention_requirement_reason(data.get("review_requirement"))
-    return [
-        reason
-        for reason in data.get("attention_reasons") or []
-        if reason != requirement and not str(reason).startswith("needs ")
-    ]
+    reasons = data.get("attention_reasons") or []
+    joiner = "; and " if any("," in reason for reason in reasons) else ", and "
+    return joiner.join(reasons) or "nothing flagged; a standard review pass is enough"
 
 
-def attention_meaning(data, with_todos=True):
-    """One sentence for what this PR's attention level asks of a reviewer."""
-    who = attention_requirement_reason(data.get("review_requirement"))
-    todos = attention_todo_reasons(data) if with_todos else []
-    if who and todos:
-        return f"{who}, and the to-dos below need resolving before approval"
-    if who:
-        return who
-    if todos:
-        return "the to-dos below need resolving before approval"
-    return "nothing flagged; a standard review pass is enough"
-
-
-def attention_display(data, terse=False):
-    """Level, what it asks of a reviewer, and — unless the caller already said it — why.
-
-    The PR comment goes terse on a gated review, where the gate's own line has just said both
-    halves: "the author owes 3 documentation gap(s), 1 testing gap(s)" followed by "and the
-    to-dos below need resolving before approval (2 alignment issue(s); 3 documentation
-    gap(s); 1 testing gap(s))" is one fact told three times, in three orders.
-    """
-    level = data.get("attention_level", "")
-    meaning = attention_meaning(data, with_todos=not terse)
-    text = f"{level} — {meaning}" if meaning else level
-    reasons = "" if terse else "; ".join(attention_todo_reasons(data))
-    if reasons:
-        text += f" ({reasons})"
-    return text
+def attention_display(data):
+    """Level and what it asks of a reviewer, as the one line both renderers print."""
+    return f"{data.get('attention_level', '')} — {attention_meaning(data)}"
 
 
 def display_handle(handle):
     return str(handle or "").lstrip("@")
-
-
-def breaking_change_cleared(change):
-    return change.get("documented") is True and change.get("maintainer_approval") == "approved"
 
 
 def breaking_change_status(change):
@@ -2018,16 +2171,12 @@ def breaking_change_status(change):
 def rung_notes(data):
     """Why this PR sits on its rung, as {"why", "notes"} — the one source both renderers use.
 
-    This used to be a "Review needed" section of its own, which restated the rung three
-    times over: the attention line already names it in the guide's words, and
-    attention_requirement_reason folds the expert areas into the two-with-expert clause
-    and the handle into the named-approver one. Each restatement is dropped only for the
-    rung that actually duplicates it — a named-approver PR's expert areas appear nowhere
-    else, so dropping them wholesale would lose them. What is left is the one thing the
-    attention line cannot carry: the surface and rationale that put the PR on that rung.
-
-    Computed here rather than in each renderer because the dashboard and the posted comment
-    have to say the same thing, and two copies of a rule this conditional will not stay equal.
+    The attention line already names the rung in the guide's words, and
+    attention_requirement_reason folds the expert areas into the two-with-expert clause and
+    the handle into the named-approver one. Each restatement is dropped only for the rung
+    that actually duplicates it — a named-approver PR's expert areas appear nowhere else,
+    so dropping them wholesale would lose them. What is left is the one thing the attention
+    line cannot carry: the surface and rationale that put the PR on that rung.
     """
     requirement = data.get("review_requirement") or {}
     rung = requirement.get("rung")
@@ -2036,6 +2185,7 @@ def rung_notes(data):
     why = ". ".join(
         part for part in (requirement.get("surface"), requirement.get("rationale")) if part
     )
+    why = why[:1].upper() + why[1:]
     notes = []
     areas = ", ".join(requirement.get("expert_areas") or [])
     if areas and rung != "two-with-expert":
@@ -2045,264 +2195,339 @@ def rung_notes(data):
     return {"why": why, "notes": notes}
 
 
-def rung_rationale_lines(data):
-    """rung_notes rendered as the comment's markdown, under the attention level."""
-    rung = rung_notes(data)
-    lines = ["", f"Why this rung: {rung['why']}"] if rung["why"] else []
-    for note in rung["notes"]:
-        lines += ["", f"- {note}"]
-    return lines
+def pr_todo_items(data):
+    """Every to-do this review produced, as one list in the order the checks are explained.
 
-
-def coverage_clause(coverage, tier):
-    """Whether the rung this PR sits on is already answered, said where the rung is stated.
-
-    This used to sit on the readiness line, which meant a PR read "no reviewers are suggested,
-    these two cover it" and then, on the very next line, "needs 2 reviewers including an
-    expert in X" — the requirement and its answer split across two lines that each told half
-    of it. The requirement is the attention line's business, so its answer belongs there too.
-
-    Handles stay bare, like the slate's, so naming who is covering a PR does not ping them.
+    The comment leads with this list because it is the only part of the review the author
+    has to act on, and a to-do the author has to assemble from six folded sections is a
+    to-do nobody does. Each item keeps the section it came from and the notes that justify
+    it, so the Explanation below can regroup them without a second pass over the artifact.
     """
-    if not pr_tier_ran(tier, "reviewers"):
-        return ""
-    if not (coverage or {}).get("adequate"):
-        # Nothing to add: the Suggested reviewers fold below already says the rung is short,
-        # and repeating it here is the same doubling this clause exists to remove.
-        return ""
-    who = ", ".join(display_handle(login) for login in (coverage or {}).get("who") or [])
-    # Requested and not yet answering staffs the rung without satisfying it, and the sentence
-    # has to say which: "reviewed by" would claim work nobody has done on a PR still Waiting.
-    verb = "Already on this PR" if (coverage or {}).get("pending") else "Covered by"
-    return f" {verb}: {who}." if who else ""
+    items = []
+
+    def add(section, action, fallback, subs=()):
+        items.append({
+            "section": section,
+            "action": action or fallback,
+            "subs": [(label, value) for label, value in subs if value],
+        })
+
+    description = data.get("description_check") or {}
+    discrepancies = description.get("discrepancies") or []
+    if description.get("verdict") == "missing" and not discrepancies:
+        add("description", "", "Describe the change in the PR body — it has no usable description.")
+    for entry in discrepancies:
+        add("description", entry.get("action"), "Reconcile the description with the diff.",
+            (("Described", entry.get("described")), ("In the diff", entry.get("actual")),
+             ("Reference", entry.get("evidence"))))
+
+    focus = data.get("focus") or {}
+    if focus.get("verdict") == "bundled":
+        add("focus", focus.get("action"), "Split the unrelated work into its own PR.",
+            (("Why", focus.get("rationale")),))
+
+    for flag in data.get("alignment_flags") or []:
+        source = " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
+        add("alignment", flag.get("action"), flag.get("concern"),
+            (("Why", f"{source}: {flag.get('concern') or ''}" if source else flag.get("concern")),
+             ("Reference", flag.get("evidence"))))
+
+    for section in ("documentation", "testing"):
+        for gap in (data.get(section) or {}).get("gaps") or []:
+            add(section, gap.get("action"), gap.get("what"),
+                (("Gap", gap.get("what")), ("Where", gap.get("where")), ("Why", gap.get("policy"))))
+
+    # A break the author has documented asks nothing more of them. Getting a maintainer to
+    # sign it off is not an author action at all — the review *is* the sign-off, and the
+    # people who can give it are already named in the Review suggestion. Asking the author
+    # to "obtain approval from @a or @b" put those two handles in the checklist and in the
+    # reviewer slate, and told the author to go do the thing the reviewer is there to do.
+    for change in data.get("breaking_changes") or []:
+        if change.get("documented") is True:
+            continue
+        summary = f"({change.get('surface', '')}) {change.get('change', '')}"
+        add("breaking", change.get("action"), "Document this break where its surface is documented.",
+            (("Change", summary), ("Status", breaking_change_status(change))))
+
+    return merge_duplicate_todos(items)
 
 
-def ready_line(coverage):
-    """The "Ready for review" sentence. Who must review is the attention line's business."""
-    return "**Ready for review** — the checks below passed."
+SIGNIFICANT_WORD = re.compile(r"[a-z0-9_./-]{4,}")
 
 
-PR_TIER_ORDER = ("triage", "quality", "reviewers")
+def task_tokens(text):
+    """The vocabulary of a task, normalized so wording differences stop hiding a repeat.
 
-
-def pr_tier_ran(tier_reached, tier):
-    """Did the review get far enough to have actually looked at this check?"""
-    order = list(PR_TIER_ORDER)
-    return order.index(tier_reached or "reviewers") >= order.index(tier)
-
-
-def pr_not_evaluated(gate):
-    """What a section says when its tier never ran.
-
-    "none found" would be a lie about a check nobody performed, so a gated section names the
-    gate instead. This is the whole reason the comment cannot simply omit the section. The
-    verdict itself lives on the summary line, so this is only the explanation under it.
+    "Add a note to docs/dev/getting-started.md documenting the macOS llamacpp-only model
+    visibility restriction" and "Document the macOS-only llamacpp model visibility
+    restriction in docs/dev/getting-started.md" are one edit. Compared as raw words they
+    share barely half their vocabulary, because of `documenting`/`document`,
+    `macOS`/`macOS-only` and `llamacpp-only`/`llamacpp`. Splitting compounds and clipping
+    each word to its stem puts them where they belong.
     """
-    where = f"the {gate.get('stopped_at')} gate" if gate.get("stopped_at") else "an earlier tier"
-    why = f" because {gate['reason']}" if gate.get("reason") else ""
-    return f"The review stopped at {where}{why}. This check runs once that is resolved."
+    out = set()
+    for word in SIGNIFICANT_WORD.findall(str(text or "").lower()):
+        # A sentence-final period rides along on the last word, which is how
+        # "getting-started.md" and "getting-started.md." counted as different tokens.
+        word = word.strip("./-_")
+        if len(word) < 4:
+            continue
+        out.add(word)
+        for part in re.split(r"[-_/.]+", word):
+            if len(part) >= 4:
+                out.add(part[:6])
+    return out
 
 
-def pr_todo_lines(items):
-    """One checklist entry per finding, its supporting notes indented underneath."""
+def same_task(first, second, threshold=0.7):
+    """Do these two to-dos ask for the same edit?"""
+    left, right = task_tokens(first), task_tokens(second)
+    if not left or not right:
+        return False
+    return len(left & right) / min(len(left), len(right)) >= threshold
+
+
+def says_the_same(first, second, threshold=0.75):
+    """Do these two pieces of prose carry the same facts?
+
+    Used to keep the comment from stating one thing twice in adjacent lines. Compared on
+    significant words rather than characters, so a restatement in different word order
+    still matches, and measured against the shorter of the two, so a sentence that merely
+    contains another one counts as repeating it.
+    """
+    left = set(SIGNIFICANT_WORD.findall(str(first or "").lower()))
+    right = set(SIGNIFICANT_WORD.findall(str(second or "").lower()))
+    if not left or not right:
+        return False
+    return len(left & right) / min(len(left), len(right)) >= threshold
+
+
+def merge_duplicate_todos(items):
+    """One task, one checkbox — even when two checks each reported it.
+
+    #3169 filed "add conformance test cases for the new comparators" as both a
+    documentation gap and a testing gap, so the author got the same sentence twice with
+    two different justifications under it. The justifications are both worth keeping; the
+    second checkbox is not. The survivor keeps the earliest section, so the reasoning stays
+    where the reader met the task.
+    """
+    merged = []
+    for item in items:
+        # Only across sections. Within one section the check deliberately enumerated
+        # separate items — #2464's `--fit` and `-ngl` to-dos are near-identical sentences
+        # about two different flags, and merging them would lose one of the flags.
+        twin = next((kept for kept in merged
+                     if kept["section"] != item["section"]
+                     and same_task(kept["action"], item["action"])), None)
+        if twin is None:
+            merged.append(item)
+            continue
+        for sub in item["subs"]:
+            if sub not in twin["subs"]:
+                twin["subs"].append(sub)
+    return merged
+
+
+def pr_todo_notes(items):
+    """A section's to-dos as the Explanation renders them: the action, then its evidence.
+
+    A note the action already contains is dropped. "Add a regression test to
+    test/server_llm.py that exercises the ROCm pre-flight check" followed by
+    "Where: test/server_llm.py" is the path twice in two lines, and the second one is the
+    line a reader has to check before realising it told them nothing.
+    """
     lines = []
     for item in items:
-        lines.append(f"- [ ] {item.get('action') or item.get('fallback') or ''}")
-        for label, value in item.get("subs") or []:
-            if value:
-                lines.append(f"  - {label}: {value}")
+        lines.append(f"- {item['action']}")
+        for label, value in item["subs"]:
+            if str(value).strip() in item["action"]:
+                continue
+            lines.append(f"  - {label}: {value}")
     return lines
-
-
-def pr_section(title, verdict, body, expanded):
-    """One collapsible section: its answer on the summary line, its evidence folded inside.
-
-    A clean bill is a line, not a page. The summary carries the whole answer, so a comment on
-    a PR with nothing wrong is a short list of one-liners rather than screens of reasoning
-    nobody asked for — and the reasoning is still one click away when somebody does.
-
-    Findings default to open. A to-do behind a fold is a to-do nobody does, and the point of
-    the comment is the author acting on it.
-    """
-    body = [line for line in body if line is not None]
-    while body and not body[0].strip():
-        body.pop(0)
-    while body and not body[-1].strip():
-        body.pop()
-    head = f"<details{' open' if expanded else ''}><summary>{title}: <b>{verdict}</b></summary>"
-    if not body:
-        return ["", f"{head}</details>"]
-    # GitHub only renders markdown inside <details> when blank lines separate it from the tags.
-    return ["", head, "", *body, "", "</details>"]
 
 
 def pr_checked_line(evidence, key):
     """The "Checked:" note that earns a clean bill — what was inspected to find nothing."""
     value = (evidence or {}).get(key)
-    return ["", f"Checked: {value}"] if value else []
+    return [f"Checked: {value}"] if value else []
+
+
+def md_blocks(*chunks):
+    """Join blocks of lines with the blank line GitHub needs between them.
+
+    Without it a rationale and the "Checked:" note under it run together into one
+    paragraph, and a list that follows prose is not always recognised as a list.
+    """
+    out = []
+    for chunk in chunks:
+        chunk = [line for line in chunk if line]
+        if not chunk:
+            continue
+        if out:
+            out.append("")
+        out += chunk
+    return out
+
+
+def pr_explanation_sections(data, todos):
+    """(title, verdict, lines) per check, in the order the to-do list draws from them.
+
+    A section whose status is `not-evaluated` is dropped rather than printed: it is a row
+    from before the tiers stopped gating, and a paragraph explaining that nobody looked is
+    exactly the text this comment stopped spending.
+    """
+    evidence = data.get("evidence") or {}
+    by_section = {}
+    for item in todos:
+        by_section.setdefault(item["section"], []).append(item)
+    sections = []
+
+    def add(title, section, verdict, intro, checked_key, listed=False):
+        if verdict == "not-evaluated":
+            return
+        items = by_section.get(section) or []
+        # "Checked:" is what earns a *clean* bill. A section that is listing something has
+        # already answered, and its evidence line is written for the other case — which is
+        # how #2746 came to print "No breaking changes" directly beneath the breaking
+        # change it had just listed.
+        if listed:
+            checked_key = None
+        # "Checked:" earns a clean bill by naming what was inspected. When it only restates
+        # the paragraph above it — which is what a description check's notes and evidence
+        # kept doing — it is the same sentence twice, and the second one is the one the
+        # reader spends effort on before finding it new nothing.
+        checked = pr_checked_line(evidence, checked_key) if checked_key else []
+        if checked and any(says_the_same(line, checked[0]) for line in intro if line):
+            checked = []
+        sections.append((title, verdict, md_blocks(
+            intro,
+            pr_todo_notes(items) if items else checked,
+        )))
+
+    description = data.get("description_check") or {}
+    add("Description vs. the diff", "description", description.get("verdict") or "not assessed",
+        [description.get("notes")], "description")
+
+    focus = data.get("focus") or {}
+    add("Focus", "focus", focus.get("verdict") or "not assessed",
+        [] if focus.get("verdict") == "bundled" else [focus.get("rationale")], "focus")
+
+    flags = data.get("alignment_flags") or []
+    add("Alignment", "alignment", f"{len(flags)} to resolve" if flags else "none found",
+        [], "alignment")
+
+    for title, section in (("Documentation", "documentation"), ("Testing", "testing")):
+        block = data.get(section) or {}
+        add(title, section, block.get("status") or "unknown", [], section)
+
+    breaking = data.get("breaking_changes") or []
+    undocumented = by_section.get("breaking") or []
+    unapproved = [change for change in breaking if change.get("maintainer_approval") != "approved"]
+    # A documented break has no to-do to carry its status, so it states it here instead —
+    # including "awaiting sign-off", which is a fact about the review, not a task.
+    noted = [f"- ({change.get('surface', '')}) {change.get('change', '')} — {breaking_change_status(change)}"
+             for change in breaking if change.get("documented") is True]
+    if not breaking:
+        verdict = "none found"
+    elif undocumented:
+        verdict = f"{len(undocumented)} to document"
+    elif unapproved:
+        verdict = f"{len(unapproved)} awaiting sign-off"
+    else:
+        verdict = "all cleared"
+    add("Breaking changes", "breaking", verdict, noted, "breaking_changes", listed=bool(breaking))
+
+    return sections
+
+
+def pr_explanation_fold(title, blocks):
+    """One collapsed <details> holding every block of reasoning.
+
+    The reasoning is one click away rather than absent: an author acting on the to-dos
+    above rarely needs it, and a maintainer auditing the review always does. GitHub only
+    renders markdown inside <details> when blank lines separate it from the tags.
+    """
+    body = []
+    for heading, lines in blocks:
+        body += ["", heading] + (["", *lines] if lines else [])
+    if not body:
+        return []
+    return ["", f"<details><summary>{title}</summary>"] + body + ["", "</details>"]
+
+
+def pr_reviewer_lines(data, pr_number, coverage):
+    """Who should look at this PR, or who already is."""
+    if data.get("reviewer_search") == "failed":
+        # "none found" would be a clean bill for a search that never returned one.
+        return [f"Suggested reviewers: the reviewer search did not finish. "
+                f"Rerun `repo-manager review-pr {pr_number}` to try again."]
+    who = ", ".join(display_handle(login) for login in (coverage or {}).get("who") or [])
+    if (coverage or {}).get("adequate") and who:
+        # Naming a slate for a PR that already has its reviewers is noise, and on a PR
+        # whose reviewers are already requested it is noise that names those same people.
+        verb = "Already on this PR" if (coverage or {}).get("pending") else "Already reviewed by"
+        return [f"{verb}: {who}."]
+    reviewers = data.get("suggested_reviewers") or []
+    areas = data.get("maintainer_needed_areas") or []
+    if not reviewers and not areas:
+        return ["Suggested reviewers: none found."]
+    lines = ["Suggested reviewers:", ""]
+    for item in reviewers:
+        note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
+        lines.append(
+            f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
+            f" — {item.get('reason', '')}"
+        )
+    lines += [f"- No maintainer listed for: {area}" for area in areas]
+    return lines
 
 
 def render_pr_review_comment(repo, pr_number, data, head_sha, coverage=None):
     """The review rendered as its PR comment.
 
     This is the single artifact: the dashboard previews exactly this text and the Post
-    review comment button submits exactly this text. It used to be a deliberately lean
-    subset of what the dashboard showed, which meant the two could — and did — disagree
-    about what the review had found, and no amount of aligning them section by section
-    fixed that. There is now one renderer, so there is nothing left to align.
+    review comment button submits exactly this text. There is one renderer, so the two
+    cannot disagree about what the review found.
+
+    Three things and nothing else are visible without a click: whether the PR is ready, the
+    author's to-do list, and who should review it. Everything that justifies those — the
+    per-check verdicts, the evidence behind each to-do, the rung's rationale — goes in the
+    two folds. The comment used to lead with its own disclaimer and put a section-by-section
+    argument between the reader and the list of things to do; the disclaimer is now the
+    footer, where a reader who wants it can still find it.
     """
     marker_payload = json.dumps(
         {"repo": repo, "pr_number": pr_number, "rubric_version": PR_RUBRIC_VERSION},
         sort_keys=True,
     )
-    tier = data.get("tier_reached", "reviewers")
-    gate = data.get("gate") or {}
-    stopped_at = gate.get("stopped_at")
-    evidence = data.get("evidence") or {}
-    lines = [
-        f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->",
-        "**[AI-assisted review]** Automated pre-review from repo-manager — flags for the human reviewer, not a replacement for one.",
-        "",
-    ]
-    # One clause of rationale each. Which checks were skipped is on their own folded lines,
-    # and what the author owes is enumerated in the reason itself.
-    if stopped_at == "triage":
-        lines += [
-            f"**Not ready for review yet** — {gate.get('reason', '')}. "
-            "The remaining checks run once this is resolved.",
-        ]
-    elif stopped_at == "quality":
-        lines += [
-            f"**Not ready for review yet** — {gate.get('reason', '')}. "
-            "contribute.md asks a PR to meet the Reviewer Expectation before a reviewer is assigned.",
-        ]
+    todos = pr_todo_items(data)
+    lines = [f"{PR_REVIEW_COMMENT_MARKER} {marker_payload} -->"]
+
+    if todos:
+        lines += ["**Not ready for review yet**", "", "**To-dos**", ""]
+        lines += [f"- [ ] {item['action']}" for item in todos]
     else:
-        lines += [ready_line(coverage)]
-    lines += [
-        "",
-        f"**Attention level:** {attention_display(data, terse=bool(stopped_at)).rstrip('.')}."
-        f"{coverage_clause(coverage, tier)}",
-    ] + rung_rationale_lines(data)
+        lines += ["**Ready for review**", "", "No to-dos."]
 
-    description = data.get("description_check") or {}
-    verdict = description.get("verdict") or "not assessed"
-    todos = []
-    if verdict == "missing" and not (description.get("discrepancies") or []):
-        todos.append({"action": "Ask the author to describe the change — the PR has no usable description."})
-    for item in description.get("discrepancies") or []:
-        todos.append({
-            "action": item.get("action"),
-            "fallback": "Reconcile the description with the diff.",
-            "subs": [("Described", item.get("described")), ("In the diff", item.get("actual")),
-                     ("Reference", item.get("evidence"))],
-        })
-    lines += pr_section(
-        "Author's description vs. the diff", verdict,
-        ([description["notes"]] if description.get("notes") else []) + (pr_todo_lines(todos) if todos else []),
-        expanded=verdict not in ("accurate", "not assessed"),
-    )
+    lines += pr_explanation_fold("Explanation", [
+        (f"**{title}: {verdict}**", body)
+        for title, verdict, body in pr_explanation_sections(data, todos)
+    ])
 
-    focus = data.get("focus") or {}
-    verdict = focus.get("verdict") or "not assessed"
-    bundled = verdict == "bundled"
-    lines += pr_section(
-        "Focus", verdict,
-        ([focus["rationale"]] if focus.get("rationale") else [])
-        + (pr_todo_lines([{"action": focus.get("action"),
-                           "fallback": "Split the unrelated work into its own PR."}]) if bundled else [])
-        + ([] if bundled else pr_checked_line(evidence, "focus")),
-        expanded=bundled,
-    )
-
-    quality_ran = pr_tier_ran(tier, "quality")
-    flags = data.get("alignment_flags") or []
-    if not quality_ran:
-        lines += pr_section("Alignment issues", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
-    else:
-        lines += pr_section(
-            "Alignment issues", "none found" if not flags else f"{len(flags)} to resolve",
-            pr_checked_line(evidence, "alignment") if not flags else pr_todo_lines([{
-                "action": flag.get("action"),
-                "fallback": flag.get("concern"),
-                "subs": [
-                    ("Why", " — ".join(part for part in (flag.get("doc"), flag.get("section")) if part)
-                            + ": " + (flag.get("concern") or "")
-                            if (flag.get("doc") or flag.get("section")) else flag.get("concern")),
-                    ("Reference", flag.get("evidence")),
-                ],
-            } for flag in flags]),
-            expanded=bool(flags),
-        )
-
-    for title, key in (("Documentation", "documentation"), ("Testing", "testing")):
-        block = data.get(key) or {}
-        if not quality_ran:
-            lines += pr_section(title, "not evaluated", [pr_not_evaluated(gate)], expanded=False)
-            continue
-        gaps = block.get("gaps") or []
-        lines += pr_section(
-            title, block.get("status") or "unknown",
-            pr_todo_lines([{
-                "action": gap.get("action"),
-                "fallback": gap.get("what"),
-                "subs": [("Gap", gap.get("what")), ("Where", gap.get("where")), ("Why", gap.get("policy"))],
-            } for gap in gaps]) if gaps else pr_checked_line(evidence, key),
-            expanded=bool(gaps),
-        )
-
-    breaking = data.get("breaking_changes") or []
-    if not quality_ran:
-        lines += pr_section("Breaking changes", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
-    else:
-        unresolved = [change for change in breaking if not breaking_change_cleared(change)]
-        body = []
-        for change in breaking:
-            summary = f"({change.get('surface', '')}) {change.get('change', '')}"
-            if breaking_change_cleared(change):
-                body.append(f"- {summary} — {breaking_change_status(change)}")
-            else:
-                body += pr_todo_lines([{
-                    "action": change.get("action"),
-                    "fallback": "Document this break and get a maintainer sign-off.",
-                    "subs": [("Change", summary), ("Status", breaking_change_status(change))],
-                }])
-        if not breaking:
-            body = pr_checked_line(evidence, "breaking_changes")
-        lines += pr_section(
-            "Breaking changes",
-            "none found" if not breaking else f"{len(unresolved)} to resolve" if unresolved else "all cleared",
-            body, expanded=bool(unresolved),
-        )
-
-    reviewers = data.get("suggested_reviewers") or []
-    areas = data.get("maintainer_needed_areas") or []
-    # A covered PR needs no slate, and the readiness line above has already said so. A gated
-    # one still gets the section, because "covered" and "never asked" are different answers.
-    covered = bool((coverage or {}).get("adequate"))
-    if not (covered and pr_tier_ran(tier, "reviewers")):
-        if not pr_tier_ran(tier, "reviewers"):
-            lines += pr_section("Suggested reviewers", "not evaluated", [pr_not_evaluated(gate)], expanded=False)
-        else:
-            body = []
-            for item in reviewers:
-                note = "" if item.get("in_maintainer_table") else ", not in the maintainer table"
-                body.append(
-                    f"- {display_handle(item.get('handle'))} ({item.get('subject_area', '')}{note})"
-                    f" — {item.get('reason', '')}"
-                )
-            for area in areas:
-                body.append(f"- No maintainer listed for: {area}")
-            count = len(reviewers)
-            lines += pr_section(
-                "Suggested reviewers",
-                "none" if not body else f"{count} suggested" if count else "no maintainer listed",
-                body, expanded=bool(body),
-            )
+    rung = rung_notes(data)
+    lines += ["", "**Review suggestion**", "", f"Attention level: {attention_display(data).rstrip('.')}.", ""]
+    lines += pr_reviewer_lines(data, pr_number, coverage)
+    why = md_blocks([rung["why"]], [f"- {note}" for note in rung["notes"]])
+    search = pr_checked_line(data.get("evidence"), "reviewers")
+    lines += pr_explanation_fold("Explanation", [
+        block for block in (("**Why this rung**", why), ("**Reviewer search**", search)) if block[1]
+    ])
 
     lines += [
         "",
-        f"_Reviewed at head `{(head_sha or '')[:7]}` by repo-manager (tier: {tier}). "
-        f"Regenerate with `repo-manager review-pr {pr_number}`._",
+        f"_[AI-assisted review] Automated pre-review from repo-manager — flags for the human "
+        f"reviewer, not a replacement for one. Reviewed at head `{(head_sha or '')[:7]}`; "
+        f"regenerate with `repo-manager review-pr {pr_number}`._",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -4074,6 +4299,17 @@ def cmd_release_review(args):
                 raise
             print(f"Pi run failed (exit {exc.code}); retrying with the same instructions.", flush=True)
             continue
+        attempt_seconds = round(time.monotonic() - attempt_started, 1)
+        stats = dict(PI_RUN_STATS)
+        stats.update({
+            "repo": repo, "pr_number": number, "tier": tier, "attempt": attempt,
+            "seconds": attempt_seconds,
+            "model_seconds": round(max(0.0, attempt_seconds - stats.get("tool_seconds", 0.0)), 1),
+            "tool_seconds": round(stats.get("tool_seconds", 0.0), 1),
+            "prompt_chars": len(prompt),
+            "skill_chars": skill_prompt_chars(skill),
+        })
+        attempt_stats.append(stats)
         if not pending_json.exists() and write_json_artifact_from_output(pending_json, output):
             print(f"Wrote release-review artifact from Pi output: {pending_json}")
         artifact_raw = ""
@@ -4633,6 +4869,14 @@ def print_pretty_pr_review(data):
     print(data.get("summary", ""))
     print()
 
+    todos = pr_todo_items(data)
+    print("To-Dos")
+    for item in todos:
+        print(f"- [ ] {item['action']}")
+    if not todos:
+        print("None.")
+    print()
+
     description = data.get("description_check") or {}
     if description.get("verdict"):
         print("Author's Description vs. the Diff")
@@ -4649,12 +4893,9 @@ def print_pretty_pr_review(data):
                 print(f"      Reference: {item['evidence']}")
         print()
 
-    print("Attention")
-    print(attention_display(data))
-    print()
-
+    print("Review Suggestion")
+    print(f"Attention level: {attention_display(data)}")
     requirement = data.get("review_requirement") or {}
-    print("Review needed")
     print(f"{requirement.get('rung', '')} ({requirement.get('surface', '')}): {requirement.get('rationale', '')}")
     if requirement.get("expert_areas"):
         print(f"  subject-area expertise: {', '.join(requirement['expert_areas'])}")
@@ -4714,10 +4955,10 @@ def print_pretty_pr_review(data):
         checked("breaking_changes")
     for change in breaking:
         summary = f"({change.get('surface', '')}) {change.get('change', '')}"
-        if breaking_change_cleared(change):
+        if change.get("documented") is True:
             print(f"- {summary} — {breaking_change_status(change)}")
             continue
-        print(f"- [ ] {change.get('action') or 'Document this break and get a maintainer sign-off.'}")
+        print(f"- [ ] {change.get('action') or 'Document this break where its surface is documented.'}")
         print(f"      Change: {summary}")
         print(f"      Status: {breaking_change_status(change)}")
     print()

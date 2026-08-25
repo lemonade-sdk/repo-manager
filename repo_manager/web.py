@@ -1,4 +1,5 @@
 import json
+import tempfile
 import hashlib
 import re
 import socket
@@ -84,8 +85,6 @@ def ensure_pr_schema(conn):
           attention_level TEXT NOT NULL DEFAULT '',
           review_rung TEXT NOT NULL DEFAULT '',
           reviewers_needed INTEGER NOT NULL DEFAULT 1,
-          tier_reached TEXT NOT NULL DEFAULT '',
-          gate_stopped_at TEXT NOT NULL DEFAULT '',
           documentation_status TEXT NOT NULL DEFAULT '',
           testing_status TEXT NOT NULL DEFAULT '',
           alignment_flags TEXT NOT NULL DEFAULT '[]',
@@ -433,6 +432,34 @@ def release_reviews(workspace):
 _PR_STATE_CACHE = {}
 PR_STATE_TTL_SECONDS = 60
 
+def _last_good_path(repo):
+    return Path(tempfile.gettempdir()) / f"repo-manager-pr-states-{repo.replace('/', '__')}.json"
+
+
+def last_good_pr_states(repo):
+    """The most recent successful live state, surviving a restart.
+
+    Without this, one failed `gh` call on a cold server blanks the Status column for every
+    PR — and because the in-process cache is empty at startup, restarting the UI is exactly
+    when it is most likely to happen. A slightly stale status is far better than none: the
+    column's whole job is telling you which PRs want your attention.
+    """
+    try:
+        raw = json.loads(_last_good_path(repo).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {int(number): state for number, state in raw.items()} if isinstance(raw, dict) else {}
+
+
+def save_last_good_pr_states(repo, states):
+    try:
+        _last_good_path(repo).write_text(
+            json.dumps({str(k): v for k, v in states.items()}), encoding="utf-8"
+        )
+    except (OSError, TypeError):
+        pass
+
+
 def live_pr_states(repo, numbers):
     """Current state, base branch, and review activity for the given PRs, in one cached GraphQL call.
 
@@ -468,7 +495,7 @@ def live_pr_states(repo, numbers):
         )
         payload = json.loads(proc.stdout) if proc.stdout else {}
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return cached[1] if cached else {}
+        return cached[1] if cached else last_good_pr_states(repo)
     data = payload.get("data") or {}
     viewer = (data.get("viewer") or {}).get("login", "")
     repository = data.get("repository") or {}
@@ -489,13 +516,15 @@ def live_pr_states(repo, numbers):
             if login_of(node)
         ]
         comments = [
-            {"login": login_of(node), "at": node.get("createdAt", "")}
+            {"login": login_of(node), "at": node.get("createdAt", ""), "kind": "comment"}
             for node in ((entry.get("comments") or {}).get("nodes")) or []
             if login_of(node)
         ]
+        # Kept apart from conversation comments: a reply inside a review thread is easy to
+        # miss on the PR page, so a status that turns on one has to say where to look.
         for thread in ((entry.get("reviewThreads") or {}).get("nodes")) or []:
             comments += [
-                {"login": login_of(node), "at": node.get("createdAt", "")}
+                {"login": login_of(node), "at": node.get("createdAt", ""), "kind": "thread"}
                 for node in ((thread.get("comments") or {}).get("nodes")) or []
                 if login_of(node)
             ]
@@ -517,6 +546,7 @@ def live_pr_states(repo, numbers):
         }
     if states:
         _PR_STATE_CACHE[repo] = (now, states, numbers)
+        save_last_good_pr_states(repo, states)
         return states
     return cached[1] if cached else {}
 
@@ -648,15 +678,34 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     mine = latest.get(viewer)
     if mine and mine.get("state") == "CHANGES_REQUESTED":
         my_time = mine.get("at") or ""
-        activity = [
-            comment.get("at") or ""
-            for comment in info.get("comments", [])
+        # Only new code flips this back to me. "Changes requested" asks for changes, and
+        # talking is not changing: on #3182 the author answered a *different* reviewer in a
+        # side thread two hours after the request, and that read as "the author replied to
+        # my change request — my turn", on a PR where nothing had been addressed and no
+        # commit had been pushed since before the request. Counting any author activity
+        # cannot tell a fix from a chat with someone else, so it should not try; a push is
+        # unambiguous, and the discussion is reported without claiming the ball moved.
+        pushed_at = info.get("last_commit_at") or ""
+        replies = [
+            comment for comment in info.get("comments", [])
             if (comment.get("login") or "").lower() == author_login
+            and (comment.get("at") or "") > my_time
         ]
-        if info.get("last_commit_at"):
-            activity.append(info["last_commit_at"])
-        if any(at > my_time for at in activity if at):
-            return "Waiting for me", "The author replied to my change request — my turn to re-review."
+        if pushed_at and pushed_at > my_time:
+            when = pushed_at.replace("T", " ")[:16]
+            return "Waiting for me", (
+                f"The author pushed new commits on {when} UTC after my change request — "
+                "my turn to re-review."
+            )
+        if replies:
+            count = len(replies)
+            newest = max((comment.get("at") or "") for comment in replies).replace("T", " ")[:16]
+            return "Requests", (
+                f"I requested changes and nothing has been pushed since. The author has posted "
+                f"{count} {'reply' if count == 1 else 'replies'} in discussion (latest {newest} "
+                "UTC), which may be aimed at another reviewer — worth reading, but the code has "
+                "not changed."
+            )
         return "Requests", "I requested changes — waiting for the author to respond."
     if info.get("review_decision") == "APPROVED":
         return "Approved", "Approved but not merged yet."
@@ -819,13 +868,6 @@ def pr_reviews(workspace, pr_viewer=""):
             item["testing"] = data.get("testing", {})
             item["review_requirement"] = data.get("review_requirement", {})
             item["focus"] = data.get("focus", {})
-            item["tier_reached"] = data.get("tier_reached", item.get("tier_reached") or "")
-            # The stored columns are the fallback: a row whose artifact went missing still
-            # reports the gate rather than reading as a review that ran end to end.
-            item["gate"] = data.get("gate") or {
-                "stopped_at": item.get("gate_stopped_at") or None,
-                "reason": "",
-            }
             item["evidence"] = data.get("evidence", {})
             item["description_check"] = data.get("description_check", {})
             item["coverage"] = {"adequate": False, "who": [], "pending": []}
@@ -1101,11 +1143,20 @@ def make_handler(workspace):
                 result = run_pr_action(workspace, "reviewers", payload)
             self.send_json(result, status=200 if result.get("ok") else 400)
 
+        # Nothing this server returns is ever safe to reuse: the page embeds the app itself,
+        # so a cached copy survives a restart and hides every code change, and the JSON is a
+        # live view whose Status column is computed per request. A response cached during a
+        # slow `gh` call freezes an empty Status for every PR, and restarting cannot dislodge
+        # it — which is exactly how a working dashboard came to show no status at all.
+        def send_no_store(self):
+            self.send_header("Cache-Control", "no-store, max-age=0")
+
         def send_json(self, payload, status=200):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            self.send_no_store()
             self.end_headers()
             self.wfile.write(body)
 
@@ -1114,6 +1165,7 @@ def make_handler(workspace):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_no_store()
             self.end_headers()
             self.wfile.write(body)
 
@@ -1525,16 +1577,11 @@ INDEX_HTML = r"""<!doctype html>
       background: #fff0ee;
       border-color: #f4c4bd;
     }
-    /* A review that stopped at a gate reports less than a full one. These say so. */
+    /* A PR the author still owes work on, and the check that says why. */
     .badge.not-ready, .badge.bundled {
       color: var(--warn);
       background: #fff5df;
       border-color: #f4d79a;
-    }
-    .badge.not-evaluated {
-      color: #5c6470;
-      background: #f0f1f3;
-      border-color: #d8dbe0;
     }
     .badge.focused, .badge.adequate, .badge.accurate, .badge.none-found {
       color: var(--ok);
@@ -1637,36 +1684,87 @@ INDEX_HTML = r"""<!doctype html>
     .md li {
       line-height: 1.5;
     }
+    /* A checkbox is the marker. The list sits at the text margin, as a to-do list does. */
+    .md li.task {
+      list-style: none;
+      margin-left: -20px;
+    }
+    /* The comment reads at three weights, and they follow the markup's own nesting rather
+       than a list of known headings: the lead verdict, the sections under it, and the blocks
+       inside a fold. A fold is subordinate to the section it explains, so it carries no rule
+       of its own — a border-top there read as a divider between top-level parts and made
+       "Explanation" outrank the "Review suggestion" it belongs to. */
+    .md-verdict {
+      margin-bottom: 14px;
+    }
+    .md-section {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2a37;
+      margin-top: 22px;
+    }
+    .md-subhead {
+      font-size: 13px;
+      font-weight: 650;
+      color: #435366;
+    }
     .md details {
-      border-top: 1px solid var(--line);
-      padding-top: 10px;
+      margin-top: 12px;
     }
     .md summary {
       cursor: pointer;
       display: flex;
-      align-items: center;
-      gap: 8px;
+      align-items: baseline;
+      gap: 6px;
       list-style: none;
+      width: fit-content;
     }
     .md summary::-webkit-details-marker {
       display: none;
     }
-    .md summary::after {
-      content: "\25be";
+    /* The caret leads the label. It used to be pushed to margin-left:auto, which on a pane
+       this wide left it a screen away from the word it discloses. */
+    .md summary::before {
+      content: "\25b8";
       color: #98a2ae;
-      margin-left: auto;
+      font-size: 10px;
     }
-    .md details[open] > summary::after {
-      content: "\25b4";
+    .md details[open] > summary::before {
+      content: "\25be";
     }
     .md details[open] > summary {
-      margin-bottom: 10px;
+      margin-bottom: 8px;
+    }
+    /* Open, the fold's contents are railed off so they read as inside something. */
+    .md details[open] {
+      border-left: 2px solid var(--line);
+      padding-left: 12px;
+      margin-left: 2px;
+    }
+    .md-fold-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #8794a4;
+      font-weight: 600;
+    }
+    .md summary:hover .md-fold-label {
+      color: #5a6b7f;
     }
     .md-label {
-      font-size: 13px;
+      font-size: 12px;
       text-transform: uppercase;
-      color: #435366;
+      letter-spacing: 0.02em;
+      color: #5a6b7f;
       font-weight: 650;
+    }
+    .md-footer {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
     }
     .md code {
       background: rgba(31, 119, 180, 0.08);
@@ -2407,18 +2505,21 @@ INDEX_HTML = r"""<!doctype html>
         .replace(/(^|[\s(])_([^_]+)_/g, "$1<em>$2</em>");
     }
 
-    // The two lines that lead the comment. Every other verdict now rides on a <details>
-    // summary and is coloured by mdBadge, so this is deliberately short.
+    // The line that leads the comment, and the only pill that keeps its full sentence: a
+    // chip reading "not ready" alone, floating above the to-dos, is a status nobody can
+    // read without the markdown behind it. The value here is the badge's colour class.
     const MD_VERDICTS = {
       "ready for review": "ready",
-      "not ready for review yet": "not ready"
+      "not ready for review yet": "not-ready"
     };
 
     // "Focus: <b>focused</b>" — the label stays a label, the verdict becomes the pill the
     // list columns use. On GitHub the same line is bold text; only the rendering differs.
     function mdSummary(text) {
       const parts = text.match(/^(.*?):\s*<b>(.*?)<\/b>(.*)$/);
-      if (!parts) return mdInline(text);
+      // A bare summary ("Explanation") is a control, not a heading — the section it belongs
+      // to is the line above it, and a fold that outweighs its own section inverts the page.
+      if (!parts) return `<span class="md-fold-label">${mdInline(text)}</span>`;
       return `<span class="md-label">${mdInline(parts[1])}</span> ${mdBadge(parts[2])}${mdInline(parts[3])}`;
     }
 
@@ -2439,23 +2540,42 @@ INDEX_HTML = r"""<!doctype html>
       return `<span class="badge tone-${tone}">${esc(verdict)}</span>`;
     }
 
-    function mdParagraph(line) {
+    // `depth` is how many <details> deep this line sits. Emphasis follows nesting: a bold
+    // line at the top level is a section of the comment, the same line inside a fold is a
+    // block within one. Reading weight off the markup rather than off a list of known
+    // titles is what keeps "Why this rung" from ever outranking "Review suggestion".
+    function mdParagraph(line, depth) {
+      // The lead verdict keeps its whole sentence inside the pill; every other pill is a
+      // one-word answer to a labelled question and does not need one.
+      const lead = line.match(/^\*\*([^*]+)\*\*(?:\s*—\s*(.*))?$/);
+      if (lead) {
+        const tone = MD_VERDICTS[lead[1].trim().toLowerCase()];
+        if (tone) {
+          return `<p class="md-verdict"><span class="badge ${tone}">${esc(lead[1])}</span> ${mdInline(lead[2] || "")}</p>`;
+        }
+      }
       // The level is the pill here, not the words "Attention level".
-      const attention = line.match(/^\*\*Attention level:\*\*\s*([A-Za-z][A-Za-z-]*)(?:\s*—\s*(.*))?$/);
+      const attention = line.match(/^Attention level:\s*([A-Za-z][A-Za-z-]*)(?:\s*—\s*(.*))?$/);
       if (attention) {
         return `<p><strong>Attention level:</strong> ${badge(attention[1])} ${mdInline(attention[2] || "")}</p>`;
       }
-      // "**verdict** — the reasoning", or a verdict standing alone.
-      const lead = line.match(/^\*\*([^*]+)\*\*(?:\s*—\s*(.*))?$/);
-      if (lead) {
-        const verdict = MD_VERDICTS[lead[1].trim().toLowerCase()];
-        if (verdict) {
-          return `<p>${badge(verdict)} ${mdInline(lead[2] || "")}</p>`;
-        }
+      // Inside the Explanation fold each check heads its block as "**Name: verdict**".
+      // The verdict is the pill, the name is the label.
+      const verdict = line.match(/^\*\*(.*):\s*(.+?)\*\*$/);
+      if (verdict) {
+        return `<p><span class="md-label">${mdInline(verdict[1])}</span> ${mdBadge(verdict[2])}</p>`;
+      }
+      // A bold line standing on its own is a heading, and how loud it is depends on where.
+      if (lead && !lead[2]) {
+        return `<p class="${depth ? "md-subhead" : "md-section"}">${mdInline(lead[1])}</p>`;
       }
       // What was inspected to earn a clean bill is supporting evidence, not a finding.
       if (/^Checked:/.test(line)) {
         return `<p class="muted">${mdInline(line)}</p>`;
+      }
+      // The AI-assistance footer is end matter: below the review, and below its rule.
+      if (/^_\[AI-assisted review\]/.test(line)) {
+        return `<p class="md-footer">${mdInline(line)}</p>`;
       }
       return `<p>${mdInline(line)}</p>`;
     }
@@ -2463,6 +2583,7 @@ INDEX_HTML = r"""<!doctype html>
     function markdown(text) {
       const out = [];
       let depth = 0;        // how many <ul> are open
+      let folds = 0;        // how many <details> are open
       let itemOpen = false; // the <li> at the deepest level is not closed yet
       // A nested list belongs inside its parent <li>, so the parent stays open across the
       // deeper level and closes only when that level does.
@@ -2475,9 +2596,9 @@ INDEX_HTML = r"""<!doctype html>
         }
         while (depth < want) { out.push("<ul>"); depth++; itemOpen = false; }
       };
-      const pushItem = (html) => {
+      const pushItem = (html, cls) => {
         if (itemOpen) out.push("</li>");
-        out.push(`<li>${html}`);
+        out.push(`<li${cls ? ` class="${cls}"` : ""}>${html}`);
         itemOpen = true;
       };
       for (const raw of String(text || "").split("\n")) {
@@ -2486,11 +2607,12 @@ INDEX_HTML = r"""<!doctype html>
         // The comment folds each section into <details>, so the preview does too — same
         // defaults, so a section open on GitHub is open here. These are the only raw HTML
         // tags the comment emits; everything else is still escaped on the way through.
-        if (line === "</details>") { setDepth(0); out.push("</details>"); continue; }
+        if (line === "</details>") { setDepth(0); folds = Math.max(0, folds - 1); out.push("</details>"); continue; }
         const fold = line.match(/^<details( open)?><summary>(.*?)<\/summary>(<\/details>)?$/);
         if (fold) {
           setDepth(0);
           out.push(`<details${fold[1] || ""}><summary>${mdSummary(fold[2])}</summary>${fold[3] || ""}`);
+          if (!fold[3]) folds++;
           continue;
         }
         const heading = line.match(/^#{1,6}\s+(.*)$/);
@@ -2499,13 +2621,14 @@ INDEX_HTML = r"""<!doctype html>
         if (item) {
           setDepth(item[1].length >= 2 ? 2 : 1);
           const task = item[2].match(/^\[([ xX])\]\s+(.*)$/);
+          // A checkbox is already a marker; the bullet beside it is a second one.
           pushItem(task
             ? `${task[1].toLowerCase() === "x" ? "\u2611" : "\u2610"} ${mdInline(task[2])}`
-            : mdInline(item[2]));
+            : mdInline(item[2]), task ? "task" : "");
           continue;
         }
         setDepth(0);
-        out.push(mdParagraph(line));
+        out.push(mdParagraph(line, folds));
       }
       setDepth(0);
       return out.join("");
@@ -2537,9 +2660,7 @@ INDEX_HTML = r"""<!doctype html>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
-          <td>${esc(row.review_rung || "")}${(row.gate || {}).stopped_at
-            ? ` <span class="badge not-ready" title="Stopped at the ${esc(row.gate.stopped_at)} gate: ${esc(row.gate.reason || "")}">gated</span>`
-            : ""}</td>
+          <td>${esc(row.review_rung || "")}</td>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>

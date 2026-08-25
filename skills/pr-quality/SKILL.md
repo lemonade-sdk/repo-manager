@@ -1,6 +1,6 @@
 ---
 name: pr-quality
-description: Tier 2 of the PR review pipeline. Check a pull request against the project's philosophy, documentation, and testing guides, and flag breaking API or UX changes. Use after triage has confirmed the PR's description and focus.
+description: Tier 2 of the PR review pipeline. Check a pull request against the project's philosophy, documentation, and testing guides, and flag breaking API or UX changes. Runs on every PR, alongside triage and reviewer suggestion.
 ---
 
 # PR Quality
@@ -62,7 +62,7 @@ Writing the artifact to the caller-provided `.json` path is mandatory before fin
       "documentation_evidence": "Where this PR documents the break, or what is missing.",
       "maintainer_approval": "unclear",
       "approval_evidence": "The review or comment that approves it, or 'no maintainer has weighed in'.",
-      "action": "The imperative step that clears the break. Empty only when documented is true and maintainer_approval is 'approved'."
+      "action": "Where to document this break. Empty whenever documented is true — approval is not the author's to fetch."
     }
   ],
   "evidence": {
@@ -81,7 +81,7 @@ Fixed vocabularies — exact values, lower case, no others:
 - `breaking_changes[].maintainer_approval`: `approved`, `not-approved`, or `unclear`
 - `alignment_flags[].doc`: `contribute.md` or `philosophy.md`
 
-The caller rejects the artifact and re-runs you on any of these: each status agrees with its list in both directions (`gaps` exactly when the array is non-empty); every documentation gap carries `what` and `action`, every testing gap adds `where`; every alignment flag carries `doc`, `concern`, `evidence`, and `action`; every breaking change carries `change`, a `surface`, a `documented` that is true or false rather than absent, and a `maintainer_approval`, plus an `action` unless it is both documented and approved; all four `evidence` entries are non-empty, with "none observed" rather than an empty string when a section is clean.
+The caller rejects the artifact and re-runs you on any of these: each status agrees with its list in both directions (`gaps` exactly when the array is non-empty); every documentation gap carries `what` and `action`, every testing gap adds `where`; every alignment flag carries `doc`, `concern`, `evidence`, and `action`; every breaking change carries `change`, a `surface`, a `documented` that is true or false rather than absent, and a `maintainer_approval`, plus an `action` whenever `documented` is false, and never an action that asks for approval or a sign-off; all four `evidence` entries are non-empty, with "none observed" rather than an empty string when a section is clean.
 
 The `evidence` entries are shown to the reader only when their section is clean — they are the basis for the clean bill. When a section has items, the entry is never displayed, so keep it a terse record of what you inspected and never restate the items.
 
@@ -98,6 +98,12 @@ scripts/get-pr-review-docs.sh OWNER/REPO BASE_REF
 ```
 
 Run each once. Use the PR's base branch as `BASE_REF` — the caller names it in the prompt. `get-pr-review-docs.sh` prints the four project guides, then the repo's documentation tree and its test and CI tree. Its output **is** the project-doc context, and it is the only permitted source for those guides: never read contribute.md, philosophy.md, documentation.md, or testing.md from a local clone, a working tree, or the PR's own branch, because a PR branched before a guide changed still carries the old guide.
+
+**The guides come from the base; the files under judgment come from the head.** That script serves everything at `BASE_REF`, which is exactly right for the four guides — a PR is judged against the rules on main, not the rules it branched from. It is exactly wrong for everything else. A documentation page this PR edits reads, in that output and in any `?ref=BASE_REF` fetch, as it looked *before* the PR: a line the PR just corrected still looks stale, and a section the PR just added is still missing. So for any file in the PR's changed-file list the diff is the authority, and for anything else you cite, fetch it at the PR's head SHA, which the caller names in your prompt.
+
+On #3304 a review reported that the tray docs still claimed "Zero console output or CLI interface" while the PR added eight flags. The PR had already rewritten that line. The review was reading the base, and it filed a to-do asking the author to redo work they had done in the diff it was looking at — the most expensive kind of wrong, because the author has to go and prove the tool wrong.
+
+Start that scan where the surface's own reference lives, because "scan the tree" with no starting point is how a clean bill gets written by looking at the wrong page. A CLI flag or option is documented in the CLI reference; an endpoint, parameter, or response field in the API reference; a config key in the configuration reference; a backend alongside its peers in the backend docs. On #2864 a review called the documentation adequate on the strength of the configuration README and the getting-started guide, both genuinely updated — while the three new CLI flags it added appeared nowhere in the CLI reference, which is the one page a user looks at to find a flag. Check the owning reference first, then the guides around it.
 
 The two trees are your maps for the precedent tests. When the PR adds or changes something user-facing, scan the docs tree for where its peers live and fetch the one or two candidates that would prove or disprove a gap — do not assert a clean documentation bill without having looked. The test and CI tree does the same job for testing: it tells you which suite owns the changed surface and which workflows exist to run it, so a suite you name is one that exists.
 
@@ -119,6 +125,8 @@ Phrase the action as the **link you want to see**, never as the off-GitHub act y
 
 The pre-agreement is an agreement between **two** people, so never name the PR author as the maintainer who was supposed to approve it. The author's handle is in your prompt; asking them to produce evidence that they approved their own design is an action nobody can take. Name a different maintainer whose Subject Areas cell covers the change, or leave the approver unnamed and ask for the agreement itself — "Link the issue or Discord thread where a maintainer of this area agreed to the design" is right, and it stays right when you do not know who that maintainer is.
 
+An existing review is never evidence *against* pre-agreement. A maintainer who reviewed the PR after it opened has not proven the author skipped a conversation — you cannot see the conversation either way — and calling their review "post-hoc" in your evidence turns someone doing the right thing into a mark against the PR. For the same reason, an author who is themselves in the maintainer table does not become suspect for it.
+
 Observable is the whole test, and several of the guide's clauses fail it: the Discord debate, the dev-channel post a new backend is asked to start with, and the Review Process's "use an AI review tool on your own code" all happen off GitHub. Flag the missing *issue* that the same clause requires, and never assert that someone did or did not post, run a tool, or read their own diff. "No evidence the author self-reviewed the AI output" asserts something you cannot see either way, so it is not a flag.
 
 An empty `alignment_flags` list is the normal, expected result for a well-run PR.
@@ -134,6 +142,8 @@ Match the doc surface to the size of the change. An API parameter row documents 
 Some docs surfaces are **generated** from the code they describe, with CI checking that they stay current. Check the top of a docs file for a generation marker before assuming it is hand-maintained: when the PR changes a source the generator reads but does not commit the regenerated file, the table is stale — a gap whose fix is "run the generator and commit the result", not "write prose".
 
 **A gap's `policy` must be a rule you could quote.** documentation.md's tables are specific — register, pronouns, contractions, emoji, humor, figures of speech, marketing language, hedging — and a rule absent from them is not a rule. If you cannot point to the row that forbids something, you are inventing policy to justify a preference, which is worse than saying nothing: it blocks a PR on a standard the project never set. Prose you find inelegant is not a gap. "documentation.md warns against em dashes" when no such line exists is the failure this rule exists to stop.
+
+**A page the diff never opened can still be the gap.** The obligation is that the documentation describes the code, not that the PR edited some documentation, so a change that leaves an existing page saying something untrue owes that page an edit — and updating the guide the feature belongs in does not discharge it while another page still says the opposite. A configuration reference calling a binary "zero console output or CLI interface" is wrong the moment a PR gives that binary eight flags, whether or not the PR touched that file. Search the doc tree for what the change contradicts, not only for where its new documentation would go: the second search is the one that finds a stale page, and it is the failure most likely to reach users, because nobody rereads a page the diff did not open.
 
 For PRs that touch docs, check for the failure modes documentation.md enumerates — hallucinated parameters, placeholder examples, stale claims. That check is active, not stylistic: read the changed examples as a user would run them (a multi-line shell command missing its continuation backslash is broken, not cosmetic), and test a doc's claims against the code in the same diff — a shipped doc that says "streaming is preserved" while the diff buffers the stream is a doc gap with the doc file as its `where`.
 
@@ -174,8 +184,21 @@ The admission test for the list: name the exact user-visible surface — the end
 
 For each genuine breaking change, answer two questions with evidence. `documented`: does this PR itself update the affected docs or migration notes? `maintainer_approval`: has someone whose handle appears in the contribute.md maintainer table explicitly approved this break in a review or comment? An active, trusted reviewer who appears in no row is a contributor, and their approval does not satisfy this. `unclear` is the honest default when nobody from the table has weighed in — never claim approval from the absence of objection.
 
+**A break still belongs in the list once the author has documented it.** `documented: true` and `maintainer_approval: unclear` is a complete, ordinary entry — the list is the record of what changed for users, not a queue of outstanding chores, and the caller reads it to set the attention level and to tell a reviewer what they are signing off on. Dropping the entry because there is nothing left for the author to do is how #3277 came to report an empty `breaking_changes` under an evidence line reading "the default parallelism shift is a UX-level behavioral change ... no maintainer has yet signed off": the prose and the list disagreed, and the reader is shown the list. If your evidence describes a break, the break is an entry.
+
+**The two answers have different owners, and only one of them is a to-do.** Documenting the break is the author's work, so `action` names where to document it and nothing else. Getting it approved is not work the author can do: the PR review *is* the approval, and the maintainers who can give it are named by the reviewer tier, in the same comment. "Obtain explicit approval from a maintainer who covers llamacpp (e.g. @superm1 or @pwilkin)" put those two handles in the author's checklist and in the reviewer slate at once, and told the author to go and do the reviewer's job. So `unclear` and `not-approved` produce no action at all — they are a fact about where the review stands, recorded in `maintainer_approval` and `approval_evidence`, and the caller turns them into the attention level. On a break the author has already documented, `action` is empty.
+
+## Cite only what you opened
+
+Every file path, line number, and quoted string in your artifact is a claim a maintainer will click. Read the file before you name it, and quote only text you copied out of what you read.
+
+The failure this exists to stop is not inventing a fact — it is knowing a real fact and attaching it to a location you guessed. On #3304 a review correctly spotted the stale line "Zero console output or CLI interface", then filed it as `docs/guide/configuration/README.md` line 47, which is a block of JSON in a file that contains neither the phrase nor the word "console". The observation was right and the citation was fabricated, and a reader who follows the reference finds nothing and stops trusting the rest. When you know the fact but not the location, write the fact and say where you looked; a finding with no line number is worth more than one with the wrong line number.
+
+The same applies in the other direction, to the clean bill. "The workflow runs test_tray_supervisor.py on Linux and macOS" is a claim about a file you can read, and the same PR's review asserted it about a workflow where that script does not appear at all. If you did not grep the workflow, you do not know what it runs, and `adequate` is not yet the honest answer.
+
 ## Output rules
 
+- **One missing artifact is one finding, whatever number of sections could claim it.** A breaking change whose documentation is absent is already a documentation gap; writing "add a note to docs/guide/concepts.md about the macOS restriction" as a gap and "document the macOS-only restriction in the user-facing docs" as the break's action is one edit split across two checkboxes, and the author counts two. File it once, in the section that owns the surface, and let the other section's `evidence` refer to it.
 - Empty arrays are correct and common — do not manufacture a flag, gap, or breaking change to seem thorough. An item whose honest action would be "no action required" is not an item: something you checked and found fine belongs in the section's `evidence` entry.
 - `evidence` values are one or two sentences citing what you inspected — no file inventories, no statistics, and never a restatement of the section's own items.
 - Concerns and evidence are observations ("the renamed `--foo` flag is not mentioned in docs/guide/cli.md"); the `action` is the one place you write an imperative, and it names a concrete, completable step — "Update the docs" is too vague, "Add the renamed `--foo` flag to docs/guide/cli.md" is right.
