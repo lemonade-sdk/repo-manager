@@ -142,18 +142,10 @@ def ensure_read_schema(conn):
         CREATE TABLE IF NOT EXISTS review_read_states (
           review_key TEXT PRIMARY KEY,
           is_read INTEGER NOT NULL DEFAULT 0,
-          acked_status TEXT NOT NULL DEFAULT '',
-          acked_viewer TEXT NOT NULL DEFAULT '',
           updated_at TEXT NOT NULL
         )
         """
     )
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(review_read_states)")}
-    for column in ("acked_status", "acked_viewer"):
-        if column not in columns:
-            conn.execute(
-                f"ALTER TABLE review_read_states ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-            )
 
 def read_json_file(path):
     if not path:
@@ -907,35 +899,6 @@ def coverage_verdict(info, author, requirement, maintainers):
         "pending": pending,
     }
 
-def reconcile_pr_read_states(workspace, rows, viewer):
-    """Fill in each PR row's check-off, clearing any whose Status moved since it was checked.
-
-    The clear is written back rather than merely displayed, so a Status that later returns
-    to its acknowledged value stays unchecked: something happened on that PR while I was
-    not looking, and the box is a claim about a review I have actually read.
-
-    A blank Status means gh told us nothing — an unreachable network is not a change, so
-    those rows keep whatever they had. The perspective is part of the acknowledgement for
-    the same reason: retyping the Status as box re-labels the whole column without
-    anything happening on GitHub, and that must not sweep the checkmarks away.
-    """
-    with connect(db_file(workspace)) as conn:
-        ensure_read_schema(conn)
-        for item in rows:
-            row = conn.execute(
-                "SELECT is_read, acked_status, acked_viewer FROM review_read_states WHERE review_key=?",
-                (item["review_key"],),
-            ).fetchone()
-            is_read = bool(row["is_read"]) if row else False
-            status = item.get("review_status") or ""
-            if is_read and status and row["acked_viewer"] == viewer and row["acked_status"] != status:
-                conn.execute(
-                    "UPDATE review_read_states SET is_read=0, updated_at=? WHERE review_key=?",
-                    (now_iso(), item["review_key"]),
-                )
-                is_read = False
-            item["is_read"] = is_read
-
 def pr_reviews(workspace, pr_viewer=""):
     rows = []
     # Parsed once per repo: the derivation needs it to spot expert areas whose only listed
@@ -1004,9 +967,6 @@ def pr_reviews(workspace, pr_viewer=""):
             item["coverage"] = {"adequate": False, "who": [], "pending": []}
             item["comment_markdown"] = ""
             item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
-            # One check-off per PR, not per rubric version: the list already collapses a
-            # PR's older reviews, so a re-review under a new rubric is the same row to me.
-            item["review_key"] = f"{item['repo']}|pr|{item['pr_number']}"
             rows.append(item)
     by_repo = {}
     for item in rows:
@@ -1034,9 +994,7 @@ def pr_reviews(workspace, pr_viewer=""):
                     info, item.get("author"), item.get("review_requirement"), maintainers
                 )
                 item["comment_markdown"] = pr_comment_preview(repo, item, maintainers)
-    viewer = effective_viewer or authenticated
-    reconcile_pr_read_states(workspace, rows, viewer)
-    return rows, viewer
+    return rows, effective_viewer or authenticated
 
 def release_announcements(workspace):
     rows = []
@@ -1190,26 +1148,19 @@ def update_todo(workspace, payload):
 def update_read_state(workspace, payload):
     review_key = payload.get("review_key")
     is_read = 1 if payload.get("is_read") else 0
-    # The Status the browser was showing when the box was clicked, not the one a fresh
-    # gh call would return: the claim is about the review I just read, and if the two
-    # have already diverged the next refresh should say so by unchecking the box.
-    status = str(payload.get("status") or "")[:64]
-    viewer = str(payload.get("viewer") or "")[:64]
     if not review_key:
         return {"ok": False, "error": "Missing review_key"}
     with connect(db_file(workspace)) as conn:
         ensure_read_schema(conn)
         conn.execute(
             """
-            INSERT INTO review_read_states (review_key, is_read, acked_status, acked_viewer, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO review_read_states (review_key, is_read, updated_at)
+            VALUES (?, ?, ?)
             ON CONFLICT(review_key) DO UPDATE SET
               is_read=excluded.is_read,
-              acked_status=excluded.acked_status,
-              acked_viewer=excluded.acked_viewer,
               updated_at=excluded.updated_at
             """,
-            (review_key, is_read, status, viewer, now_iso()),
+            (review_key, is_read, now_iso()),
         )
     return {"ok": True}
 
@@ -1635,10 +1586,14 @@ INDEX_HTML = r"""<!doctype html>
       outline: 2px solid #83c5f3;
       outline-offset: 2px;
     }
-    .pr-read {
+    .pr-check {
       cursor: pointer;
       vertical-align: middle;
       accent-color: #1f77b4;
+    }
+    /* A checked-off PR stays in the list but has stopped asking for anything. */
+    #pr-rows tr.checked-off td:not(:first-child) {
+      opacity: 0.5;
     }
     .badge {
       display: inline-flex;
@@ -2114,7 +2069,7 @@ INDEX_HTML = r"""<!doctype html>
               <table>
                 <thead>
                   <tr>
-                    <th style="width: 34px;" title="Read: checked when you have read or acted on the review"></th>
+                    <th style="width: 34px;" title="Checked off: stays checked until the PR's Status changes"></th>
                     <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
                     <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
                     <th style="width: 110px;" class="sortable" data-sort="attention" title="Sort by attention level">Attention</th>
@@ -2152,6 +2107,48 @@ INDEX_HTML = r"""<!doctype html>
 
   <script>
     const isStatic = Boolean(window.REPO_MANAGER_STATIC);
+
+    // What this browser remembers about how I left the dashboard: which PRs I have checked
+    // off, and how I had the list sorted. Neither is a fact about the repo, so neither is
+    // worth a round trip to the server or a row in the workspace database.
+    const PR_CHECKS_KEY = "repo-manager:pr-checks";
+    const PR_SORT_KEY = "repo-manager:pr-sort";
+
+    function readStored(key, fallback) {
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(key));
+        return stored && typeof stored === "object" ? stored : fallback;
+      } catch (error) {
+        return fallback;
+      }
+    }
+
+    function writeStored(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      } catch (error) {
+        // Storage blocked or full. The page still remembers while it is open.
+      }
+    }
+
+    // Read once, at startup, and authoritative from then on: a browser that refuses to
+    // store any of this must still behave normally for as long as the page is open.
+    const prChecks = readStored(PR_CHECKS_KEY, {});
+
+    // A column the table no longer offers is not a sort order, so it is forgotten along
+    // with its direction rather than leaving the list sorted by nothing in particular.
+    function readPrSort() {
+      const stored = readStored(PR_SORT_KEY, {});
+      const columns = Array.from(
+        document.querySelectorAll("#view-prs th.sortable"), (th) => th.dataset.sort
+      );
+      return columns.includes(stored.key)
+        ? { key: stored.key, desc: Boolean(stored.desc) }
+        : { key: "status", desc: false };
+    }
+
+    const rememberedSort = readPrSort();
+
     const state = {
       data: null,
       view: "commits",
@@ -2165,8 +2162,8 @@ INDEX_HTML = r"""<!doctype html>
       prActionMessage: null,
       hideClosedPrs: true,
       hideNonMainPrs: true,
-      prSort: "status",
-      prSortDesc: false,
+      prSort: rememberedSort.key,
+      prSortDesc: rememberedSort.desc,
       prViewer: ""
     };
     let suppressRouteUpdate = false;
@@ -2342,12 +2339,12 @@ INDEX_HTML = r"""<!doctype html>
       await reloadData();
     }
 
-    async function setReadState(reviewKey, isRead, status = "", viewer = "") {
+    async function setReadState(reviewKey, isRead) {
       if (isStatic) return;
       const response = await fetch("/api/read", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ review_key: reviewKey, is_read: isRead, status, viewer })
+        body: JSON.stringify({ review_key: reviewKey, is_read: isRead })
       });
       if (!response.ok) {
         const text = await response.text();
@@ -2869,23 +2866,98 @@ INDEX_HTML = r"""<!doctype html>
             state.prSort = key;
             state.prSortDesc = false;
           }
+          writeStored(PR_SORT_KEY, { key: state.prSort, desc: state.prSortDesc });
           state.selectedPr = 0;
           renderPrReviews();
         });
       });
     }
 
-    function prReadBox(row) {
-      const title = row.is_read
-        ? "Read \u2014 unchecks itself if the Status changes"
-        : "Mark this review read";
-      return `<input type="checkbox" class="pr-read" data-review-key="${esc(row.review_key || "")}" data-status="${esc(row.review_status || "")}" ${row.is_read ? "checked" : ""} ${isStatic ? "disabled" : ""} title="${title}" aria-label="${title}">`;
+    // Checking a box writes one key to the store and draws the checkmark, and that is the
+    // entire transaction — no request, no refetch, no redraw.
+    //
+    // Every workspace on this machine serves its dashboard from the same localhost origin
+    // and so shares one store, which is why the repo belongs in the key.
+    function prCheckKey(row) {
+      return `${row.repo}|${row.pr_number}`;
+    }
+
+    // A check-off also goes stale by sitting there: after a week I have stopped carrying
+    // the PR around in my head, so the box stops claiming I have, whatever GitHub has been
+    // doing meanwhile.
+    const PR_CHECK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+    // A check-off says "I have dealt with this PR as it stands", so it is stored with the
+    // Status it was made against and the time it was made, and lasts only as long as both
+    // hold. Two things that look like a Status change are not: a blank Status is gh
+    // telling us nothing rather than telling us something new, and a Status written from
+    // another perspective is the "Status as" box being retyped, which relabels the whole
+    // column without anything having happened on GitHub. Neither may sweep the checkmarks
+    // away; the week runs regardless.
+    function reconcilePrChecks(rows) {
+      const viewer = state.data.pr_viewer || "";
+      const now = Date.now();
+      const live = new Set();
+      let changed = false;
+      for (const row of rows) {
+        const key = prCheckKey(row);
+        live.add(key);
+        const entry = prChecks[key];
+        if (!entry) continue;
+        const status = row.review_status || "";
+        const moved = status && entry.viewer === viewer && entry.status !== status;
+        // Written as a failure to be recent, so an entry with no readable time on it —
+        // one stored before check-offs were timed — is expired rather than immortal.
+        const expired = !(now - Date.parse(entry.at) < PR_CHECK_TTL_MS);
+        if (moved || expired) {
+          delete prChecks[key];
+          changed = true;
+        }
+      }
+      // A review this dashboard no longer holds has nothing left to check off. Another
+      // workspace's rows are simply absent here, so only these repos are pruned.
+      const repos = new Set(rows.map((row) => row.repo));
+      for (const key of Object.keys(prChecks)) {
+        if (repos.has(key.slice(0, key.lastIndexOf("|"))) && !live.has(key)) {
+          delete prChecks[key];
+          changed = true;
+        }
+      }
+      if (changed) writeStored(PR_CHECKS_KEY, prChecks);
+    }
+
+    function setPrCheck(row, checked) {
+      if (checked) {
+        prChecks[prCheckKey(row)] = {
+          status: row.review_status || "",
+          viewer: state.data.pr_viewer || "",
+          at: new Date().toISOString()
+        };
+      } else {
+        delete prChecks[prCheckKey(row)];
+      }
+      writeStored(PR_CHECKS_KEY, prChecks);
+    }
+
+    // The date is in the tooltip because the box now disappears on its own: without it,
+    // a check that expires overnight looks like the dashboard losing my work.
+    function prCheckTitle(entry) {
+      if (!entry) return "Check off this PR";
+      return `Checked off ${entry.at.slice(0, 10)} \u2014 clears when the Status changes, or a week after checking`;
+    }
+
+    function prCheckBox(entry) {
+      const title = prCheckTitle(entry);
+      return `<input type="checkbox" class="pr-check" ${entry ? "checked" : ""} title="${title}" aria-label="${title}">`;
     }
 
     let prSortWired = false;
 
     function renderPrReviews() {
       if (!prSortWired) { attachPrSortHandlers(); prSortWired = true; }
+      // Against every saved review, not just the visible ones: a PR hidden by a filter
+      // moves on GitHub too, and its box must already be clear when the filter comes off.
+      reconcilePrChecks(state.data.pr_reviews || []);
       const rows = filteredPrs();
       if (state.route.pr) {
         const routedIndex = rows.findIndex((row) => String(row.pr_number) === String(state.route.pr));
@@ -2897,9 +2969,11 @@ INDEX_HTML = r"""<!doctype html>
         state.selectedPr = Math.min(state.selectedPr, rows.length - 1);
       }
       $("pr-count").textContent = `${rows.length} shown`;
-      $("pr-rows").innerHTML = rows.map((row, index) => `
-        <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}">
-          <td>${prReadBox(row)}</td>
+      $("pr-rows").innerHTML = rows.map((row, index) => {
+        const entry = prChecks[prCheckKey(row)];
+        return `
+        <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}${entry ? " checked-off" : ""}">
+          <td>${prCheckBox(entry)}</td>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
           <td>${badge(row.attention_level)}</td>
@@ -2907,7 +2981,8 @@ INDEX_HTML = r"""<!doctype html>
           <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>
-      `).join("");
+      `;
+      }).join("");
       markPrSortHeader();
       scrollSelected($("pr-rows"));
       $("pr-rows").querySelectorAll("tr").forEach((tr) => {
@@ -2919,22 +2994,20 @@ INDEX_HTML = r"""<!doctype html>
           updateRoute();
         });
       });
-      if (!isStatic) {
-        $("pr-rows").querySelectorAll(".pr-read").forEach((box) => {
-          // Checking a box is not picking a row, so the click stops before the <tr>.
-          box.addEventListener("click", (event) => event.stopPropagation());
-          box.addEventListener("change", async () => {
-            box.disabled = true;
-            try {
-              await setReadState(box.dataset.reviewKey, box.checked, box.dataset.status, state.data.pr_viewer || "");
-            } catch (error) {
-              box.checked = !box.checked;
-              box.disabled = false;
-              alert(error.message);
-            }
-          });
+      $("pr-rows").querySelectorAll(".pr-check").forEach((box) => {
+        // Checking a box is not picking a row, so the click stops before the <tr>.
+        box.addEventListener("click", (event) => event.stopPropagation());
+        box.addEventListener("change", () => {
+          const tr = box.closest("tr");
+          const row = rows[Number(tr.dataset.index)];
+          setPrCheck(row, box.checked);
+          // The browser has already drawn the checkmark; the row catches up to it, and
+          // nothing else on the page has learned anything that would change what it shows.
+          tr.classList.toggle("checked-off", box.checked);
+          box.title = prCheckTitle(prChecks[prCheckKey(row)]);
+          box.setAttribute("aria-label", box.title);
         });
-      }
+      });
       const row = rows[state.selectedPr] || rows[0];
       if (!row) {
         $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager review-pr N</code> or <code>repo-manager sweep-prs</code> to review open PRs.</div>`;
