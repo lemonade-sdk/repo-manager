@@ -2153,6 +2153,12 @@ def generate_pr_review(workspace, repo, meta):
     json_file = pr_artifact_path(workspace, repo, number)
     json_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     store_pr_review(workspace, repo, meta, data, json_file)
+    # A review with no mirrored PR state behind it shows up in the dashboard as a row with
+    # nothing in the Status column until the next sync gets to it. We were just talking to
+    # GitHub about this exact PR, so there is no reason to make the dashboard ask again.
+    from repo_manager.web import sync_pr_states
+
+    sync_pr_states(workspace, repo, numbers=[number])
     reviewers_line = ", ".join(item["handle"] for item in data.get("suggested_reviewers", [])) or "none"
     print(
         f"PR #{number}: {len(pr_todo_items(data))} to-do(s), attention {data['attention_level']}, "
@@ -4414,6 +4420,24 @@ def cmd_sweep_prs(args):
     print(summary)
 
 
+def cmd_sync_prs(args):
+    workspace = find_workspace()
+    config = load_config(workspace)
+    repo = resolve_repo(args, config)
+    from repo_manager.web import sync_pr_states
+
+    result = sync_pr_states(workspace, repo, full=args.full)
+    if not result.get("ok"):
+        raise SystemExit(f"Sync failed: {result.get('error', 'unknown error')}")
+    if result.get("skipped"):
+        print(result["skipped"])
+        return
+    print(
+        f"Synced {repo}: {result.get('fetched', 0)} PR(s) fetched "
+        f"of {result.get('changed', 0)} changed ({result.get('mode', 'n/a')})"
+    )
+
+
 def cmd_release_review(args):
     workspace = find_workspace()
     config = load_config(workspace)
@@ -5386,6 +5410,18 @@ def build_parser():
     request_reviewers.add_argument("--reviewers", help="Comma-separated handles to request instead of the saved suggestions.")
     request_reviewers.add_argument("--dry-run", action="store_true", help="Print who would be requested without requesting.")
     request_reviewers.set_defaults(func=cmd_request_pr_reviewers)
+
+    sync_prs = sub.add_parser(
+        "sync-prs",
+        help="Refresh the local mirror of GitHub PR state that the dashboard reads.",
+    )
+    sync_prs.add_argument("--repo")
+    sync_prs.add_argument(
+        "--full",
+        action="store_true",
+        help="Re-fetch every non-terminal reviewed PR instead of only what changed.",
+    )
+    sync_prs.set_defaults(func=cmd_sync_prs)
 
     release = sub.add_parser("release-review", help="Run release-level review from stored commit reviews.")
     release.add_argument(

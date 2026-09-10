@@ -1,24 +1,40 @@
 import json
-import tempfile
 import hashlib
 import re
 import socket
 import sqlite3
 import subprocess
-import time
+import threading
 import webbrowser
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
 
+@contextmanager
 def connect(db_file):
+    """A connection that commits on the way out and then actually closes.
+
+    sqlite3's own context manager ends the transaction but leaves the connection open, so
+    `with connect(...)` leaked a file descriptor per call. That was survivable when the
+    dashboard was loaded by hand; a page that polls every thirty seconds and a sync that
+    runs behind it reach the process fd limit in hours.
+    """
     conn = sqlite3.connect(db_file)
-    conn.row_factory = sqlite3.Row
-    ensure_range_schema(conn)
-    ensure_pr_schema(conn)
-    ensure_generation_schema(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        ensure_range_schema(conn)
+        ensure_pr_schema(conn)
+        ensure_pr_state_schema(conn)
+        ensure_generation_schema(conn)
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def ensure_generation_schema(conn):
     for table in ("commit_reviews", "release_reviews", "release_announcements", "pr_reviews"):
@@ -111,6 +127,57 @@ def ensure_pr_schema(conn):
           comment_url TEXT NOT NULL DEFAULT '',
           posted_head_sha TEXT NOT NULL DEFAULT '',
           synced_at TEXT NOT NULL
+        )
+        """
+    )
+
+def ensure_pr_state_schema(conn):
+    """A local mirror of what GitHub says about each reviewed PR.
+
+    This table is a cache, not a record: every column is re-derivable from GitHub, nothing
+    the reviewer typed lives here, and dropping it costs one sync. That is what lets the
+    dashboard read it without hedging — a row is either present and dated, or absent and
+    the page says so.
+
+    Kept apart from pr_reviews because the two answer to different clocks. A review is
+    written once and stays true; a PR's state is true only as of `fetched_at`, and the
+    column that reports it has to be able to say when.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_state (
+          repo TEXT NOT NULL,
+          pr_number INTEGER NOT NULL,
+          state TEXT NOT NULL DEFAULT '',
+          base_ref TEXT NOT NULL DEFAULT '',
+          head_sha TEXT NOT NULL DEFAULT '',
+          is_draft INTEGER NOT NULL DEFAULT 0,
+          review_decision TEXT NOT NULL DEFAULT '',
+          last_commit_at TEXT NOT NULL DEFAULT '',
+          in_merge_queue INTEGER NOT NULL DEFAULT 0,
+          auto_merge_by TEXT NOT NULL DEFAULT '',
+          reviews TEXT NOT NULL DEFAULT '[]',
+          comments TEXT NOT NULL DEFAULT '[]',
+          requested TEXT NOT NULL DEFAULT '[]',
+          updated_at TEXT NOT NULL DEFAULT '',
+          fetched_at TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (repo, pr_number)
+        )
+        """
+    )
+    # One row per repo, holding the two things a sync needs to know before it starts: how
+    # far the last one got, and whether it worked. `error` is kept rather than logged
+    # because a failed sync has to reach the reader — a dashboard that silently serves
+    # week-old state is the failure mode this whole table exists to end.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pr_sync (
+          repo TEXT PRIMARY KEY,
+          synced_at TEXT NOT NULL DEFAULT '',
+          attempted_at TEXT NOT NULL DEFAULT '',
+          watermark TEXT NOT NULL DEFAULT '',
+          viewer TEXT NOT NULL DEFAULT '',
+          error TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -421,150 +488,417 @@ def release_reviews(workspace):
             rows.append(item)
     return rows
 
-_PR_STATE_CACHE = {}
-PR_STATE_TTL_SECONDS = 60
+# --- GitHub access ------------------------------------------------------------------
+#
+# Two shapes of query, and the split between them is the whole point. Asking "what moved?"
+# is a connection ordered by update time and costs one point; asking "what is PR #3350's
+# review state?" is expensive per PR. The old dashboard only had the second kind and ran it
+# over every PR it had ever reviewed on every page load, which at 123 PRs was 74,000 nodes
+# and ten seconds — past the ten-second ceiling GitHub enforces, so it failed about half the
+# time and took the whole Status column down with it. Detecting change first means the
+# expensive query runs over the handful of PRs that actually moved, and usually over none.
 
-def _last_good_path(repo):
-    return Path(tempfile.gettempdir()) / f"repo-manager-pr-states-{repo.replace('/', '__')}.json"
+# Everything the Status column and the coverage rules read, conversation included. The
+# conversation connections are the expensive part — 450 of the 571 nodes per PR — and
+# dropping them was tempting, but they are what catches a reply buried in a review thread,
+# and chunking turns out to be the real fix: forty PRs with the full set is 24,000 nodes
+# and 2.3 seconds, against 123 PRs at 74,000 nodes and a coin-flip failure. The cost was
+# never per PR. It was per PR times every review ever written, on every page load.
+PR_DETAIL_FIELDS = (
+    "state baseRefName reviewDecision isDraft headRefOid updatedAt "
+    "isInMergeQueue autoMergeRequest { enabledBy { login } } "
+    "commits(last: 1) { nodes { commit { committedDate } } } "
+    "reviews(last: 50) { nodes { author { login } state submittedAt } } "
+    "comments(last: 50) { nodes { author { login } createdAt } } "
+    "reviewThreads(last: 30) { nodes { comments(last: 15) { nodes { author { login } createdAt } } } } "
+    "reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }"
+)
 
+GH_TIMEOUT_SECONDS = 30
 
-def last_good_pr_states(repo):
-    """The most recent successful live state, surviving a restart.
+class GitHubError(Exception):
+    """A sync could not read GitHub. Carries the sentence the dashboard will show."""
 
-    Without this, one failed `gh` call on a cold server blanks the Status column for every
-    PR — and because the in-process cache is empty at startup, restarting the UI is exactly
-    when it is most likely to happen. A slightly stale status is far better than none: the
-    column's whole job is telling you which PRs want your attention.
+def gh_graphql(query):
+    """Run one GraphQL query, or raise GitHubError with something a person can read.
+
+    Every failure mode gets checked, because the one this replaces checked none of them:
+    a non-zero exit, an unparseable body, and a 200 carrying an `errors` array all used to
+    land in the same silent `return {}` that blanked the column. HTTP 502 and 504 are the
+    common ones here and they arrive as a non-zero exit with a plain-text body.
     """
-    try:
-        raw = json.loads(_last_good_path(repo).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {int(number): state for number, state in raw.items()} if isinstance(raw, dict) else {}
-
-
-def save_last_good_pr_states(repo, states):
-    try:
-        _last_good_path(repo).write_text(
-            json.dumps({str(k): v for k, v in states.items()}), encoding="utf-8"
-        )
-    except (OSError, TypeError):
-        pass
-
-
-def live_pr_states(repo, numbers):
-    """Current state, base branch, and review activity for the given PRs, in one cached GraphQL call.
-
-    Returns {number: {"state", "base", "review_decision", "last_commit_at", "reviews",
-    "comments", "viewer"}}. Empty on any gh failure so callers treat state as unknown
-    instead of hiding rows or inventing a status.
-    """
-    numbers = sorted({int(number) for number in numbers})
-    if not repo or "/" not in repo or not numbers:
-        return {}
-    now = time.time()
-    cached = _PR_STATE_CACHE.get(repo)
-    if cached and now - cached[0] < PR_STATE_TTL_SECONDS and cached[2] == numbers:
-        return cached[1]
-    owner, _, name = repo.partition("/")
-    fields = " ".join(
-        f"pr{number}: pullRequest(number: {number}) {{ state baseRefName reviewDecision "
-        "commits(last: 1) { nodes { commit { committedDate } } } "
-        "isInMergeQueue autoMergeRequest { enabledBy { login } } "
-        "reviews(last: 50) { nodes { author { login } state submittedAt } } "
-        "comments(last: 50) { nodes { author { login } createdAt } } "
-        "reviewThreads(last: 30) { nodes { comments(last: 15) { nodes { author { login } createdAt } } } } "
-        "reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } } "
-        "}"
-        for number in numbers
-    )
-    query = f'query {{ viewer {{ login }} repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}'
     try:
         proc = subprocess.run(
             ["gh", "api", "graphql", "-f", f"query={query}"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=GH_TIMEOUT_SECONDS,
         )
-        payload = json.loads(proc.stdout) if proc.stdout else {}
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return cached[1] if cached else last_good_pr_states(repo)
-    data = payload.get("data") or {}
-    viewer = (data.get("viewer") or {}).get("login", "")
-    repository = data.get("repository") or {}
+    except FileNotFoundError as exc:
+        raise GitHubError("`gh` is not on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GitHubError(f"GitHub did not answer within {GH_TIMEOUT_SECONDS}s") from exc
+    except OSError as exc:
+        raise GitHubError(f"Could not run gh: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise GitHubError(detail[0][:200] if detail else f"gh exited {proc.returncode}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise GitHubError(f"GitHub returned a non-JSON response: {exc}") from exc
+    if payload.get("errors"):
+        first = payload["errors"][0] or {}
+        raise GitHubError(str(first.get("message") or "GitHub rejected the query")[:200])
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise GitHubError("GitHub returned no data")
+    return data
 
-    def login_of(node):
-        return ((node or {}).get("author") or {}).get("login", "")
+def _login_of(node):
+    return ((node or {}).get("author") or {}).get("login", "")
 
+def parse_pr_detail(entry):
+    """One GraphQL pullRequest node as the row shape the rest of this module reads."""
+    commits = ((entry.get("commits") or {}).get("nodes")) or []
+    auto_merge = entry.get("autoMergeRequest") or {}
+    reviews = [
+        {"login": _login_of(node), "state": node.get("state", ""), "at": node.get("submittedAt", "")}
+        for node in ((entry.get("reviews") or {}).get("nodes")) or []
+        if _login_of(node)
+    ]
+    comments = [
+        {"login": _login_of(node), "at": node.get("createdAt", ""), "kind": "comment"}
+        for node in ((entry.get("comments") or {}).get("nodes")) or []
+        if _login_of(node)
+    ]
+    # Kept apart from conversation comments: a reply inside a review thread is easy to
+    # miss on the PR page, so a status that turns on one has to say where to look.
+    for thread in ((entry.get("reviewThreads") or {}).get("nodes")) or []:
+        comments += [
+            {"login": _login_of(node), "at": node.get("createdAt", ""), "kind": "thread"}
+            for node in ((thread.get("comments") or {}).get("nodes")) or []
+            if _login_of(node)
+        ]
+    requested = []
+    for node in ((entry.get("reviewRequests") or {}).get("nodes")) or []:
+        reviewer = (node or {}).get("requestedReviewer") or {}
+        handle = reviewer.get("login") or reviewer.get("name") or ""
+        if handle:
+            requested.append(handle)
+    return {
+        "state": entry.get("state", ""),
+        "base": entry.get("baseRefName", ""),
+        "head_sha": entry.get("headRefOid", "") or "",
+        "is_draft": bool(entry.get("isDraft")),
+        "review_decision": entry.get("reviewDecision") or "",
+        "last_commit_at": ((commits[0].get("commit") or {}).get("committedDate", "")) if commits else "",
+        "in_merge_queue": bool(entry.get("isInMergeQueue")),
+        "auto_merge_by": ((auto_merge.get("enabledBy") or {}).get("login") or "") if auto_merge else "",
+        "reviews": reviews,
+        "comments": comments,
+        "requested": requested,
+        "updated_at": entry.get("updatedAt", "") or "",
+    }
+
+def fetch_pr_details(repo, numbers, chunk=40):
+    """Full detail for specific PRs: {number: state dict}, plus the authenticated login.
+
+    Chunked because this is the query that outgrew the timeout. Forty PRs is ~1.3s against
+    a ceiling of ten, and a cold rebuild of several hundred reviews walks it in batches
+    rather than betting the whole sync on one oversized request.
+    """
+    owner, _, name = repo.partition("/")
+    numbers = sorted({int(number) for number in numbers})
+    states, viewer = {}, ""
+    for index in range(0, len(numbers), chunk):
+        batch = numbers[index:index + chunk]
+        fields = " ".join(
+            f"pr{number}: pullRequest(number: {number}) {{ {PR_DETAIL_FIELDS} }}" for number in batch
+        )
+        data = gh_graphql(
+            f'query {{ viewer {{ login }} repository(owner: "{owner}", name: "{name}") {{ {fields} }} }}'
+        )
+        viewer = viewer or (data.get("viewer") or {}).get("login", "")
+        repository = data.get("repository") or {}
+        for number in batch:
+            entry = repository.get(f"pr{number}")
+            # A null entry is a PR number this repo does not have. Skipping it leaves the
+            # stored row alone rather than overwriting a good one with nothing.
+            if isinstance(entry, dict):
+                states[number] = parse_pr_detail(entry)
+    return states, viewer
+
+def fetch_changed_prs(repo, since, page_limit=10):
+    """Every PR touched since `since`, newest first — the cheap half of a sync.
+
+    Ordering by UPDATED_AT descending over all states makes this a change log: page until
+    a PR older than the watermark shows up and everything after it is older still, so the
+    walk stops after one page on a quiet repo. Costs one point per page and returns numbers
+    only; deciding which of them are worth a detail fetch is the caller's business.
+
+    Returns (changed, complete). `complete` is False when the walk hit the page limit
+    without reaching the watermark, which means the caller should fall back to a full sync
+    rather than trust a partial change log.
+    """
+    owner, _, name = repo.partition("/")
+    changed, cursor = {}, None
+    for _ in range(page_limit):
+        after = f', after: "{cursor}"' if cursor else ""
+        data = gh_graphql(
+            f'query {{ repository(owner: "{owner}", name: "{name}") {{ pullRequests('
+            f"first: 100, orderBy: {{field: UPDATED_AT, direction: DESC}}{after}"
+            ") { pageInfo { hasNextPage endCursor } nodes { number updatedAt state } } } }"
+        )
+        connection = ((data.get("repository") or {}).get("pullRequests")) or {}
+        nodes = connection.get("nodes") or []
+        for node in nodes:
+            updated = node.get("updatedAt") or ""
+            if since and updated <= since:
+                return changed, True
+            changed[int(node["number"])] = updated
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage") or not nodes:
+            return changed, True
+        # With no watermark at all, one page of "what moved recently" is the whole useful
+        # answer; paging to the beginning of the repo would just be a slow full sync.
+        if not since:
+            return changed, True
+        cursor = page.get("endCursor")
+    return changed, False
+
+# --- The mirror ---------------------------------------------------------------------
+
+TERMINAL_STATES = ("MERGED", "CLOSED")
+
+def read_pr_states(conn, repo, viewer=""):
+    """Every mirrored PR for this repo, in the shape derive_review_status expects."""
     states = {}
-    for number in numbers:
-        entry = repository.get(f"pr{number}")
-        if not isinstance(entry, dict):
-            continue
-        commits = ((entry.get("commits") or {}).get("nodes")) or []
-        last_commit_at = ((commits[0].get("commit") or {}).get("committedDate", "")) if commits else ""
-        auto_merge = entry.get("autoMergeRequest") or {}
-        reviews = [
-            {"login": login_of(node), "state": node.get("state", ""), "at": node.get("submittedAt", "")}
-            for node in ((entry.get("reviews") or {}).get("nodes")) or []
-            if login_of(node)
-        ]
-        comments = [
-            {"login": login_of(node), "at": node.get("createdAt", ""), "kind": "comment"}
-            for node in ((entry.get("comments") or {}).get("nodes")) or []
-            if login_of(node)
-        ]
-        # Kept apart from conversation comments: a reply inside a review thread is easy to
-        # miss on the PR page, so a status that turns on one has to say where to look.
-        for thread in ((entry.get("reviewThreads") or {}).get("nodes")) or []:
-            comments += [
-                {"login": login_of(node), "at": node.get("createdAt", ""), "kind": "thread"}
-                for node in ((thread.get("comments") or {}).get("nodes")) or []
-                if login_of(node)
-            ]
-        requested = []
-        for node in ((entry.get("reviewRequests") or {}).get("nodes")) or []:
-            reviewer = (node or {}).get("requestedReviewer") or {}
-            handle = reviewer.get("login") or reviewer.get("name") or ""
-            if handle:
-                requested.append(handle)
-        states[number] = {
-            "state": entry.get("state", ""),
-            "base": entry.get("baseRefName", ""),
-            "review_decision": entry.get("reviewDecision") or "",
-            "last_commit_at": last_commit_at,
-            "in_merge_queue": bool(entry.get("isInMergeQueue")),
-            "auto_merge_by": ((auto_merge.get("enabledBy") or {}).get("login") or "") if auto_merge else "",
-            "reviews": reviews,
-            "comments": comments,
-            "requested": requested,
+    for row in conn.execute("SELECT * FROM pr_state WHERE repo=?", (repo,)):
+        states[row["pr_number"]] = {
+            "state": row["state"],
+            "base": row["base_ref"],
+            "head_sha": row["head_sha"],
+            "is_draft": bool(row["is_draft"]),
+            "review_decision": row["review_decision"],
+            "last_commit_at": row["last_commit_at"],
+            "in_merge_queue": bool(row["in_merge_queue"]),
+            "auto_merge_by": row["auto_merge_by"],
+            "reviews": parse_json_text(row["reviews"], []),
+            "comments": parse_json_text(row["comments"], []),
+            "requested": parse_json_text(row["requested"], []),
+            "updated_at": row["updated_at"],
+            "fetched_at": row["fetched_at"],
             "viewer": viewer,
         }
-    if states:
-        _PR_STATE_CACHE[repo] = (now, states, numbers)
-        save_last_good_pr_states(repo, states)
-        return states
-    return cached[1] if cached else {}
+    return states
 
-def coverage_participants(latest, comments, author_login, maintainers):
-    """{login: "review" | "comment"} for everyone whose engagement counts toward the rung.
+def write_pr_states(conn, repo, states, fetched_at=None):
+    fetched_at = fetched_at or now_iso()
+    for number, info in states.items():
+        conn.execute(
+            """
+            INSERT INTO pr_state (
+              repo, pr_number, state, base_ref, head_sha, is_draft, review_decision,
+              last_commit_at, in_merge_queue, auto_merge_by, reviews, comments,
+              requested, updated_at, fetched_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(repo, pr_number) DO UPDATE SET
+              state=excluded.state, base_ref=excluded.base_ref, head_sha=excluded.head_sha,
+              is_draft=excluded.is_draft, review_decision=excluded.review_decision,
+              last_commit_at=excluded.last_commit_at, in_merge_queue=excluded.in_merge_queue,
+              auto_merge_by=excluded.auto_merge_by, reviews=excluded.reviews,
+              comments=excluded.comments, requested=excluded.requested,
+              updated_at=excluded.updated_at,
+              fetched_at=excluded.fetched_at
+            """,
+            (
+                repo, int(number), info.get("state", ""), info.get("base", ""),
+                info.get("head_sha", ""), 1 if info.get("is_draft") else 0,
+                info.get("review_decision", ""), info.get("last_commit_at", ""),
+                1 if info.get("in_merge_queue") else 0, info.get("auto_merge_by", ""),
+                json.dumps(info.get("reviews", [])), json.dumps(info.get("comments", [])),
+                json.dumps(info.get("requested", [])),
+                info.get("updated_at", ""), fetched_at,
+            ),
+        )
 
-    A maintainer who writes their review into the conversation box instead of the review
-    box is still in the loop, so their comments count the same as a formal review — the
-    rung asks how many people are looking, not which button they pressed. Comments only
-    earn credit for people in the maintainer table; a drive-by "+1" from a passer-by is
-    not the review the guide is asking for. The viewer is deliberately not excluded here:
-    my own review is coverage, even though the status label speaks from my perspective.
+def read_sync_state(conn, repo):
+    row = conn.execute("SELECT * FROM pr_sync WHERE repo=?", (repo,)).fetchone()
+    if not row:
+        return {"repo": repo, "synced_at": "", "attempted_at": "", "watermark": "", "viewer": "", "error": ""}
+    return dict(row)
+
+def write_sync_state(conn, repo, **fields):
+    current = read_sync_state(conn, repo)
+    current.update({key: value for key, value in fields.items() if value is not None})
+    conn.execute(
+        """
+        INSERT INTO pr_sync (repo, synced_at, attempted_at, watermark, viewer, error)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repo) DO UPDATE SET
+          synced_at=excluded.synced_at, attempted_at=excluded.attempted_at,
+          watermark=excluded.watermark, viewer=excluded.viewer, error=excluded.error
+        """,
+        (
+            repo, current["synced_at"], current["attempted_at"],
+            current["watermark"], current["viewer"], current["error"],
+        ),
+    )
+
+def reviewed_pr_numbers(conn, repo):
+    return {
+        row["pr_number"]
+        for row in conn.execute("SELECT DISTINCT pr_number FROM pr_reviews WHERE repo=?", (repo,))
+    }
+
+# One sync per repo at a time. Three open tabs and a Refresh click are one GitHub call,
+# not four, and a slow sync never stacks behind itself.
+_SYNC_LOCKS = {}
+_SYNC_LOCKS_GUARD = threading.Lock()
+
+def sync_lock(repo):
+    with _SYNC_LOCKS_GUARD:
+        return _SYNC_LOCKS.setdefault(repo, threading.Lock())
+
+PR_SYNC_WAIT_SECONDS = 45
+
+def sync_pr_states(workspace, repo, full=False, numbers=None, wait=False):
+    """Bring the mirror up to date with GitHub. Returns a summary of what moved.
+
+    Three passes, cheapest first:
+
+      1. Ask what changed since the watermark. One point, a third of a second, and on a
+         quiet repo the answer is nothing and the sync stops here.
+      2. Detail-fetch the changed PRs that we hold reviews for — usually none to a handful.
+      3. Take in any reviewed PR the mirror has never seen, which is how a review written
+         by `sweep-prs` five minutes ago gets its state.
+
+    Terminal PRs are not refreshed on their own account: merged is forever. They still get
+    picked up by pass 1 if they move, so a reopened PR is not stranded.
+
+    Cost scales with what changed, not with how many reviews have accumulated — the whole
+    reason for the rewrite. A full sync is the fallback when there is no watermark to work
+    from, or when the change log was too long to walk.
     """
-    participants = {}
-    for login, review in latest.items():
-        if login != author_login and not is_ai_reviewer(login) and review.get("state") != "DISMISSED":
-            participants[login] = "review"
-    for comment in comments or []:
-        login = str(comment.get("login") or "").lower()
-        if login and login != author_login and not is_ai_reviewer(login) and login in maintainers:
-            participants.setdefault(login, "comment")
-    return participants
+    if not repo or "/" not in repo:
+        return {"ok": False, "error": "No repo configured", "fetched": 0}
+    lock = sync_lock(repo)
+    # Callers who have something to render do not queue behind a sync in flight; they are
+    # already being served from the mirror and the next poll will pick up whatever it
+    # brings back. `wait` is for the caller that has nothing to show at all.
+    acquired = lock.acquire(timeout=PR_SYNC_WAIT_SECONDS) if wait else lock.acquire(blocking=False)
+    if not acquired:
+        return {"ok": True, "skipped": "A sync is already running", "fetched": 0}
+    started = now_iso()
+    try:
+        with connect(db_file(workspace)) as conn:
+            reviewed = reviewed_pr_numbers(conn, repo)
+            sync_state = read_sync_state(conn, repo)
+            # Having waited for someone else's sync, the thing we were waiting for has
+            # happened. Running a second one back to back would only delay the page that
+            # is already able to render.
+            if wait and sync_state.get("synced_at"):
+                return {"ok": True, "waited": True, "fetched": 0, "changed": 0}
+            known = {
+                row["pr_number"]: dict(row)
+                for row in conn.execute("SELECT * FROM pr_state WHERE repo=?", (repo,))
+            }
+        if not reviewed:
+            with connect(db_file(workspace)) as conn:
+                write_sync_state(conn, repo, synced_at=started, attempted_at=started, error="")
+            return {"ok": True, "fetched": 0, "changed": 0, "reason": "no saved reviews"}
+
+        watermark = sync_state.get("watermark") or ""
+        def stale_reviewed():
+            # Everything not already known to be terminal. A merged PR that is already
+            # mirrored as merged has nothing left to tell us.
+            return {
+                number for number in reviewed
+                if (known.get(number) or {}).get("state") not in TERMINAL_STATES
+            }
+
+        targets, surveyed = set(numbers or ()), ""
+        if numbers:
+            mode = "targeted"
+        elif full or not watermark:
+            mode = "full"
+            targets = stale_reviewed()
+        else:
+            mode = "incremental"
+            changed, complete = fetch_changed_prs(repo, watermark)
+            if complete:
+                targets = {number for number in changed if number in reviewed}
+                # Everything up to the newest entry in the change log has now been looked
+                # at, including the PRs we chose not to fetch because no review names them.
+                # Recording that is what keeps the next walk short: without it the same
+                # window is re-scanned every time, and it only grows.
+                surveyed = max(changed.values(), default=watermark)
+            else:
+                # The change log ran longer than we are willing to walk, so it cannot be
+                # trusted to be complete and the watermark it would imply would be a lie.
+                mode = "full"
+                targets = stale_reviewed()
+        # A review saved since the last sync has no mirrored state at all, whatever the
+        # change log said — it may not have been touched on GitHub since it was opened.
+        targets |= {number for number in reviewed if number not in known}
+
+        states, viewer = ({}, "")
+        if targets:
+            states, viewer = fetch_pr_details(repo, targets)
+        fetched_at = now_iso()
+        # The watermark is a claim that nothing before it went unseen, so only a pass that
+        # actually surveyed the repo may move it. A targeted sync — one PR, on its way to
+        # writing a comment — proves nothing about any other PR, and advancing the mark on
+        # its behalf would strand every change that landed alongside it.
+        if mode == "targeted":
+            high_water = watermark
+        elif mode == "full":
+            high_water = max(
+                [watermark] + [info.get("updated_at", "") for info in states.values() if info.get("updated_at")]
+            )
+        else:
+            high_water = max(watermark, surveyed)
+        with connect(db_file(workspace)) as conn:
+            write_pr_states(conn, repo, states, fetched_at)
+            write_sync_state(
+                conn,
+                repo,
+                # For the same reason the watermark does not move: `synced_at` is what the
+                # freshness label reports about the whole column, and one PR refreshed on
+                # its way to a comment does not make the other hundred any newer.
+                synced_at=sync_state.get("synced_at") if mode == "targeted" else fetched_at,
+                attempted_at=fetched_at,
+                watermark=high_water,
+                viewer=viewer or sync_state.get("viewer") or "",
+                error="",
+            )
+        return {"ok": True, "mode": mode, "fetched": len(states), "changed": len(targets)}
+    except GitHubError as exc:
+        # The attempt is recorded and the mirror is left exactly as it was. Stale state
+        # with a date on it is worth more than the blank column this replaces.
+        with connect(db_file(workspace)) as conn:
+            write_sync_state(conn, repo, attempted_at=now_iso(), error=str(exc))
+        return {"ok": False, "error": str(exc), "fetched": 0}
+    finally:
+        lock.release()
+
+PR_SYNC_STALE_SECONDS = 60
+
+def sync_is_stale(sync_state, stale_seconds=PR_SYNC_STALE_SECONDS):
+    synced_at = parse_iso_datetime(sync_state.get("synced_at"))
+    if not synced_at:
+        return True
+    return (datetime.now(timezone.utc) - synced_at).total_seconds() >= stale_seconds
+
+def sync_pr_states_async(workspace, repo):
+    """Start a sync and do not wait for it. The page is already being served from SQLite."""
+    thread = threading.Thread(
+        target=sync_pr_states, args=(workspace, repo), name=f"pr-sync:{repo}", daemon=True
+    )
+    thread.start()
+    return thread
 
 def review_coverage(reviewer_logins, requirement, maintainers, approvals=()):
     """Does the review this PR has actually satisfy the rung contribute.md puts it on?
@@ -573,7 +907,8 @@ def review_coverage(reviewer_logins, requirement, maintainers, approvals=()):
     holds the subject-area expertise this PR calls for, and whether the guide's top rung
     names someone who has not weighed in. Admin status is deliberately not consulted — it is
     a repo permission, not evidence that a person knows this code. Callers pass the logins
-    coverage_participants found, which is a wider net than GitHub's formal reviewers.
+    of everyone counted as reviewing, which is theirs to decide: the Status column counts
+    who has finished, and the reviewer slate counts who is on the hook.
     """
     rung = (requirement or {}).get("rung") or ""
     expert_areas = [area for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
@@ -687,12 +1022,31 @@ def coverage_status(coverage, names):
         )
     return None
 
+STANDING_VERDICTS = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
+
 def latest_reviews(info):
-    """{login: their most recent review} — one verdict per person, in submission order."""
-    latest = {}
+    """{login: where each person currently stands} — their verdict if they gave one.
+
+    Reading this as "their most recent review of any kind" is wrong, and quietly so.
+    Approving and then adding a note is one of the most ordinary things a reviewer does —
+    Geramy did exactly that on #2013, fifty-four seconds apart — and taking the last row
+    erased the approval, leaving a PR GitHub calls APPROVED reading "Needs reviewer" here.
+    Eleven open PRs were hiding a verdict this way, most of them change requests, each one
+    telling a maintainer to go and staff a PR whose review had already happened.
+
+    So a comment-verdict review says a person spoke, not what they decided: it fills a slot
+    only for someone who has not decided anything yet, and never overwrites one. This is
+    GitHub's own model — its reviewDecision survives a later comment too.
+    """
+    verdicts, remarks = {}, {}
     for review in sorted(info.get("reviews", []), key=lambda review: review.get("at") or ""):
-        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"):
-            latest[review["login"].lower()] = review
+        login = review["login"].lower()
+        if review.get("state") in STANDING_VERDICTS:
+            verdicts[login] = review
+        elif review.get("state") == "COMMENTED":
+            remarks[login] = review
+    latest = dict(remarks)
+    latest.update(verdicts)
     return latest
 
 def derive_review_status(info, author, viewer_override="", requirement=None, maintainers=None):
@@ -743,6 +1097,15 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         str(handle).lstrip("@").lower() for handle in info.get("requested") or []
         if handle and counts(str(handle).lstrip("@").lower())
     }
+    # Someone who submitted a review and withheld the verdict. They are not covering the
+    # PR — no verdict, nothing satisfied — but they are emphatically not a gap in staffing
+    # either, and GitHub cleared their review request the moment they hit Submit. Counting
+    # them nowhere is what put "Needs reviewer" on #3112 the morning after bitgamma
+    # reviewed it, which reads as "go and find someone" about a PR someone had just read.
+    engaged = {
+        login for login, review in latest.items()
+        if review.get("state") == "COMMENTED" and counts(login)
+    }
     named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
 
     # --- 1. My turn. Only new code hands a change request back to me; talking is not
@@ -787,7 +1150,7 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     # reviewed *plus* the ones who have been asked to, because a requested reviewer is a
     # commitment — the PR resolves itself without me. If even that would not satisfy the
     # requirement, no amount of waiting fixes it and somebody has to staff it.
-    prospective = sorted(reviewed | requested)
+    prospective = sorted(reviewed | requested | engaged)
     shortfall = coverage_status(review_coverage(prospective, requirement, table, approvals),
                                 ", ".join(prospective))
     if shortfall is None:
@@ -795,6 +1158,13 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
             missing = needed - len(approvals)
             return "In progress", (
                 f"Approved by {', '.join(approvals)}; {missing} more to come."
+            )
+        # "On it" claims someone has undertaken to answer, which a requested reviewer has
+        # and a person who commented and moved on has not. Where the whole set is the
+        # latter, the sentence says what actually happened instead.
+        if prospective and all(login in engaged and login not in requested for login in prospective):
+            return "In progress", (
+                f"Reviewed with comments by {', '.join(prospective)}; no verdict yet."
             )
         return "In progress", f"On it: {', '.join(prospective)}."
     # coverage_status decides *whether* there is a gap; its sentence was written for the old
@@ -812,23 +1182,37 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     if gap.get("signoff_needed") and not gap.get("signed_off"):
         missing.append("a maintainer to approve the breaking change")
     detail = f"Needs {', '.join(missing) or 'a reviewer'}."
-    if prospective:
-        detail += f" On it: {', '.join(prospective)}."
+    # Same distinction as above, and it matters more here: this PR genuinely is short of
+    # the review it needs, so the sentence has to be exact about who is already involved
+    # and what they have actually done about it.
+    on_it = sorted(login for login in prospective if login not in engaged or login in requested)
+    remarked = sorted(login for login in prospective if login in engaged and login not in requested)
+    if on_it:
+        detail += f" On it: {', '.join(on_it)}."
+    if remarked:
+        detail += f" {', '.join(remarked)} commented without a verdict."
     return "Needs reviewer", detail
 
 
 def reviewer_coverage(workspace, repo, pr_number, author, requirement):
     """Whether this PR already has the review its rung asks for, and who is providing it.
 
-    This is the same question the Status column answers, off the same cached GraphQL call
-    and the same coverage rules, so a PR the dashboard calls Handled is never simultaneously
-    told by our own PR comment that it needs reviewers.
+    This is the same question the Status column answers, off the same mirror and the same
+    coverage rules, so a PR the dashboard calls covered is never simultaneously told by our
+    own PR comment that it needs reviewers.
+
+    This one refreshes before it reads. Everywhere else a minute of staleness is invisible
+    and harmless, but this answer is about to be written into a comment on someone's PR,
+    naming people — and a stale read here asks for reviewers who already reviewed. One PR
+    is a single node and costs nothing; the price of skipping it is paid in public.
 
     Not knowable is reported as not covered — gh unreachable, the PR closed, no rung on the
     stored review. Suggesting reviewers a PR turns out not to need is a smaller harm than
     withholding the slate from one that does.
     """
-    info = live_pr_states(repo, [pr_number]).get(int(pr_number)) or {}
+    sync_pr_states(workspace, repo, numbers=[int(pr_number)])
+    with connect(db_file(workspace)) as conn:
+        info = read_pr_states(conn, repo).get(int(pr_number)) or {}
     maintainers = load_maintainer_context(workspace, repo).get("table", {})
     return coverage_verdict(info, author, requirement, maintainers)
 
@@ -968,23 +1352,36 @@ def pr_reviews(workspace, pr_viewer=""):
             item["comment_markdown"] = ""
             item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
             rows.append(item)
-    by_repo = {}
-    for item in rows:
-        by_repo.setdefault(item["repo"], set()).add(item["pr_number"])
+    # Every PR fact below comes out of the local mirror, so rendering this page cannot fail,
+    # cannot time out, and cannot half-succeed. Whether that mirror is current is a separate
+    # question with its own answer in `sync`, which is the honest way to put it — the old
+    # page asked GitHub 123 questions at render time and, when one went unanswered, said
+    # nothing at all about any of them.
+    repos = {item["repo"] for item in rows}
     authenticated = ""
-    for repo, numbers in by_repo.items():
-        states = live_pr_states(repo, numbers)
-        maintainers = load_maintainer_context(workspace, repo).get("table", {})
-        for item in rows:
-            if item["repo"] == repo:
+    sync_states = {}
+    with connect(db_file(workspace)) as conn:
+        for repo in repos:
+            sync_states[repo] = read_sync_state(conn, repo)
+            authenticated = authenticated or sync_states[repo].get("viewer") or ""
+        viewer = effective_viewer or authenticated
+        for repo in repos:
+            states = read_pr_states(conn, repo, viewer)
+            maintainers = load_maintainer_context(workspace, repo).get("table", {})
+            for item in rows:
+                if item["repo"] != repo:
+                    continue
                 info = states.get(item["pr_number"], {})
-                authenticated = authenticated or info.get("viewer", "")
                 item["pr_state"] = info.get("state", "")
                 item["base_ref"] = info.get("base", "")
+                item["state_fetched_at"] = info.get("fetched_at", "")
+                # Absent from the mirror is its own answer, and a different one from
+                # "merged, so nothing is needed": the sync has not reached this PR yet.
+                item["state_known"] = bool(info)
                 status, detail = derive_review_status(
                     info,
                     item.get("author"),
-                    effective_viewer,
+                    viewer,
                     requirement=item.get("review_requirement"),
                     maintainers=maintainers,
                 )
@@ -994,7 +1391,7 @@ def pr_reviews(workspace, pr_viewer=""):
                     info, item.get("author"), item.get("review_requirement"), maintainers
                 )
                 item["comment_markdown"] = pr_comment_preview(repo, item, maintainers)
-    return rows, effective_viewer or authenticated
+    return rows, viewer, sync_states
 
 def release_announcements(workspace):
     rows = []
@@ -1037,11 +1434,30 @@ def load_config(workspace):
     with (workspace / ".repo-manager" / "config.json").open("r", encoding="utf-8") as f:
         return json.load(f)
 
+def pr_sync_summary(sync_states):
+    """What the page needs to say how fresh it is, and what to do if it is not.
+
+    Collapsed across repos to the worst case, because the reader is being told whether to
+    trust the column in front of them and an average would let one stalled repo hide.
+    """
+    if not sync_states:
+        return {"synced_at": "", "error": "", "stale": True, "never": True}
+    synced = [state.get("synced_at") or "" for state in sync_states.values()]
+    errors = [state.get("error") or "" for state in sync_states.values() if state.get("error")]
+    oldest = min(synced) if synced else ""
+    return {
+        "synced_at": oldest,
+        "attempted_at": max((state.get("attempted_at") or "" for state in sync_states.values()), default=""),
+        "error": errors[0] if errors else "",
+        "stale": any(sync_is_stale(state) for state in sync_states.values()),
+        "never": not all(synced),
+    }
+
 def app_data(workspace, pr_viewer=""):
     commits = commit_reviews(workspace)
     releases = release_reviews(workspace)
     announcements = release_announcements(workspace)
-    prs, effective_viewer = pr_reviews(workspace, pr_viewer)
+    prs, effective_viewer, sync_states = pr_reviews(workspace, pr_viewer)
     authors = {normalize_handle(row.get("author")) for row in commits if normalize_handle(row.get("author"))}
     reviewers = {reviewer for row in commits for reviewer in row.get("reviewers", [])}
     tags = sorted(
@@ -1053,7 +1469,7 @@ def app_data(workspace, pr_viewer=""):
         key=tag_sort_key,
         reverse=True,
     )
-    return {
+    payload = {
         "config": load_config(workspace),
         "tags": tags,
         "counts": {
@@ -1074,7 +1490,17 @@ def app_data(workspace, pr_viewer=""):
         "release_announcements": announcements,
         "pr_reviews": prs,
         "pr_viewer": effective_viewer,
+        "pr_sync": pr_sync_summary(sync_states),
     }
+    # A fingerprint of everything except the freshness block, so a poll that finds nothing
+    # new can say so and leave the page alone. Without it every poll would redraw the table
+    # under the reader's cursor thirty seconds after they stopped touching it, and the only
+    # difference between the two payloads would be the clock.
+    payload["digest"] = hashlib.sha256(
+        json.dumps({key: value for key, value in payload.items() if key != "pr_sync"},
+                   sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    return payload
 
 def public_app_data(workspace):
     data = app_data(workspace)
@@ -1082,6 +1508,8 @@ def public_app_data(workspace):
     # sync_down, so they stay out of the published dashboard entirely.
     data.pop("pr_reviews", None)
     data.pop("pr_viewer", None)
+    data.pop("pr_sync", None)
+    data.pop("digest", None)
     data.get("counts", {}).pop("pr_reviews", None)
     for key in ("commit_reviews", "release_reviews", "release_announcements"):
         cleaned = []
@@ -1183,6 +1611,55 @@ def run_pr_action(workspace, action, payload):
     except SystemExit as exc:
         return {"ok": False, "error": str(exc) or "Command failed"}
 
+def configured_repo(workspace):
+    try:
+        return load_config(workspace).get("repo", "")
+    except (OSError, ValueError, KeyError):
+        return ""
+
+def serve_app_data(workspace, pr_viewer=""):
+    """The dashboard payload, and the decision about whether to go and get fresh facts.
+
+    Stale-while-revalidate, with one exception at the bottom. Reading SQLite takes about
+    five milliseconds and always works, so the answer goes out immediately and a sync — if
+    the mirror has aged past a minute — runs behind it for the next poll to pick up. The
+    reader is never made to wait on GitHub to find out what they already knew.
+
+    The exception is a mirror that has never been filled. There is nothing honest to render
+    then, so that one request waits: a first run that flashes an empty dashboard looks
+    broken in a way that a first run saying "Syncing…" does not.
+    """
+    repo = configured_repo(workspace)
+    if repo:
+        with connect(db_file(workspace)) as conn:
+            sync_state = read_sync_state(conn, repo)
+            has_mirror = bool(conn.execute(
+                "SELECT 1 FROM pr_state WHERE repo=? LIMIT 1", (repo,)
+            ).fetchone())
+        if not has_mirror and not sync_state.get("synced_at"):
+            sync_pr_states(workspace, repo, wait=True)
+        elif sync_is_stale(sync_state):
+            sync_pr_states_async(workspace, repo)
+    return app_data(workspace, pr_viewer)
+
+def run_sync_action(workspace, payload):
+    """The Refresh button: the one path that waits for GitHub, because someone asked it to.
+
+    A sync is roughly a second, and the person who clicked is watching the button. Handing
+    them the freshly synced payload in the same response is the difference between "it
+    refreshed" and "did that do anything?".
+    """
+    repo = configured_repo(workspace)
+    if not repo:
+        return {"ok": False, "error": "No repo configured for this workspace"}
+    result = sync_pr_states(workspace, repo, full=bool(payload.get("full")))
+    viewer = str(payload.get("viewer") or "")[:64]
+    result["data"] = app_data(workspace, viewer)
+    # A failed sync still answers with data — the mirror it could not refresh is exactly
+    # what the reader should keep looking at, now labelled with why it did not move.
+    result["ok"] = True
+    return result
+
 def make_handler(workspace):
     class RepoManagerHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1192,13 +1669,13 @@ def make_handler(workspace):
             elif path == "/api/data":
                 params = parse_qs(urlparse(self.path).query)
                 pr_viewer = (params.get("viewer") or [""])[0][:64]
-                self.send_json(app_data(workspace, pr_viewer))
+                self.send_json(serve_app_data(workspace, pr_viewer))
             else:
                 self.send_error(404)
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in ("/api/todo", "/api/read", "/api/pr-comment", "/api/pr-reviewers"):
+            if path not in ("/api/todo", "/api/read", "/api/pr-comment", "/api/pr-reviewers", "/api/sync"):
                 self.send_error(404)
                 return
             if path in ("/api/pr-comment", "/api/pr-reviewers"):
@@ -1210,12 +1687,15 @@ def make_handler(workspace):
                     self.send_json({"ok": False, "error": "Cross-origin request rejected"}, status=403)
                     return
             length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length).decode("utf-8") if length else ""
             try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                payload = json.loads(body) if body else {}
             except json.JSONDecodeError:
                 self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
                 return
-            if path == "/api/todo":
+            if path == "/api/sync":
+                result = run_sync_action(workspace, payload)
+            elif path == "/api/todo":
                 result = update_todo(workspace, payload)
             elif path == "/api/read":
                 result = update_read_state(workspace, payload)
@@ -1270,6 +1750,13 @@ def lan_address():
 
 def serve(workspace, host, port, open_browser):
     server = ThreadingHTTPServer((host, port), make_handler(workspace))
+    # Started before the browser is, so the walk from `repo-manager ui` to a rendered page
+    # usually overlaps the sync rather than following it. Nothing waits on this thread: if
+    # the browser wins the race it is served from the mirror as it stands, and the poll a
+    # few seconds later picks up whatever this brought back.
+    repo = configured_repo(workspace)
+    if repo:
+        sync_pr_states_async(workspace, repo)
     actual_host, actual_port = server.server_address
     wildcard = actual_host in ("0.0.0.0", "", "::")
     display_host = "127.0.0.1" if wildcard else actual_host
@@ -1470,6 +1957,13 @@ INDEX_HTML = r"""<!doctype html>
       gap: 16px;
       align-items: stretch;
     }
+    /* The PR list is the scanning surface and needs room for a description; the review
+       beside it is read one at a time and has been sitting on slack. The old split left
+       the list 535px against 558px of fixed columns, which squeezed Description to 35px
+       and then, once the head stopped overflowing and forcing the pane wider, to nothing. */
+    #view-prs.split {
+      grid-template-columns: minmax(560px, 1.2fr) minmax(340px, 0.8fr);
+    }
     .single {
       height: 100%;
       min-height: 0;
@@ -1494,7 +1988,12 @@ INDEX_HTML = r"""<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      /* The PR head carries a title, a perspective, two filters, a count and the sync
+         controls, which is more than fits across a split pane. Without wrapping the row
+         simply overflows and the panel clips whatever is furthest right — which silently
+         ate the freshness label and the Refresh button. */
+      flex-wrap: wrap;
+      gap: 8px 12px;
     }
     .panel-head h2 {
       font-size: 15px;
@@ -1522,6 +2021,34 @@ INDEX_HTML = r"""<!doctype html>
       background: transparent;
       color: inherit;
     }
+    /* Freshness sits at the right end of the PR panel head, pushed there so it reads as a
+       property of the whole column rather than of any one control beside it. */
+    /* Held together on one line and pushed to the right end of whichever row they land
+       on, so the freshness reads as a property of the column rather than another filter. */
+    .sync-group {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sync-state {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    /* A sync that failed is the one thing here allowed to raise its voice: the column is
+       still showing its last known answer, and the reader has to know it is not live. */
+    .sync-state.stale {
+      color: #9a6b00;
+    }
+    .sync-state.failed {
+      color: #b4232a;
+      font-weight: 600;
+    }
+    .sync-button {
+      font-size: 12px;
+      padding: 4px 9px;
+    }
     .table-wrap {
       overflow: auto;
       min-height: 0;
@@ -1530,6 +2057,13 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
+    }
+    /* Fixed column widths and a fixed layout mean a pane narrower than their sum does not
+       shrink the columns — it silently starves whichever column has no width of its own.
+       A floor plus the scroll box the wrap already provides is what keeps Description
+       readable instead of letting it vanish. */
+    #view-prs table {
+      min-width: 690px;
     }
     th, td {
       padding: 10px 12px;
@@ -2064,6 +2598,10 @@ INDEX_HTML = r"""<!doctype html>
               <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed PRs</label>
               <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide PRs not into main</label>
               <span class="muted" id="pr-count"></span>
+              <span class="sync-group">
+                <span class="sync-state" id="pr-sync"></span>
+                <button class="copy sync-button" id="pr-refresh" title="Fetch the current state of every reviewed PR from GitHub now">Refresh</button>
+              </span>
             </div>
             <div class="table-wrap">
               <table>
@@ -2191,7 +2729,17 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function statusBadge(row) {
-      if (!row.review_status) return `<span class="muted">—</span>`;
+      if (!row.review_status) {
+        // Three different silences, and only one of them is a dash. A merged or closed PR
+        // genuinely needs nothing. A PR the mirror has not reached yet needs an unknown
+        // amount, and drawing that as "nothing needed" is the exact lie this rewrite was
+        // written to stop telling.
+        if (row.state_known === false) {
+          return `<span class="badge tone-neutral" title="Not fetched from GitHub yet">syncing…</span>`;
+        }
+        const settled = row.pr_state ? `${row.pr_state.toLowerCase()} — nothing needed` : "";
+        return `<span class="muted" title="${esc(settled)}">—</span>`;
+      }
       // "Approved (1/2)" is not the green "Approved": the rung still wants someone.
       if (/\(\d+\/\d+\)/.test(row.review_status)) {
         return `<span class="badge tone-neutral" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
@@ -2353,7 +2901,86 @@ INDEX_HTML = r"""<!doctype html>
       await reloadData();
     }
 
-    async function reloadData() {
+    // --- Freshness ------------------------------------------------------------------
+    //
+    // The page reads a local mirror of GitHub, so it always has an answer and the only
+    // open question is how old that answer is. Everything below exists to keep that
+    // question answered on screen, and to keep asking it while someone is looking.
+
+    // Polling is a local read; the server decides whether a poll is worth a GitHub call.
+    // Thirty seconds is short enough that a review landing while you watch shows up on its
+    // own, and the digest means a poll that changes nothing costs a request and no redraw.
+    const PR_POLL_MS = 30000;
+    let pollTimer = null;
+    let syncing = false;
+
+    function agoLabel(iso) {
+      const then = Date.parse(iso || "");
+      if (!Number.isFinite(then)) return "";
+      const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+      if (seconds < 60) return `${seconds}s ago`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      return `${Math.round(seconds / 86400)}d ago`;
+    }
+
+    // Redrawn on a one-second timer as well as on every load, because "synced 4s ago" that
+    // stays 4s ago is worse than no label at all — it is a claim about right now that
+    // quietly stops being true.
+    function renderSyncState() {
+      const el = $("pr-sync");
+      if (!el || isStatic) return;
+      const sync = (state.data && state.data.pr_sync) || {};
+      el.classList.remove("stale", "failed");
+      if (syncing) {
+        el.textContent = "syncing…";
+        el.title = "Fetching the current state of every reviewed PR from GitHub";
+        return;
+      }
+      if (!sync.synced_at) {
+        el.classList.add("stale");
+        el.textContent = "not synced yet";
+        el.title = "No PR state has been fetched from GitHub yet.";
+        return;
+      }
+      const ago = agoLabel(sync.synced_at);
+      if (sync.error) {
+        el.classList.add("failed");
+        el.textContent = `synced ${ago} · GitHub unreachable`;
+        el.title = `The last sync attempt failed: ${sync.error}\nThe Status column is showing the last state fetched successfully.`;
+        return;
+      }
+      el.textContent = `synced ${ago}`;
+      el.title = `PR state fetched from GitHub at ${sync.synced_at}`;
+    }
+
+    // A poll that finds the same digest touches nothing. That is what makes it safe to
+    // poll at all: the reader's selection, scroll position and half-typed search box are
+    // not disturbed thirty seconds after they stopped interacting with the page.
+    function applyData(payload, options) {
+      const quiet = Boolean(options && options.quiet);
+      const unchanged = quiet && state.data && payload.digest && payload.digest === state.data.digest;
+      state.data = payload;
+      if (unchanged) {
+        renderSyncState();
+        return false;
+      }
+      const viewerInput = $("pr-viewer");
+      if (viewerInput && document.activeElement !== viewerInput) {
+        viewerInput.value = state.prViewer || state.data.pr_viewer || "";
+      }
+      // Redrawing the list rewrites its innerHTML, which resets the scroll box to the top.
+      // On a poll nobody asked for, that would drag the reader back up the table.
+      const wrap = document.querySelector("#view-prs .table-wrap");
+      const scrollTop = wrap ? wrap.scrollTop : 0;
+      applyRouteFromUrl();
+      renderAll();
+      if (wrap && quiet) wrap.scrollTop = scrollTop;
+      renderSyncState();
+      return true;
+    }
+
+    async function reloadData(options) {
       if (isStatic) {
         state.data = window.REPO_MANAGER_STATIC_DATA || {};
         applyRouteFromUrl();
@@ -2362,13 +2989,51 @@ INDEX_HTML = r"""<!doctype html>
       }
       const viewerParam = state.prViewer ? `?viewer=${encodeURIComponent(state.prViewer)}` : "";
       const response = await fetch(`/api/data${viewerParam}`);
-      state.data = await response.json();
-      const viewerInput = $("pr-viewer");
-      if (viewerInput && document.activeElement !== viewerInput) {
-        viewerInput.value = state.prViewer || state.data.pr_viewer || "";
+      applyData(await response.json(), options);
+    }
+
+    // Chained rather than an interval, so a slow response can never stack polls behind
+    // itself, and hidden tabs stop entirely: nobody is reading, so nothing needs fetching
+    // and GitHub does not get asked.
+    function schedulePoll() {
+      if (isStatic) return;
+      clearTimeout(pollTimer);
+      if (document.visibilityState !== "visible") return;
+      pollTimer = setTimeout(async () => {
+        try {
+          await reloadData({ quiet: true });
+        } catch (error) {
+          // Keep showing the last good render. The label already carries the sync's own
+          // verdict, and a failed poll is not news worth clearing the screen over.
+        }
+        schedulePoll();
+      }, PR_POLL_MS);
+    }
+
+    async function runSync() {
+      if (isStatic || syncing) return;
+      const button = $("pr-refresh");
+      syncing = true;
+      if (button) button.disabled = true;
+      renderSyncState();
+      try {
+        const response = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ viewer: state.prViewer || "" })
+        });
+        const result = await response.json();
+        syncing = false;
+        if (result.data) applyData(result.data, { quiet: true });
+      } catch (error) {
+        syncing = false;
+        await reloadData({ quiet: true }).catch(() => {});
+      } finally {
+        syncing = false;
+        if (button) button.disabled = false;
+        renderSyncState();
+        schedulePoll();
       }
-      applyRouteFromUrl();
-      renderAll();
     }
 
     function attachTodoHandlers(root) {
@@ -3174,7 +3839,31 @@ INDEX_HTML = r"""<!doctype html>
       suppressRouteUpdate = false;
     });
 
+    // The published dashboard is a file, not a server: there is nothing behind these two
+    // to press, and offering a Refresh that cannot refresh is worse than offering none.
+    if (isStatic) {
+      $("pr-refresh").classList.add("hidden");
+      $("pr-sync").classList.add("hidden");
+    }
+    $("pr-refresh").addEventListener("click", runSync);
+
+    // Coming back to the tab is the strongest signal there is that someone wants current
+    // information, so it does not wait out the poll interval. Leaving stops the clock: a
+    // dashboard left open on a hidden tab overnight makes no requests at all.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") {
+        clearTimeout(pollTimer);
+        return;
+      }
+      reloadData({ quiet: true }).catch(() => {});
+      schedulePoll();
+    });
+
+    // Only ever rewrites the one span, so it is free to run while the reader works.
+    setInterval(renderSyncState, 1000);
+
     reloadData()
+      .then(() => schedulePoll())
       .catch((error) => {
         document.body.innerHTML = `<div class="empty">Failed to load repo-manager data: ${esc(error.message)}</div>`;
       });
