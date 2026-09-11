@@ -680,6 +680,9 @@ Write the JSON result to: {out_path}
 ## Linked issues
 {issues_block(context)}
 
+## Linked RFC (part of the PR's description: what it states need not be repeated in the body)
+{rfc_block(context)}
+
 ## Surface kinds (use exactly these)
 {kinds}
 
@@ -1340,9 +1343,31 @@ def suggest_reviewers(workspace, context, facts, scope, scope_name):
     return slate
 
 
+def settle_rfc_disclosure(facts, cover, context):
+    """A breaking change the linked RFC describes is disclosed: the RFC is part of the PR's
+    description once the body links it, and the body need not repeat it. A break is taken
+    as RFC-described when the cover pass matched an RFC-covered surface that says mostly
+    the same thing."""
+    rfc = context.get("rfc")
+    if not rfc or cover.get("kind") != "rfc":
+        return
+    def words(text):
+        return {w for w in re.findall(r"[a-z0-9_.]+", str(text).lower()) if len(w) > 3}
+    surfaces = facts.get("surfaces", [])
+    covered = [surfaces[i["index"]] for i in cover.get("surfaces", []) if i.get("covered") and isinstance(i.get("index"), int) and i["index"] < len(surfaces)]
+    for change in facts.get("breaking_changes", []):
+        if change.get("disclosed"):
+            continue
+        mine = words(change.get("what", ""))
+        if mine and any(len(mine & words(s_["what"])) / len(mine) >= 0.5 for s_ in covered):
+            change["disclosed"] = True
+            change["disclosed_by"] = f"RFC #{rfc['number']}"
+
+
 def assemble(workspace, context, facts, cover, quality, started):
     scope, scope_name, uncovered, notes = derive_scope(context, facts, cover)
     cover = cover["cover"]
+    settle_rfc_disclosure(facts, cover, context)
     label = derive_label(scope, context)
     body_match, body_reasons = derive_body_match(context, facts, scope)
     docs_tests = "gaps" if quality["docs"].get("status") == "gaps" or quality["tests"].get("status") == "gaps" else "ok"
@@ -1567,7 +1592,7 @@ def concerns(data):
     if scope == "rfc" and o["label"] == "rfc:required":
         items.append(f"RFC {name} is linked but not yet `rfc:on-roadmap`; the PR waits for its approval.")
     for change in facts.get("breaking_changes", []):
-        disclosed = "disclosed" if change.get("disclosed") else "**not disclosed in the body**"
+        disclosed = ("disclosed in " + change["disclosed_by"]) if change.get("disclosed_by") else ("disclosed" if change.get("disclosed") else "**not disclosed in the body or the linked RFC**")
         migration = f", {change['migration']} migration" if change.get("migration") in ("auto", "manual") else ""
         items.append(f"Breaking change ({disclosed}{migration}): {brief(change['what'], 160)}" + (f" — {change['where']}" if change.get("where") else ""))
     for m in facts.get("body_mismatches", []):

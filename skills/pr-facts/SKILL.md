@@ -47,13 +47,13 @@ A breaking change is one a user, client, or downstream developer would notice wi
 
 These do not count: internal C++ or TypeScript symbols, a fix that restores documented behavior, additive response fields, additive metrics or telemetry attributes.
 
-`disclosed` is true only if the PR body's Breaking Changes section names this change. A ticked "does not introduce breaking changes" box with a real break underneath is `disclosed: false`.
+`disclosed` is true if the PR body's Breaking Changes section names this change, or the linked RFC in the prompt describes it: the RFC is part of the description once the body links it, and the body does not have to repeat what the RFC already says. A ticked "does not introduce breaking changes" box with a real break that neither names is `disclosed: false`.
 
 ## Body mismatches
 
 Report each place the body says something the diff does not bear out. Each entry pairs the claim with what the diff shows. The cases:
 
-- the summary describes a different change than the one made (a "make --force work" title on a diff that adds a new flag instead)
+- the summary describes a different change than the one made (a "make --force work" title on a diff that adds a new flag instead); the body and the linked RFC are read together, so a change the RFC describes is not "unmentioned"
 - a material change the body does not mention: a second surface, a bundled refactor, a behavior change
 - a closing reference (`Fixes #N`) to an issue this diff would not resolve; read the issue body in the prompt, not its title
 - a second, independent problem solved in the same diff that the body does not present as such
