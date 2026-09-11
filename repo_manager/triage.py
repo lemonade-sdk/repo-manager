@@ -968,6 +968,7 @@ def run_tier(workspace, context, tier, facts=None, max_attempts=3):
                 settle_docs_structure(candidate, context)
                 annotate_known_names(candidate, context)
                 settle_default_breaks(candidate, context)
+                dedupe_breaks(candidate)
             return candidate
         error_list = "\n".join(f"- {e}" for e in errors)
         print(f"\n{tier} attempt {attempt} failed validation:\n{error_list}\n", flush=True)
@@ -1084,6 +1085,22 @@ def settle_feature_ci(facts, context):
         if surface.get("kind") == "ci-infra":
             surface["kind"] = "internal"
             surface["what"] += " (CI for the surface this PR adds)"
+
+
+BREAK_STOPWORDS = {"from", "with", "that", "this", "instead", "uses", "changes", "change", "e.g.", "than", "into", "when", "which", "only", "now", "e.g"}
+
+
+def dedupe_breaks(facts):
+    """The model sometimes states one break twice in different words; keep the first."""
+    def words(text):
+        return {w for w in re.findall(r"[a-z0-9_.~]+", str(text).lower()) if len(w) > 3 and w not in BREAK_STOPWORDS}
+    kept = []
+    for change in facts.get("breaking_changes", []):
+        mine = words(change.get("what", ""))
+        if mine and any(len(mine & words(k.get("what", ""))) / len(mine) >= 0.5 for k in kept):
+            continue
+        kept.append(change)
+    facts["breaking_changes"] = kept
 
 
 def settle_known_keys(facts, context):
@@ -1571,7 +1588,9 @@ def concerns(data):
     docs pages were checked and found fine. None of that helps a reviewer decide where to
     spend their time, so none of it is here. A clean PR gets one line saying so.
     """
-    o, facts, cover = data["outputs"], data.get("facts") or {}, data.get("cover") or {}
+    o, facts, cover = data["outputs"], dict(data.get("facts") or {}), data.get("cover") or {}
+    facts["breaking_changes"] = list(facts.get("breaking_changes", []))
+    dedupe_breaks(facts)
     surfaces = facts.get("surfaces", [])
     judged = {item.get("index"): item for item in cover.get("surfaces", [])}
     items = []
