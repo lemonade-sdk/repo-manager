@@ -18,7 +18,7 @@ The startup banner then prints the LAN URL to hand to the other device. There is
 
 Use the tag dropdown to browse `vNext` and historical releases.
 
-The **PR Reviews** tab has its own controls — the live Status column with a configurable perspective, a per-row read checkbox that unchecks itself when that Status changes, hide toggles, and comment/reviewer-request actions — documented in [PR Reviews](pr-review.md#pr-reviews-in-the-web-ui).
+The **PR Reviews** tab has its own controls — the live Status column with a configurable perspective, a per-row read checkbox that unchecks itself when that Status changes, hide toggles, and comment/reviewer-request actions — documented in [PR Reviews](pr-review.md#dashboard).
 
 Every detail pane shows how long its artifact took to generate ("Generated in: NN seconds"), captured for commit reviews, PR reviews, release reviews, and announcements alike.
 

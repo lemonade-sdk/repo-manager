@@ -1,0 +1,438 @@
+{
+ "3509": {
+  "label": "rfc:required",
+  "title": "llamacpp:sycl \u2014 first-class Intel GPU backend",
+  "author": "TravisJ33304",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3506": {
+  "label": "rfc:required",
+  "title": "feat(backends): video generation via stable-diffusion.cpp",
+  "author": "Bekhouche",
+  "state": "OPEN",
+  "weight": 3
+ },
+ "3481": {
+  "label": "rfc:required",
+  "title": "feat(kv-cache-quant): auto KV-cache quantization for llama.cpp models",
+  "author": "logicminds",
+  "state": "OPEN",
+  "weight": 3
+ },
+ "3470": {
+  "label": "rfc:required",
+  "title": "feat(server): support wildcard port and host matching in allowed origins",
+  "author": "abn",
+  "state": "MERGED",
+  "expected_tool_label": "rfc:on-roadmap",
+  "weight": 3
+ },
+ "3468": {
+  "label": "rfc:required",
+  "title": "Make --force actually bypass CUDA/ROCm hardware filtering",
+  "author": "kenvandine",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3445": {
+  "label": "rfc:required",
+  "title": "feat(app): router collection panel and add-model flow",
+  "author": "ao-batouche",
+  "state": "OPEN"
+ },
+ "3399": {
+  "label": "rfc:required",
+  "title": "Issue 2960 router llm pool sizing",
+  "author": "QuManu",
+  "state": "OPEN",
+  "weight": 3
+ },
+ "3396": {
+  "label": "rfc:required",
+  "title": "ci: test PPA package upgrade path (config + model persistence)",
+  "author": "superm1",
+  "state": "OPEN",
+  "note": "labeled required for training purposes",
+  "weight": 2
+ },
+ "3362": {
+  "label": "rfc:required",
+  "title": "test(utils): add shared lemond_server test fixture and deduplicate suites",
+  "author": "abn",
+  "state": "OPEN"
+ },
+ "3350": {
+  "label": "rfc:required",
+  "title": "MCP: expose remote model search and pull variant discovery",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "3347": {
+  "label": "rfc:required",
+  "title": "feat(server): serve bundled API docs at /docs",
+  "author": "anditherobot",
+  "state": "MERGED",
+  "note": "labeled required for training purposes"
+ },
+ "3346": {
+  "label": "rfc:required",
+  "title": "server: make registered model discovery canonical and queryable",
+  "author": "fl0rianr",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3334": {
+  "label": "rfc:required",
+  "title": "Introduce stable and nightly vLLM ROCm channels + fix the auto-bump",
+  "author": "sree-ram-11",
+  "state": "OPEN",
+  "weight": 3
+ },
+ "3319": {
+  "label": "rfc:required",
+  "title": "MCP: expose canonical Lemonade capability hub",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "3304": {
+  "label": "rfc:required",
+  "title": "feat(tray): add --spawn-server to natively supervise a local lemond",
+  "author": "abn",
+  "state": "OPEN",
+  "note": "labeled required for training purposes"
+ },
+ "3112": {
+  "label": "rfc:required",
+  "title": "lemonade import <file.json>: --dry-run policy validation, --alias; pull redirects file args to import",
+  "author": "ramkrishna2910",
+  "state": "OPEN"
+ },
+ "3030": {
+  "label": "rfc:required",
+  "title": "feat: add VoxCPM2 text-to-speech backend",
+  "author": "ZMXJJ",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3022": {
+  "label": "rfc:required",
+  "title": "ci: make inference test matrix test-owned",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "2969": {
+  "label": "rfc:required",
+  "title": "feat(telemetry): default to unlimited attribute length with size-bounded queue",
+  "author": "abn",
+  "state": "OPEN"
+ },
+ "2951": {
+  "label": "rfc:required",
+  "title": "docs(wg): add charter for Backend Plugins & Sandboxing working group",
+  "author": "abn",
+  "state": "OPEN"
+ },
+ "2923": {
+  "label": "rfc:required",
+  "title": "docs: add stable platform install pages",
+  "author": "fl0rianr",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "2256": {
+  "label": "rfc:required",
+  "title": "Add Chatterbox text-to-speech backend",
+  "author": "Geramy",
+  "state": "OPEN"
+ },
+ "1744": {
+  "label": "rfc:required",
+  "title": "Feature/memory manager",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "3518": {
+  "label": "rfc:not-required",
+  "title": "fix(models): persist cost metadata through user-model registration",
+  "author": "Bekhouche",
+  "state": "OPEN"
+ },
+ "3516": {
+  "label": "rfc:not-required",
+  "title": "Use pkgconfig to find libdrm_amdgpu",
+  "author": "jamespthomas",
+  "state": "MERGED"
+ },
+ "3513": {
+  "label": "rfc:not-required",
+  "title": "Update stable-diffusion.cpp to master-843-462d675 and CUDA master-841-017cc8e",
+  "author": "app/github-actions",
+  "state": "OPEN"
+ },
+ "3512": {
+  "label": "rfc:not-required",
+  "title": "Update llama.cpp to b10825",
+  "author": "app/github-actions",
+  "state": "OPEN",
+  "weight": 1,
+  "note": "bot bump, control"
+ },
+ "3511": {
+  "label": "rfc:not-required",
+  "title": "fix: dispatch image upscaling through backend capabilities",
+  "author": "atirna",
+  "state": "OPEN"
+ },
+ "3510": {
+  "label": "rfc:not-required",
+  "title": "[cloud][fix] Relay caller session continuity headers upstream",
+  "author": "SlawomirNowaczyk",
+  "state": "OPEN"
+ },
+ "3502": {
+  "label": "rfc:not-required",
+  "title": "fix(server): size streaming models against APU GTT pool, not VRAM carve-out (#3377)",
+  "author": "bong-water-water-bong",
+  "state": "OPEN",
+  "weight": 1,
+  "note": "pure fix, control"
+ },
+ "3501": {
+  "label": "rfc:not-required",
+  "title": "feat(telemetry): emit the routing decision as span attributes",
+  "author": "Bekhouche",
+  "state": "OPEN"
+ },
+ "3497": {
+  "label": "rfc:not-required",
+  "title": "feat(router): reject previous_response_id on a router collection",
+  "author": "Bekhouche",
+  "state": "OPEN"
+ },
+ "3496": {
+  "label": "rfc:not-required",
+  "title": "fix: name the gpt-oss-120b checkpoint instead of globbing",
+  "author": "noamsto",
+  "state": "MERGED"
+ },
+ "3494": {
+  "label": "rfc:not-required",
+  "title": "implement `/images/edit` in TheNoise",
+  "author": "bitgamma",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3488": {
+  "label": "rfc:not-required",
+  "title": "Fix(#3479) Added auto_evict vars to defaults.json and updated doc",
+  "author": "GabrielReusRodriguez",
+  "state": "MERGED"
+ },
+ "3448": {
+  "label": "rfc:not-required",
+  "title": "fix(server): report backend streams that end without any SSE event",
+  "author": "Yigtwxx",
+  "state": "OPEN"
+ },
+ "3444": {
+  "label": "rfc:not-required",
+  "title": "Minor follow-up cleanup to #3330",
+  "author": "SlawomirNowaczyk",
+  "state": "MERGED"
+ },
+ "3443": {
+  "label": "rfc:not-required",
+  "title": "docs: update windows prerequisites",
+  "author": "sofiageo",
+  "state": "OPEN"
+ },
+ "3441": {
+  "label": "rfc:not-required",
+  "title": "fix(ryzenai): accept OpenAI content-part arrays in chat messages",
+  "author": "anditherobot",
+  "state": "OPEN"
+ },
+ "3440": {
+  "label": "rfc:not-required",
+  "title": "fix(streaming): replace null delta.role with \\\"assistant\\\" in chat completion chunks",
+  "author": "anditherobot",
+  "state": "OPEN"
+ },
+ "3437": {
+  "label": "rfc:not-required",
+  "title": "fix(mcp): resolve model aliases in tool calls",
+  "author": "boecks",
+  "state": "OPEN"
+ },
+ "3436": {
+  "label": "rfc:not-required",
+  "title": "feat(metrics): relate model aliases to their target in /metrics",
+  "author": "boecks",
+  "state": "OPEN",
+  "weight": 2
+ },
+ "3435": {
+  "label": "rfc:not-required",
+  "title": "fix(anthropic): resolve model aliases on /v1/messages and the Ollama endpoints",
+  "author": "boecks",
+  "state": "OPEN"
+ },
+ "3414": {
+  "label": "rfc:not-required",
+  "title": "fix(routing): don't drop the whole router policy over one hardware-filtered classifier",
+  "author": "Bekhouche",
+  "state": "MERGED"
+ },
+ "3378": {
+  "label": "rfc:not-required",
+  "title": "Fix the license for metainfo files",
+  "author": "superm1",
+  "state": "OPEN"
+ },
+ "3361": {
+  "label": "rfc:not-required",
+  "title": "fix: recover repo name for extra models kept in HF-cache layout",
+  "author": "Davedave001",
+  "state": "OPEN"
+ },
+ "3360": {
+  "label": "rfc:not-required",
+  "title": "Fail early on inverted chars band",
+  "author": "SlawomirNowaczyk",
+  "state": "OPEN"
+ },
+ "3358": {
+  "label": "rfc:not-required",
+  "title": "update image endpoints documentation",
+  "author": "bitgamma",
+  "state": "MERGED"
+ },
+ "3339": {
+  "label": "rfc:not-required",
+  "title": "fix(router): filter candidates by context window at dispatch",
+  "author": "ao-batouche",
+  "state": "OPEN",
+  "expected_tool_label": "rfc:required",
+  "expected_scope": "no-charter"
+ },
+ "3318": {
+  "label": "rfc:not-required",
+  "title": "feat(windows): report VRAM and GPU usage in status bar via PDH",
+  "author": "blackdeathdrow",
+  "state": "OPEN"
+ },
+ "3314": {
+  "label": "rfc:not-required",
+  "title": "Conversation momentum implementation",
+  "author": "QuMuzafferEge",
+  "state": "OPEN",
+  "expected_tool_label": "rfc:required",
+  "expected_scope": "no-charter",
+  "weight": 3
+ },
+ "3310": {
+  "label": "rfc:not-required",
+  "title": "fix(system_info): safely extract numeric compute_capability in GPU detection",
+  "author": "abn",
+  "state": "OPEN"
+ },
+ "3282": {
+  "label": "rfc:not-required",
+  "title": "fix(server): report NVIDIA GPU and VRAM usage",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "3244": {
+  "label": "rfc:not-required",
+  "title": "fix(server): avoid repeat hash scans for verified model files",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "3241": {
+  "label": "rfc:not-required",
+  "title": "Scope VRAM headroom to the target GPU when auto-tuning ctx-size",
+  "author": "jgmelber",
+  "state": "OPEN"
+ },
+ "3128": {
+  "label": "rfc:not-required",
+  "title": "fix(server): preserve auxiliary checkpoints after interrupted updates",
+  "author": "Solaris-star",
+  "state": "OPEN"
+ },
+ "3101": {
+  "label": "rfc:not-required",
+  "title": "Add route_only request option: routing decision without inference (dry-route)",
+  "author": "ramkrishna2910",
+  "state": "OPEN",
+  "expected_tool_label": "rfc:required",
+  "expected_scope": "no-charter",
+  "weight": 3
+ },
+ "3100": {
+  "label": "rfc:not-required",
+  "title": "feat(routing): add cost_select deterministic cost-based router",
+  "author": "Bekhouche",
+  "state": "OPEN",
+  "expected_tool_label": "rfc:required",
+  "expected_scope": "no-charter"
+ },
+ "2997": {
+  "label": "rfc:not-required",
+  "title": "fix(sdcpp): wildcard ROCm runtime in asset only for latest bin pins",
+  "author": "blackdeathdrow",
+  "state": "OPEN"
+ },
+ "2892": {
+  "label": "rfc:not-required",
+  "title": "ci: wire multi-checkpoint integration smoke into CI",
+  "author": "fl0rianr",
+  "state": "OPEN"
+ },
+ "2235": {
+  "label": "rfc:required",
+  "weight": 3,
+  "note": "auto ctx_size: inside auto-tune charter but migrates every install"
+ },
+ "2081": {
+  "label": "rfc:required",
+  "weight": 3,
+  "note": "ARM64: renamed family->cpu_isa in /v1/system-info"
+ },
+ "2058": {
+  "label": "rfc:required",
+  "weight": 2,
+  "note": "name-collision fix changed default pull naming; Jeremy called it breaking"
+ },
+ "3028": {
+  "label": "rfc:required",
+  "weight": 3,
+  "note": ".cache->.config move with auto-migration; caused data-loss hotfix"
+ },
+ "2660": {
+  "label": "rfc:required",
+  "weight": 3,
+  "note": "CORS/allowed origins: removed same-origin fallback, env var migration"
+ },
+ "2605": {
+  "label": "rfc:required",
+  "weight": 3,
+  "note": "internal MCP client endpoint; later reverted as out of scope"
+ },
+ "2185": {
+  "label": "rfc:required",
+  "weight": 2,
+  "note": "'fix' that removed documented env vars"
+ },
+ "1872": {
+  "label": "rfc:required",
+  "weight": 2,
+  "note": "drop user./extra. prefixes: renames every custom model for clients"
+ },
+ "3447": {
+  "label": "rfc:not-required",
+  "weight": 2,
+  "note": "streaming stall fix (final revision, config key stripped)"
+ }
+}

@@ -44,9 +44,6 @@ def ensure_generation_schema(conn):
             continue
         if columns and "generation_seconds" not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN generation_seconds REAL NOT NULL DEFAULT 0")
-    pr_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_reviews)")}
-    if pr_columns and "testing_status" not in pr_columns:
-        conn.execute("ALTER TABLE pr_reviews ADD COLUMN testing_status TEXT NOT NULL DEFAULT ''")
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -89,6 +86,13 @@ def ensure_range_schema(conn):
                     )
 
 def ensure_pr_schema(conn):
+    """The triage table. A table from the pre-policy tool (no `label` column) is dropped,
+    not migrated: every review in it was judged against a contribution guide that no longer
+    exists, and the artifacts on disk keep the history."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_reviews)")}
+    if columns and "label" not in columns:
+        conn.execute("DROP TABLE pr_reviews")
+        conn.execute("DELETE FROM pr_review_comments")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS pr_reviews (
@@ -97,20 +101,14 @@ def ensure_pr_schema(conn):
           head_sha TEXT NOT NULL DEFAULT '',
           pr_title TEXT NOT NULL DEFAULT '',
           author TEXT NOT NULL DEFAULT '',
-          summary TEXT NOT NULL DEFAULT '',
-          attention_level TEXT NOT NULL DEFAULT '',
-          review_rung TEXT NOT NULL DEFAULT '',
-          reviewers_needed INTEGER NOT NULL DEFAULT 1,
-          documentation_status TEXT NOT NULL DEFAULT '',
-          testing_status TEXT NOT NULL DEFAULT '',
-          alignment_flags TEXT NOT NULL DEFAULT '[]',
-          breaking_changes TEXT NOT NULL DEFAULT '[]',
+          label TEXT NOT NULL DEFAULT '',
+          scope TEXT NOT NULL DEFAULT '',
+          body_matches_diff TEXT NOT NULL DEFAULT '',
+          docs_and_tests TEXT NOT NULL DEFAULT '',
           suggested_reviewers TEXT NOT NULL DEFAULT '[]',
-          maintainer_needed_areas TEXT NOT NULL DEFAULT '[]',
           raw_output TEXT NOT NULL,
           json_path TEXT NOT NULL DEFAULT '',
           reviewed_at TEXT NOT NULL,
-          skill_version TEXT NOT NULL,
           rubric_version TEXT NOT NULL,
           generation_seconds REAL NOT NULL DEFAULT 0,
           PRIMARY KEY (repo, pr_number, rubric_version)
@@ -152,6 +150,7 @@ def ensure_pr_state_schema(conn):
           base_ref TEXT NOT NULL DEFAULT '',
           head_sha TEXT NOT NULL DEFAULT '',
           is_draft INTEGER NOT NULL DEFAULT 0,
+          labels TEXT NOT NULL DEFAULT '[]',
           review_decision TEXT NOT NULL DEFAULT '',
           last_commit_at TEXT NOT NULL DEFAULT '',
           in_merge_queue INTEGER NOT NULL DEFAULT 0,
@@ -165,6 +164,9 @@ def ensure_pr_state_schema(conn):
         )
         """
     )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(pr_state)")}
+    if columns and "labels" not in columns:
+        conn.execute("ALTER TABLE pr_state ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'")
     # One row per repo, holding the two things a sync needs to know before it starts: how
     # far the last one got, and whether it worked. `error` is kept rather than logged
     # because a failed sync has to reach the reader — a dashboard that silently serves
@@ -505,7 +507,7 @@ def release_reviews(workspace):
 # and 2.3 seconds, against 123 PRs at 74,000 nodes and a coin-flip failure. The cost was
 # never per PR. It was per PR times every review ever written, on every page load.
 PR_DETAIL_FIELDS = (
-    "state baseRefName reviewDecision isDraft headRefOid updatedAt "
+    "state baseRefName reviewDecision isDraft headRefOid updatedAt labels(first: 20) { nodes { name } } "
     "isInMergeQueue autoMergeRequest { enabledBy { login } } "
     "commits(last: 1) { nodes { commit { committedDate } } } "
     "reviews(last: 50) { nodes { author { login } state submittedAt } } "
@@ -591,6 +593,7 @@ def parse_pr_detail(entry):
         "base": entry.get("baseRefName", ""),
         "head_sha": entry.get("headRefOid", "") or "",
         "is_draft": bool(entry.get("isDraft")),
+        "labels": [node.get("name", "") for node in ((entry.get("labels") or {}).get("nodes")) or [] if node.get("name")],
         "review_decision": entry.get("reviewDecision") or "",
         "last_commit_at": ((commits[0].get("commit") or {}).get("committedDate", "")) if commits else "",
         "in_merge_queue": bool(entry.get("isInMergeQueue")),
@@ -680,6 +683,7 @@ def read_pr_states(conn, repo, viewer=""):
             "base": row["base_ref"],
             "head_sha": row["head_sha"],
             "is_draft": bool(row["is_draft"]),
+            "labels": parse_json_text(row["labels"], []),
             "review_decision": row["review_decision"],
             "last_commit_at": row["last_commit_at"],
             "in_merge_queue": bool(row["in_merge_queue"]),
@@ -699,14 +703,14 @@ def write_pr_states(conn, repo, states, fetched_at=None):
         conn.execute(
             """
             INSERT INTO pr_state (
-              repo, pr_number, state, base_ref, head_sha, is_draft, review_decision,
+              repo, pr_number, state, base_ref, head_sha, is_draft, labels, review_decision,
               last_commit_at, in_merge_queue, auto_merge_by, reviews, comments,
               requested, updated_at, fetched_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo, pr_number) DO UPDATE SET
               state=excluded.state, base_ref=excluded.base_ref, head_sha=excluded.head_sha,
-              is_draft=excluded.is_draft, review_decision=excluded.review_decision,
+              is_draft=excluded.is_draft, labels=excluded.labels, review_decision=excluded.review_decision,
               last_commit_at=excluded.last_commit_at, in_merge_queue=excluded.in_merge_queue,
               auto_merge_by=excluded.auto_merge_by, reviews=excluded.reviews,
               comments=excluded.comments, requested=excluded.requested,
@@ -716,6 +720,7 @@ def write_pr_states(conn, repo, states, fetched_at=None):
             (
                 repo, int(number), info.get("state", ""), info.get("base", ""),
                 info.get("head_sha", ""), 1 if info.get("is_draft") else 0,
+                json.dumps(info.get("labels", [])),
                 info.get("review_decision", ""), info.get("last_commit_at", ""),
                 1 if info.get("in_merge_queue") else 0, info.get("auto_merge_by", ""),
                 json.dumps(info.get("reviews", [])), json.dumps(info.get("comments", [])),
@@ -901,140 +906,43 @@ def sync_pr_states_async(workspace, repo):
     return thread
 
 def review_coverage(reviewer_logins, requirement, maintainers, approvals=()):
-    """Does the review this PR has actually satisfy the rung contribute.md puts it on?
+    """Does the review this PR has satisfy what the guide asks: one reviewer, and where
+    possible one who lists a subject area the diff lands in.
 
-    Answers the two questions "needs a core maintainer" never did: whether someone reviewing
-    holds the subject-area expertise this PR calls for, and whether the guide's top rung
-    names someone who has not weighed in. Admin status is deliberately not consulted — it is
-    a repo permission, not evidence that a person knows this code. Callers pass the logins
-    of everyone counted as reviewing, which is theirs to decide: the Status column counts
-    who has finished, and the reviewer slate counts who is on the hook.
+    The areas come from the triage's facts pass, copied from the maintainer table, so an
+    expert here is a table lookup and never an inference. Admin status is not consulted; it
+    is a repo permission, not evidence that a person knows this code.
     """
-    rung = (requirement or {}).get("rung") or ""
-    expert_areas = [area for area in (requirement or {}).get("expert_areas") or [] if str(area).strip()]
-    # An area whose only listed maintainer is the PR author cannot be covered by anyone, so
-    # holding the PR at "Needs subject expert" is asking for a person who does not exist.
-    # Dropping it leaves the reviewer *count* as the bar, which is a requirement someone can
-    # actually meet; the review comment says which area went unstaffed and why.
-    author_owned = {
-        str(area).strip().lower()
-        for area in (requirement or {}).get("author_owned_expert_areas") or []
-    }
-    if author_owned:
-        expert_areas = [area for area in expert_areas if area.strip().lower() not in author_owned]
-    named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
+    areas = [str(a).strip() for a in (requirement or {}).get("areas") or [] if str(a).strip()]
     reviewers = [login.lower() for login in reviewer_logins]
     experts = {}
     for login in reviewers:
-        covered = covers_any_area(maintainers.get(login), expert_areas)
+        covered = covers_any_area(maintainers.get(login), areas)
         if covered:
             experts[login] = covered
-    # The requirement carries the count, because it can sit above the rung's own: an
-    # unapproved breaking change needs a maintainer who can clear it, on top of whatever the
-    # surface asks for. Reading the rung table directly is how the Status column came to say
-    # "1 required" on #2864 while the comment above it asked for 2.
-    needed = int((requirement or {}).get("reviewers_needed") or 0) or PR_RUNG_REVIEWERS.get(rung, 1)
-    # A break is cleared by a maintainer signing off, which commenting is not. Tracked
-    # separately from the count so a PR with two people talking on it does not read as
-    # "Handled" while the break it introduces is still waiting for someone to own.
-    signoff_needed = int((requirement or {}).get("breaking_signoff") or 0)
-    signed_off = sorted(
-        login for login in {str(login).lstrip("@").lower() for login in approvals}
-        if login in maintainers
+    approving_maintainers = sorted(
+        login for login in {str(login).lstrip("@").lower() for login in approvals} if login in maintainers
     )
     return {
-        "rung": rung,
         "count": len(reviewers),
-        "needed": needed,
-        "signoff_needed": signoff_needed,
-        "signed_off": signed_off,
+        "needed": 1,
         "experts": experts,
-        "expert_areas": expert_areas,
-        "named": named,
-        "named_reviewed": bool(named) and named in reviewers,
+        "areas": areas,
+        "approving_maintainers": approving_maintainers,
     }
 
 def expert_names(coverage):
-    """Who fills the rung's subject-expert slot, as "login (area, area)", or "" if nobody."""
+    """Who covers the subject area, as "login (area, area)", or "" if nobody."""
     return ", ".join(
         f"{login} ({', '.join(areas)})" for login, areas in sorted(coverage["experts"].items())
     )
-
-def coverage_note(coverage, participants):
-    """How a satisfied rung is satisfied, in one clause.
-
-    A rung that is met says so with its arithmetic, because the labels that follow name
-    only the people other than me — which left a two-reviewer PR reading as though one
-    reviewer had covered it, in flat contradiction of the rung shown beside it.
-    """
-    if not coverage["rung"]:
-        return ""
-    who = ", ".join(sorted(participants))
-    plural = "" if coverage["count"] == 1 else "s"
-    parts = [f"{coverage['count']} reviewer{plural}, {coverage['needed']} required"]
-    if coverage.get("signoff_needed"):
-        parts.append(
-            f"{', '.join(coverage['signed_off'])} signed off the breaking change"
-            if coverage.get("signed_off") else "the breaking change is not signed off"
-        )
-    experts = expert_names(coverage)
-    if experts:
-        parts.append(f"expert slot covered by {experts}")
-    if coverage["named"] and coverage["named_reviewed"]:
-        parts.append(f"@{coverage['named']} has reviewed")
-    # "Covered", not "met" — this counts who is looking, which is what the rung asks.
-    # Whether they approved is the review decision, and a different question.
-    return f"Reviewer coverage for the {coverage['rung']} rung: {who} — {'; '.join(parts)}."
-
-def coverage_status(coverage, names):
-    # The unapproved breaking change deliberately does *not* appear here. This column says
-    # whose turn it is — Needs triage, Waiting, Requests, Handled — and a merge requirement
-    # is not a turn. Announcing it here fired on #2307, where nobody had reviewed at all,
-    # and on #3277, where a maintainer had already requested changes; in both it buried the
-    # only thing the column is for. The requirement lives in the Attention level and the
-    # comment, and it is enforced below where it actually bites: a PR is not Approved while
-    # its break is unsigned.
-    """(label, detail) for a PR that already has reviewers, or None to fall through."""
-    rung = coverage["rung"]
-    if not rung:
-        return None
-    if rung == "named-approver" and not coverage["named_reviewed"]:
-        return (
-            f"Needs @{coverage['named']}",
-            f"In review by {names}, but this PR is on the guide's top rung "
-            f"(project scope, re-architecture, or design language) — it needs "
-            f"@{coverage['named']} specifically.",
-        )
-    if coverage["expert_areas"] and not coverage["experts"]:
-        areas = ", ".join(coverage["expert_areas"])
-        return (
-            "Needs subject expert",
-            f"In review by {names}, but none of them list {areas} in the maintainer table — "
-            "this rung needs a subject-area expert.",
-        )
-    if coverage["count"] < coverage["needed"]:
-        experts = expert_names(coverage)
-        satisfied = f" The expert slot is covered by {experts}." if experts else ""
-        return (
-            f"Needs {coverage['needed'] - coverage['count']} more",
-            f"In review by {names} — this rung needs {coverage['needed']} reviewers."
-            f"{satisfied}",
-        )
-    return None
 
 STANDING_VERDICTS = ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
 
 def latest_reviews(info):
     """{login: where each person currently stands} — their verdict if they gave one.
 
-    Reading this as "their most recent review of any kind" is wrong, and quietly so.
-    Approving and then adding a note is one of the most ordinary things a reviewer does —
-    Geramy did exactly that on #2013, fifty-four seconds apart — and taking the last row
-    erased the approval, leaving a PR GitHub calls APPROVED reading "Needs reviewer" here.
-    Eleven open PRs were hiding a verdict this way, most of them change requests, each one
-    telling a maintainer to go and staff a PR whose review had already happened.
-
-    So a comment-verdict review says a person spoke, not what they decided: it fills a slot
+    A comment-verdict review says a person spoke, not what they decided: it fills a slot
     only for someone who has not decided anything yet, and never overwrites one. This is
     GitHub's own model — its reviewDecision survives a later comment too.
     """
@@ -1052,18 +960,9 @@ def latest_reviews(info):
 def derive_review_status(info, author, viewer_override="", requirement=None, maintainers=None):
     """Does this PR need something from me? Four answers, from my perspective.
 
-    The column used to speak eleven statuses describing review *activity* — Handled,
-    Waiting, In discussion, Needs 1 more, Needs subject expert, Approved (1/2) — and a
-    maintainer scanning it still had to work out, per row, whether any of that meant they
-    should act. Worse, the activity words did not line up with action: "Handled" covered
-    PRs nobody had reviewed, and "In discussion" covered eighteen with no reviewer assigned
-    at all, which are exactly the ones that need attention.
-
-    So the axis is whether anyone is on the hook for the next move, and there are only four
-    outcomes: **Merge** (it is done, I merge it), **Review** (my turn), **Needs reviewer**
-    (nobody can satisfy this PR's requirement as staffed), and **In progress** (someone
-    else is on the hook — another reviewer, or the author). The tooltip keeps the detail
-    the labels used to carry.
+    **Merge** (it is done, I merge it), **Review** (my turn), **Needs reviewer** (nobody is
+    on the hook), and **In progress** (someone else is on the hook — another reviewer, or
+    the author). The tooltip keeps the detail.
 
     Returns ('', '') when the PR is not open or live data is missing.
     """
@@ -1074,9 +973,11 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     table = maintainers or {}
     latest = latest_reviews(info)
 
-    # Checked before anything else: a PR on its way out needs nothing from anyone, whatever
-    # its review state says. #3327 sat in the merge queue reading "Merge", which asks the
-    # one person who has already done their part to do it again.
+    # A PR that carries rfc:required is waiting on a discussion, not on a reviewer. Nothing
+    # about who has or has not reviewed it changes that, so it is answered before any of
+    # the reviewer arithmetic below.
+    if "rfc:required" in (info.get("labels") or []):
+        return "Waiting for RFC", "Labeled rfc:required; review waits for an approved RFC."
     if info.get("in_merge_queue"):
         return "In progress", "In the merge queue."
     if info.get("auto_merge_by"):
@@ -1097,19 +998,12 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         str(handle).lstrip("@").lower() for handle in info.get("requested") or []
         if handle and counts(str(handle).lstrip("@").lower())
     }
-    # Someone who submitted a review and withheld the verdict. They are not covering the
-    # PR — no verdict, nothing satisfied — but they are emphatically not a gap in staffing
-    # either, and GitHub cleared their review request the moment they hit Submit. Counting
-    # them nowhere is what put "Needs reviewer" on #3112 the morning after bitgamma
-    # reviewed it, which reads as "go and find someone" about a PR someone had just read.
     engaged = {
         login for login, review in latest.items()
         if review.get("state") == "COMMENTED" and counts(login)
     }
-    named = str((requirement or {}).get("named_approver") or "").lstrip("@").lower()
 
-    # --- 1. My turn. Only new code hands a change request back to me; talking is not
-    # changing, and a reply may well be aimed at another reviewer entirely.
+    # --- 1. My turn.
     mine = latest.get(viewer)
     if mine and mine.get("state") == "CHANGES_REQUESTED":
         my_time = mine.get("at") or ""
@@ -1127,10 +1021,8 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
         return "In progress", detail
     if viewer and viewer in requested and viewer not in reviewed:
         return "Review", "You are a requested reviewer."
-    if named and named == viewer and viewer not in reviewed:
-        return "Review", "contribute.md names you for this rung."
 
-    # --- 2. Blocked on the author: somebody's change request is outstanding.
+    # --- 2. Blocked on the author.
     blocking = sorted(
         login for login in reviewed
         if (latest.get(login) or {}).get("state") == "CHANGES_REQUESTED"
@@ -1138,121 +1030,65 @@ def derive_review_status(info, author, viewer_override="", requirement=None, mai
     if blocking:
         return "In progress", f"{', '.join(blocking)} requested changes."
 
-    # --- 3. Done: enough approvals, and a maintainer among them when a break needs clearing.
+    # --- 3. Done: an approval. The expert is noted, not required — the guide says
+    # "whenever possible", which is a wish for the reviewer to weigh, not a gate.
     coverage = review_coverage(sorted(reviewed), requirement, table, approvals)
-    signoff_needed = coverage.get("signoff_needed") or 0
-    approving_maintainers = [login for login in approvals if login in table]
-    needed = coverage.get("needed") or 1
-    if approvals and len(approvals) >= needed and (not signoff_needed or approving_maintainers):
-        return "Merge", f"Approved by {', '.join(approvals)}."
+    if approvals:
+        experts = expert_names(coverage)
+        note = f" Subject area covered by {experts}." if experts else (
+            f" Nobody approving lists {', '.join(coverage['areas'])}." if coverage["areas"] else ""
+        )
+        return "Merge", f"Approved by {', '.join(approvals)}.{note}"
 
-    # --- 4. Is anyone on the hook to close the gap? Counted over the people who have
-    # reviewed *plus* the ones who have been asked to, because a requested reviewer is a
-    # commitment — the PR resolves itself without me. If even that would not satisfy the
-    # requirement, no amount of waiting fixes it and somebody has to staff it.
+    # --- 4. Is anyone on the hook?
     prospective = sorted(reviewed | requested | engaged)
-    shortfall = coverage_status(review_coverage(prospective, requirement, table, approvals),
-                                ", ".join(prospective))
-    if shortfall is None:
-        if approvals:
-            missing = needed - len(approvals)
-            return "In progress", (
-                f"Approved by {', '.join(approvals)}; {missing} more to come."
-            )
-        # "On it" claims someone has undertaken to answer, which a requested reviewer has
-        # and a person who commented and moved on has not. Where the whole set is the
-        # latter, the sentence says what actually happened instead.
-        if prospective and all(login in engaged and login not in requested for login in prospective):
-            return "In progress", (
-                f"Reviewed with comments by {', '.join(prospective)}; no verdict yet."
-            )
+    if prospective:
+        if all(login in engaged and login not in requested for login in prospective):
+            return "In progress", f"Reviewed with comments by {', '.join(prospective)}; no verdict yet."
         return "In progress", f"On it: {', '.join(prospective)}."
-    # coverage_status decides *whether* there is a gap; its sentence was written for the old
-    # per-shortfall labels and reads badly reused ("In review by  — this rung needs 1
-    # reviewers"), so the tooltip is composed here from the coverage itself.
-    gap = review_coverage(prospective, requirement, table, approvals)
-    short = gap["needed"] - gap["count"]
-    missing = []
-    if gap["rung"] == "named-approver" and not gap["named_reviewed"]:
-        missing.append(f"@{gap['named']}")
-    if gap["expert_areas"] and not gap["experts"]:
-        missing.append(f"a {' / '.join(gap['expert_areas'])} expert")
-    if short > 0:
-        missing.append(f"{short} reviewer{'s' if short != 1 else ''}")
-    if gap.get("signoff_needed") and not gap.get("signed_off"):
-        missing.append("a maintainer to approve the breaking change")
-    detail = f"Needs {', '.join(missing) or 'a reviewer'}."
-    # Same distinction as above, and it matters more here: this PR genuinely is short of
-    # the review it needs, so the sentence has to be exact about who is already involved
-    # and what they have actually done about it.
-    on_it = sorted(login for login in prospective if login not in engaged or login in requested)
-    remarked = sorted(login for login in prospective if login in engaged and login not in requested)
-    if on_it:
-        detail += f" On it: {', '.join(on_it)}."
-    if remarked:
-        detail += f" {', '.join(remarked)} commented without a verdict."
-    return "Needs reviewer", detail
+    return "Needs reviewer", "Nobody is reviewing this PR."
 
+
+def attention_of(item):
+    """One word for the list: `routine` when every answer is the good one, `elevated` when
+    any is not. The five answers themselves stay in the detail pane."""
+    reasons = []
+    if item.get("label") == "rfc:required":
+        reasons.append("needs an RFC")
+    if item.get("body_matches_diff") == "no":
+        reasons.append("body does not match the diff")
+    if item.get("docs_and_tests") == "gaps":
+        reasons.append("docs or tests have gaps")
+    return ("elevated" if reasons else "routine"), "; ".join(reasons) or "label, body, docs and tests all clean"
+
+def requirement_of(data):
+    """What the Status column checks a PR's reviewers against: the areas the diff lands in."""
+    facts = (data or {}).get("facts") or {}
+    return {"areas": facts.get("areas") or []}
 
 def reviewer_coverage(workspace, repo, pr_number, author, requirement):
-    """Whether this PR already has the review its rung asks for, and who is providing it.
-
-    This is the same question the Status column answers, off the same mirror and the same
-    coverage rules, so a PR the dashboard calls covered is never simultaneously told by our
-    own PR comment that it needs reviewers.
-
-    This one refreshes before it reads. Everywhere else a minute of staleness is invisible
-    and harmless, but this answer is about to be written into a comment on someone's PR,
-    naming people — and a stale read here asks for reviewers who already reviewed. One PR
-    is a single node and costs nothing; the price of skipping it is paid in public.
-
-    Not knowable is reported as not covered — gh unreachable, the PR closed, no rung on the
-    stored review. Suggesting reviewers a PR turns out not to need is a smaller harm than
-    withholding the slate from one that does.
-    """
+    """Whether this PR already has a reviewer, and who. Refreshes before it reads, because
+    the answer is about to be written into a comment naming people."""
     sync_pr_states(workspace, repo, numbers=[int(pr_number)])
     with connect(db_file(workspace)) as conn:
         info = read_pr_states(conn, repo).get(int(pr_number)) or {}
     maintainers = load_maintainer_context(workspace, repo).get("table", {})
     return coverage_verdict(info, author, requirement, maintainers)
 
-def pr_comment_preview(repo, item, maintainer_table=None):
-    """The comment this PR's review would post, for the dashboard to show verbatim.
-
-    The pane is a preview, not a second rendering: it is the same call the Post review
-    comment button makes, minus the HTML marker, which GitHub does not display either.
-    """
-    # Derived the way post_pr_review derives it, not the way the dashboard reads artifacts:
-    # normalize_pr_review_data recomputes fields the raw artifact can disagree with — the
-    # attention level among them — and a preview that skipped it showed a different level
-    # from the one that would be posted.
-    data = pr_review_data_from_row(item, maintainer_table) or item.get("details") or {}
-    body = render_pr_review_comment(
-        repo, item["pr_number"], data, item.get("head_sha", ""), item.get("coverage")
-    )
-    return "\n".join(
-        line for line in body.splitlines() if not line.startswith(PR_REVIEW_COMMENT_MARKER)
-    ).strip()
+def pr_comment_preview(item):
+    """The comment this PR's triage would post, for the dashboard to show verbatim."""
+    data = item.get("details") or {}
+    if not data:
+        return ""
+    body = render_comment(data, item.get("head_sha", ""))
+    return "\n".join(line for line in body.splitlines() if not line.startswith(COMMENT_MARKER)).strip()
 
 def coverage_verdict(info, author, requirement, maintainers):
-    """reviewer_coverage's answer, for callers that already hold the live state and table.
-
-    Counts everyone on the hook, not only everyone who has finished: a reviewer who has been
-    requested and has not answered yet is staffed on this PR, and naming more candidates will
-    not make them answer sooner. That makes this a wider net than the Status column's, which
-    asks whether the review has *happened* — a fully staffed PR can still read Waiting, and
-    those are not conflicting answers, they are answers to different questions.
-
-    Returns "pending" as well: the counted people who have not reviewed yet, so the sentence
-    that replaces the slate can say the rung is staffed without claiming it is satisfied.
-    """
+    """Counts everyone on the hook, not only everyone who has finished: a requested
+    reviewer is staffed on this PR, and naming more candidates will not make them answer."""
     if info.get("state") != "OPEN":
         return {"adequate": False, "who": [], "pending": []}
     author_login = str(author or "").lstrip("@").lower()
-    # Reviews, not comments. This was the last place still counting a maintainer's comment
-    # as coverage, which on #3330 dropped the reviewer slate and told the author "Already
-    # reviewed by: jeremyfowers" when he had only commented — while the Status column beside
-    # it correctly said the PR still needed a reviewer.
     latest = latest_reviews(info)
     reviewing = {
         login for login, review in latest.items()
@@ -1266,28 +1102,10 @@ def coverage_verdict(info, author, requirement, maintainers):
     }
     who = sorted(set(reviewing) | requested)
     pending = sorted(requested - set(reviewing))
-    approved_by = [
-        login for login, review in latest.items()
-        if review.get("state") == "APPROVED" and login != author_login and not is_ai_reviewer(login)
-    ]
-    if not who or not (requirement or {}).get("rung"):
-        # A blanket "approved means covered" used to sit here too. GitHub calls a PR approved
-        # on the first approval, so it answered a question nobody asked — the rung's, and any
-        # break sign-off, are settled below against what the requirement actually says.
-        return {"adequate": False, "who": who, "pending": pending}
-    coverage = review_coverage(who, requirement, maintainers, approved_by)
-    # coverage_status names what is still missing, and returns None once nothing is.
-    return {
-        "adequate": coverage_status(coverage, ", ".join(who)) is None,
-        "who": who,
-        "pending": pending,
-    }
+    return {"adequate": bool(who), "who": who, "pending": pending}
 
 def pr_reviews(workspace, pr_viewer=""):
     rows = []
-    # Parsed once per repo: the derivation needs it to spot expert areas whose only listed
-    # maintainer is the PR's own author.
-    maintainer_tables = {}
     effective_viewer = str(pr_viewer or "").lstrip("@").strip()
     with connect(db_file(workspace)) as conn:
         comment_urls = {
@@ -1295,68 +1113,21 @@ def pr_reviews(workspace, pr_viewer=""):
             for row in conn.execute("SELECT repo, pr_number, comment_url FROM pr_review_comments")
         }
         seen = set()
-        for row in conn.execute(
-            """
-            SELECT rowid, *
-            FROM pr_reviews
-            ORDER BY reviewed_at DESC, pr_number DESC
-            """
-        ):
+        for row in conn.execute("SELECT rowid, * FROM pr_reviews ORDER BY reviewed_at DESC, pr_number DESC"):
             item = dict(row)
             key = (item["repo"], item["pr_number"])
             if key in seen:
                 continue
             seen.add(key)
-            # One derivation, shared with the CLI. The list columns used to read the DB's
-            # frozen copies while the Status column re-derived coverage from the raw
-            # artifact, so Attention, Scope, Status and the comment could each answer
-            # differently about the same PR. Everything below now reads this object.
-            if item["repo"] not in maintainer_tables:
-                maintainer_tables[item["repo"]] = load_maintainer_context(
-                    workspace, item["repo"]
-                ).get("table", {})
-            data = cli_pr_review_facts(review_data(item), maintainer_tables[item["repo"]])
+            data = data_from_row(item) or {}
             item["details"] = data
-            requirement = data.get("review_requirement") or {}
-            item["attention_level"] = data.get("attention_level") or item.get("attention_level") or ""
-            item["review_rung"] = requirement.get("rung") or item.get("review_rung") or ""
-            item["reviewers_needed"] = requirement.get("reviewers_needed") or item.get("reviewers_needed") or 1
-            # The rung is a surface lookup and stays the compact, sortable form; but printed
-            # alone beside "High" it read as a contradiction on a PR needing two reviewers.
-            # The arrow says the requirement sits above the rung and by how much.
-            # "one-reviewer → 2" was a private notation: it rendered fine and told the
-            # reader nothing. A PR whose breaking change needs signing off wants two people,
-            # one of them a listed maintainer, so it says that in the same slug vocabulary
-            # the other rungs use.
-            rung_base = PR_RUNG_REVIEWERS.get(item["review_rung"], 1)
-            item["scope_display"] = (
-                "two-with-maintainer"
-                if item["reviewers_needed"] > rung_base else item["review_rung"]
-            )
-            item["summary"] = data.get("summary", item.get("summary") or "")
-            item["alignment_flags"] = data.get("alignment_flags", parse_json_text(item.get("alignment_flags"), []))
-            item["breaking_changes"] = data.get("breaking_changes", parse_json_text(item.get("breaking_changes"), []))
-            item["suggested_reviewers"] = data.get(
-                "suggested_reviewers", parse_json_text(item.get("suggested_reviewers"), [])
-            )
-            item["maintainer_needed_areas"] = data.get(
-                "maintainer_needed_areas", parse_json_text(item.get("maintainer_needed_areas"), [])
-            )
-            item["documentation"] = data.get("documentation", {})
-            item["testing"] = data.get("testing", {})
-            item["review_requirement"] = data.get("review_requirement", {})
-            item["focus"] = data.get("focus", {})
-            item["evidence"] = data.get("evidence", {})
-            item["description_check"] = data.get("description_check", {})
+            item["suggested_reviewers"] = parse_json_text(item.get("suggested_reviewers"), [])
+            item["requirement"] = requirement_of(data)
+            item["attention"], item["attention_detail"] = attention_of(item)
             item["coverage"] = {"adequate": False, "who": [], "pending": []}
-            item["comment_markdown"] = ""
-            item["comment_url"] = comment_urls.get((item["repo"], item["pr_number"]), "")
+            item["comment_markdown"] = pr_comment_preview(item)
+            item["comment_url"] = comment_urls.get(key, "")
             rows.append(item)
-    # Every PR fact below comes out of the local mirror, so rendering this page cannot fail,
-    # cannot time out, and cannot half-succeed. Whether that mirror is current is a separate
-    # question with its own answer in `sync`, which is the honest way to put it — the old
-    # page asked GitHub 123 questions at render time and, when one went unanswered, said
-    # nothing at all about any of them.
     repos = {item["repo"] for item in rows}
     authenticated = ""
     sync_states = {}
@@ -1375,22 +1146,15 @@ def pr_reviews(workspace, pr_viewer=""):
                 item["pr_state"] = info.get("state", "")
                 item["base_ref"] = info.get("base", "")
                 item["state_fetched_at"] = info.get("fetched_at", "")
-                # Absent from the mirror is its own answer, and a different one from
-                # "merged, so nothing is needed": the sync has not reached this PR yet.
                 item["state_known"] = bool(info)
                 status, detail = derive_review_status(
-                    info,
-                    item.get("author"),
-                    viewer,
-                    requirement=item.get("review_requirement"),
-                    maintainers=maintainers,
+                    info, item.get("author"), viewer, requirement=item["requirement"], maintainers=maintainers,
                 )
                 item["review_status"] = status
                 item["review_status_detail"] = detail
-                item["coverage"] = coverage_verdict(
-                    info, item.get("author"), item.get("review_requirement"), maintainers
-                )
-                item["comment_markdown"] = pr_comment_preview(repo, item, maintainers)
+                item["pr_labels"] = info.get("labels") or []
+                item["pr_is_draft"] = bool(info.get("is_draft"))
+                item["coverage"] = coverage_verdict(info, item.get("author"), item["requirement"], maintainers)
     return rows, viewer, sync_states
 
 def release_announcements(workspace):
@@ -1601,13 +1365,15 @@ def run_pr_action(workspace, action, payload):
     pr_number = payload.get("pr_number")
     if not isinstance(pr_number, int):
         return {"ok": False, "error": "Missing pr_number"}
-    from repo_manager import cli
+    from repo_manager import triage
 
     try:
         repo = load_config(workspace)["repo"]
         if action == "comment":
-            return cli.post_pr_review(workspace, repo, pr_number)
-        return cli.request_pr_reviewers(workspace, repo, pr_number)
+            return triage.post_comment(workspace, repo, pr_number)
+        if action == "label":
+            return triage.apply_label(workspace, repo, pr_number)
+        return triage.request_reviewers(workspace, repo, pr_number)
     except SystemExit as exc:
         return {"ok": False, "error": str(exc) or "Command failed"}
 
@@ -1675,10 +1441,10 @@ def make_handler(workspace):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in ("/api/todo", "/api/read", "/api/pr-comment", "/api/pr-reviewers", "/api/sync"):
+            if path not in ("/api/todo", "/api/read", "/api/pr-comment", "/api/pr-reviewers", "/api/pr-apply-label", "/api/sync"):
                 self.send_error(404)
                 return
-            if path in ("/api/pr-comment", "/api/pr-reviewers"):
+            if path in ("/api/pr-comment", "/api/pr-reviewers", "/api/pr-apply-label"):
                 # These act on GitHub with the user's gh credentials, so reject
                 # cross-origin requests (browser-set Origin that isn't this server).
                 origin = self.headers.get("Origin", "")
@@ -1701,6 +1467,8 @@ def make_handler(workspace):
                 result = update_read_state(workspace, payload)
             elif path == "/api/pr-comment":
                 result = run_pr_action(workspace, "comment", payload)
+            elif path == "/api/pr-apply-label":
+                result = run_pr_action(workspace, "label", payload)
             else:
                 result = run_pr_action(workspace, "reviewers", payload)
             self.send_json(result, status=200 if result.get("ok") else 400)
@@ -2182,7 +1950,7 @@ INDEX_HTML = r"""<!doctype html>
       background: #e9f7ef;
       border-color: #bfe7d0;
     }
-    .badge.in-progress, .badge.handled, .badge.waiting, .badge.in-discussion {
+    .badge.in-progress, .badge.handled, .badge.waiting, .badge.in-discussion, .badge.waiting-for-rfc {
       color: #5c6470;
       background: #f0f1f3;
       border-color: #d8dbe0;
@@ -2232,6 +2000,10 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--warn);
       background: #fff5df;
       border-color: #f4d79a;
+    }
+    .badge.tone-road {
+      background: #dbe7f5;
+      color: #24507f;
     }
     .badge.tone-danger {
       color: var(--danger);
@@ -2597,6 +2369,7 @@ INDEX_HTML = r"""<!doctype html>
                 <input type="text" id="pr-viewer" spellcheck="false"></label>
               <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed PRs</label>
               <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide PRs not into main</label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-drafts" checked> Hide draft PRs</label>
               <span class="muted" id="pr-count"></span>
               <span class="sync-group">
                 <span class="sync-state" id="pr-sync"></span>
@@ -2610,9 +2383,8 @@ INDEX_HTML = r"""<!doctype html>
                     <th style="width: 34px;" title="Checked off: stays checked until the PR's Status changes"></th>
                     <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
                     <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
-                    <th style="width: 110px;" class="sortable" data-sort="attention" title="Sort by attention level">Attention</th>
-                    <th style="width: 84px;" class="sortable" data-sort="scope" title="Sort by review scope">Scope</th>
-                    <th class="sortable" data-sort="description">Description</th>
+                    <th style="width: 104px;" class="sortable" data-sort="attention" title="Elevated when the label, body, or docs and tests need attention">Attention</th>
+                    <th class="sortable" data-sort="description">Title</th>
                     <th style="width: 130px;" class="sortable" data-sort="author">Author</th>
                   </tr>
                 </thead>
@@ -2700,6 +2472,7 @@ INDEX_HTML = r"""<!doctype html>
       prActionMessage: null,
       hideClosedPrs: true,
       hideNonMainPrs: true,
+      hideDraftPrs: true,
       prSort: rememberedSort.key,
       prSortDesc: rememberedSort.desc,
       prViewer: ""
@@ -2718,14 +2491,16 @@ INDEX_HTML = r"""<!doctype html>
       return `<span class="badge ${cls}">${esc(value || "Unknown")}</span>`;
     }
 
-    // Scope is a slug, so the whole sentence lives in the tooltip.
-    function scopeTitle(row) {
-      if (!row.review_rung) return "";
-
-      if ((row.scope_display || "") === "two-with-maintainer") {
-        return `${row.review_rung} rung, raised to 2 (one a maintainer) by an unapproved breaking change.`;
-      }
-      return `${row.review_rung} rung: ${row.reviewers_needed} reviewer(s).`;
+    // The five answers are one-word verdicts; colour says which way each one points.
+    function verdictBadge(value, kind) {
+      const v = String(value || "");
+      let tone = "neutral";
+      if (kind === "label") tone = v === "rfc:required" ? "danger" : v === "rfc:on-roadmap" ? "road" : v ? "ok" : "neutral";
+      if (kind === "scope") tone = /^(fix|working-group|rfc)\b/.test(v) ? "ok" : v ? "warn" : "neutral";
+      if (kind === "yesno") tone = v === "yes" ? "ok" : v === "no" ? "warn" : "neutral";
+      if (kind === "quality") tone = v === "ok" ? "ok" : v === "gaps" ? "warn" : "neutral";
+      if (kind === "attention") tone = v === "routine" ? "ok" : v === "elevated" ? "warn" : "neutral";
+      return `<span class="badge tone-${tone}">${esc(v || "—")}</span>`;
     }
 
     function statusBadge(row) {
@@ -3078,6 +2853,9 @@ INDEX_HTML = r"""<!doctype html>
     function prVisible(row) {
       if (state.hideClosedPrs && row.pr_state && row.pr_state !== "OPEN") return false;
       if (state.hideNonMainPrs && row.base_ref && row.base_ref !== "main") return false;
+      // Only a mirrored draft is hidden; a PR the sync has not reached is shown, like the
+      // other two toggles, rather than silently dropped.
+      if (state.hideDraftPrs && row.state_known && row.pr_is_draft) return false;
       return true;
     }
 
@@ -3089,16 +2867,9 @@ INDEX_HTML = r"""<!doctype html>
       "Review": 0,
       "Merge": 1,
       "Needs reviewer": 2,
-      "In progress": 3
+      "In progress": 3,
+      "Waiting for RFC": 4
     };
-    const ATTENTION_RANK = { "High": 0, "Elevated": 1, "Routine": 2 };
-    const SCOPE_RANK = {
-      "named-approver": 0,
-      "two-with-maintainer": 1,
-      "two-with-expert": 2,
-      "one-reviewer": 3
-    };
-
     function prSortValue(row, key) {
       switch (key) {
         case "pr": return Number(row.pr_number) || 0;
@@ -3107,16 +2878,9 @@ INDEX_HTML = r"""<!doctype html>
           // An unknown or absent status sorts with the quiet end rather than the top.
           return rank === undefined ? 90 : rank;
         }
-        case "attention": {
-          const rank = ATTENTION_RANK[row.attention_level];
-          return rank === undefined ? 90 : rank;
-        }
-        case "scope": {
-          const rank = SCOPE_RANK[row.scope_display || row.review_rung];
-          return rank === undefined ? 90 : rank;
-        }
+        case "attention": return row.attention === "elevated" ? 0 : 1;
         case "author": return String(row.author || "").toLowerCase();
-        case "description": return String(row.pr_title || row.summary || "").toLowerCase();
+        case "description": return String(row.pr_title || "").toLowerCase();
         default: return 0;
       }
     }
@@ -3141,7 +2905,7 @@ INDEX_HTML = r"""<!doctype html>
       const query = state.filter.trim().toLowerCase();
       if (!query) return sortPrs(rows);
       return sortPrs(rows.filter((row) => [
-        String(row.pr_number), row.pr_title, row.summary, row.author, row.attention_level, row.review_rung, row.review_status
+        String(row.pr_number), row.pr_title, row.author, row.label, row.scope, row.attention, row.review_status
       ].join(" ").toLowerCase().includes(query)));
     }
 
@@ -3295,6 +3059,11 @@ INDEX_HTML = r"""<!doctype html>
         // line right below this one, and the two together read as two comments.
         return result.action === "updated" ? "Updated the review comment." : "Posted the review comment.";
       }
+      if (kind === "label") {
+        const steps = { label: "applied the label", draft: "marked as draft", message: "posted the RFC request" };
+        const done = (result.done || []).map((step) => steps[step] || step);
+        return `${result.label}: ${done.join(", ") || "already applied, nothing to do"}.`;
+      }
       const parts = [];
       if ((result.requested || []).length) parts.push(`Requested: ${result.requested.join(", ")}`);
       (result.skipped || []).forEach((item) => parts.push(`Skipped ${item.handle} (${item.reason})`));
@@ -3316,6 +3085,18 @@ INDEX_HTML = r"""<!doctype html>
       // requested on the PR. The tooltip says who is covering it, so the button explains
       // itself rather than just refusing. `repo-manager request-pr-reviewers N` still works:
       // typing the command is an explicit override, clicking a button you cannot read is not.
+      // The label button is the same act the GitHub Action will perform on every new PR:
+      // apply the triage's rfc: label, and for rfc:required also draft the PR and post the
+      // standard request. Once GitHub already shows the label there is nothing left to do.
+      // For rfc:required the button stays live: the message step is not visible from the
+      // mirror, and every step is idempotent, so a click on a PR that is done says so.
+      const labelApplied = row.label !== "rfc:required" && (row.pr_labels || []).includes(row.label);
+      const labelButton = row.label === "rfc:required" ? "Request RFC" : `Apply ${row.label}`;
+      const labelTitle = labelApplied
+        ? `${row.label} is already applied on GitHub`
+        : row.label === "rfc:required"
+          ? "Apply rfc:required, mark the PR as a draft, and post the standard RFC request (steps already done are skipped)"
+          : `Apply the ${row.label} label on GitHub`;
       const covered = (row.coverage || {}).adequate;
       const who = ((row.coverage || {}).who || []).join(", ");
       const reviewersTitle = covered
@@ -3325,6 +3106,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="pr-actions">
           <button class="copy" id="pr-post-comment" data-pr="${row.pr_number}" ${disabled}>Post review comment</button>
           <button class="copy" id="pr-request-reviewers" data-pr="${row.pr_number}" title="${esc(reviewersTitle)}" ${disabled || (covered ? "disabled" : "")}>Request reviewers</button>
+          <button class="copy" id="pr-apply-label" data-pr="${row.pr_number}" title="${esc(labelTitle)}" ${disabled || (labelApplied ? "disabled" : "")}>${esc(labelButton)}</button>
         </div>
         ${message}
         ${commentLink}`;
@@ -3334,7 +3116,8 @@ INDEX_HTML = r"""<!doctype html>
       if (isStatic) return;
       const bindings = [
         ["pr-post-comment", "/api/pr-comment", "comment"],
-        ["pr-request-reviewers", "/api/pr-reviewers", "reviewers"]
+        ["pr-request-reviewers", "/api/pr-reviewers", "reviewers"],
+        ["pr-apply-label", "/api/pr-apply-label", "label"]
       ];
       bindings.forEach(([id, path, kind]) => {
         const button = $(id);
@@ -3428,10 +3211,16 @@ INDEX_HTML = r"""<!doctype html>
           return `<p class="md-verdict"><span class="badge ${tone}">${esc(lead[1])}</span> ${mdInline(lead[2] || "")}</p>`;
         }
       }
-      // The level is the pill here, not the words "Attention level".
-      const attention = line.match(/^Attention level:\s*([A-Za-z][A-Za-z-]*)(?:\s*—\s*(.*))?$/);
-      if (attention) {
-        return `<p><strong>Attention level:</strong> ${badge(attention[1])} ${mdInline(attention[2] || "")}</p>`;
+      // The five triage lines: "**label:** `rfc:required`". The key stays a label and the
+      // value becomes the same pill the list columns use.
+      const triageLine = line.match(/^\*\*(label|scope|body matches diff|docs and tests):\*\*\s*`([^`]*)`\s*$/);
+      if (triageLine) {
+        const kind = { "label": "label", "scope": "scope", "body matches diff": "yesno", "docs and tests": "quality" }[triageLine[1]];
+        return `<p><span class="md-label">${esc(triageLine[1])}</span> ${verdictBadge(triageLine[2], kind)}</p>`;
+      }
+      const reviewersLine = line.match(/^\*\*(suggested reviewers):\*\*\s*(.*)$/);
+      if (reviewersLine) {
+        return `<p><span class="md-label">${esc(reviewersLine[1])}</span> ${mdInline(reviewersLine[2])}</p>`;
       }
       // Inside the Explanation fold each check heads its block as "**Name: verdict**".
       // The verdict is the pill, the name is the label.
@@ -3448,7 +3237,7 @@ INDEX_HTML = r"""<!doctype html>
         return `<p class="muted">${mdInline(line)}</p>`;
       }
       // The AI-assistance footer is end matter: below the review, and below its rule.
-      if (/^_\[AI-assisted review\]/.test(line)) {
+      if (/^_AI-assisted triage/.test(line)) {
         return `<p class="md-footer">${mdInline(line)}</p>`;
       }
       return `<p>${mdInline(line)}</p>`;
@@ -3641,9 +3430,8 @@ INDEX_HTML = r"""<!doctype html>
           <td>${prCheckBox(entry)}</td>
           <td>#${row.pr_number}</td>
           <td>${statusBadge(row)}</td>
-          <td>${badge(row.attention_level)}</td>
-          <td title="${esc(scopeTitle(row))}">${esc(row.scope_display || row.review_rung || "")}</td>
-          <td><div class="description">${esc(row.pr_title || row.summary || "")}</div></td>
+          <td title="${esc(row.attention_detail || "")}">${verdictBadge(row.attention, "attention")}</td>
+          <td><div class="description">${esc(row.pr_title || "")}</div></td>
           <td>${esc(row.author || "")}</td>
         </tr>
       `;
@@ -3686,7 +3474,6 @@ INDEX_HTML = r"""<!doctype html>
         // Dashboard-only by the same test as the rest of this block: a reader of the comment
         // is already on the PR, whose own body says what it does. A reader skimming the
         // dashboard has no other way to tell one row from another.
-        row.summary ? field("Description", row.summary) : "",
         field("Author", row.author),
         row.pr_state ? field("State", `${row.pr_state}${row.base_ref ? ` → ${row.base_ref}` : ""}`) : "",
         field("Head", shortSha(row.head_sha)),
@@ -3816,6 +3603,12 @@ INDEX_HTML = r"""<!doctype html>
       renderPrReviews();
       updateRoute();
     });
+    $("pr-hide-drafts").addEventListener("change", (event) => {
+      state.hideDraftPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
+      updateRoute();
+    });
     $("tag-select").addEventListener("change", (event) => {
       state.selectedTag = event.target.value;
       state.selectedCommit = 0;
@@ -3874,12 +3667,5 @@ INDEX_HTML = r"""<!doctype html>
 
 # The maintainer table parser lives in cli.py so tier-1 validation and the dashboard agree
 # on what a valid subject area is.
-from repo_manager.cli import (  # noqa: E402
-    PR_RUNG_REVIEWERS,
-    covers_any_area,
-    load_maintainer_context,
-    pr_review_data_from_row,
-    pr_review_facts as cli_pr_review_facts,
-    render_pr_review_comment,
-    PR_REVIEW_COMMENT_MARKER,
-)
+from repo_manager.cli import covers_any_area, load_maintainer_context  # noqa: E402
+from repo_manager.triage import COMMENT_MARKER, data_from_row, render_comment  # noqa: E402

@@ -51,15 +51,16 @@ repo-manager db-table              # list saved commit reviews
 repo-manager db-row N              # print one commit review
 ```
 
-**[PR reviews](docs/pr-review.md)** — pre-review open pull requests for the human reviewer:
+**[PR triage](docs/pr-review.md)** — label open pull requests under the spec-driven development policy:
 
 ```bash
-repo-manager review-pr N                    # review one open PR
-repo-manager sweep-prs [--force]            # review every open PR lacking a current review
-repo-manager pr-table                       # list saved PR reviews
-repo-manager pr-row N                       # print one PR review
-repo-manager post-pr-review N [--dry-run]   # post/update the review comment on GitHub
+repo-manager review-pr N                    # triage one PR (label, scope, body, docs/tests, reviewers)
+repo-manager sweep-prs [--force]            # triage open PRs opened since the policy landed (--since all for every PR)
+repo-manager pr-table                       # list saved triages
+repo-manager pr-row N                       # print one triage
+repo-manager post-pr-review N [--dry-run]   # post/update the triage comment on GitHub
 repo-manager request-pr-reviewers N         # request the suggested reviewers
+repo-manager apply-pr-label N [--dry-run]   # apply the rfc: label (rfc:required also drafts + posts the RFC request)
 ```
 
 **[Release review & announcement](docs/release.md)** — release-readiness verdict and release messaging, with automatic release inference (`vNext` rules):
@@ -95,10 +96,9 @@ repo-manager wipe-db   # wipe the local SQLite database
 ## Skills
 
 - `commit-review`: analyzes a GitHub commit and judges whether it was good for the project, with attention to review quality, tests, release risk, API compatibility, security, documentation, and shout-outs.
-- `pr-triage`: tier 1 of the PR pre-review — checks the author's description against the diff (including whether each `Fixes #N` reference really matches its issue), whether the PR solves one problem, and which of `contribute.md`'s three review rungs it belongs on.
-- `pr-quality`: tier 2 — checks alignment with the contribution and philosophy guides, documentation, and testing, and flags breaking API/UX changes, with an imperative to-do per finding.
-- `pr-reviewers`: tier 3 — suggests two to three reviewers from the maintainer table and from `git blame` on the code the PR acts on. All three tiers run on every PR, so one review is the whole answer.
-- `pr-review`: the superseded single-pass version of the above, kept for its bundled `scripts/`.
+- `pr-facts`: tier 1 of PR triage — the surfaces a diff changes (closed vocabulary), breaking changes with migration cost, body-versus-diff mismatches, and maintainer subject areas.
+- `pr-cover`: tier 2 — for each surface, what covers it under spec-driven-dev.md: a statement of intent on the base branch (a fix), a working-group charter item, or the linked RFC's design.
+- `pr-quality`: tier 3 — documentation and testing gaps per documentation.md and testing.md. The `rfc:` label, scope, and reviewers are derived in Python from these three.
 - `release-review`: analyzes stored commit reviews and produces a release-readiness verdict with P0/P1 maintainer actions.
 - `release-announcement`: turns stored commit reviews into Discord-friendly markdown release highlights.
 
@@ -129,18 +129,19 @@ docs/
   web-ui.md
 repo_manager/
   cli.py
+  triage.py
   web.py
 scripts/
+  eval-triage.py
+  pr-code-authors.sh
 skills/
   commit-review/
     SKILL.md
     scripts/
-  pr-review/
-  pr-triage/
+  pr-facts/
+  pr-cover/
   pr-quality/
-  pr-reviewers/
     SKILL.md
-    scripts/
   release-review/
     SKILL.md
   release-announcement/
