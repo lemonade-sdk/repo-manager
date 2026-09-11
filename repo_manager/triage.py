@@ -737,7 +737,7 @@ def rfc_block(context):
     return (
         f"### RFC #{rfc['number']} ({rfc['kind']}): {rfc['title']}\n"
         f"Author: {rfc['author']}    Labels: {', '.join(rfc['labels']) or 'none'}\n"
-        f"Commenters: {', '.join(rfc['commenters']) or 'none'}\n\n" + indent(rfc["body"][:12000])
+        f"Commenters: {', '.join(rfc['commenters']) or 'none'}\n\n" + indent(rfc["body"])
     )
 
 
