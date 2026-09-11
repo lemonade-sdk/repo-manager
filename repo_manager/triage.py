@@ -1017,14 +1017,22 @@ def settle_default_breaks(facts, context):
     not the break, the break is added from the surface, disclosed only if the body's
     Breaking Changes box was ticked."""
     breaks = facts.setdefault("breaking_changes", [])
-    said = re.sub(r"[`\"']", "", " ".join(str(b.get("what", "")) for b in breaks)).lower()
+
+    def words(text):
+        return {w for w in re.findall(r"[a-z0-9_.]+", str(text).lower()) if len(w) > 3}
+
     for surface in facts.get("surfaces", []):
         if surface.get("kind") != "config-default":
             continue
-        # Already listed if the break names the same key (or the same first words).
+        # Already listed if a break names the same key, or says mostly the same words.
+        mine = words(surface.get("what", ""))
         names = [a or b for a, b in IDENTIFIER.findall(surface.get("what", ""))]
-        head = re.sub(r"[`\"']", "", squash(surface.get("what", "")))[:25]
-        if any(n.lower() in said for n in names) or (head and head in said):
+        listed = any(
+            any(n.lower() in str(b.get("what", "")).lower() for n in names)
+            or (mine and len(mine & words(b.get("what", ""))) / len(mine) >= 0.6)
+            for b in breaks
+        )
+        if listed:
             continue
         breaks.append({
             "what": surface["what"],
@@ -1051,7 +1059,9 @@ def settle_docs_structure(facts, context):
             surface["what"] += " (edits inside existing pages)"
 
 
-FEATURE_KINDS = {"backend-new", "endpoint-new", "cli-command", "cli-flag", "gui", "config-key", "config-syntax"}
+# Every surface a CI job could exist to build or exercise: everything but CI itself and
+# the kinds that are restructurings rather than things.
+FEATURE_KINDS = set(SURFACE_KINDS) - {"internal", "ci-infra", "test-refactor", "refactor", "docs-structure"}
 
 
 def settle_feature_ci(facts, context):
