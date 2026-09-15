@@ -1,476 +1,2060 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lemonade release dashboard</title>
-<style>
-  /* Ready is the absence of colour. The page only raises its voice when something is
-     wrong, because what the reader is scanning for is trouble, not reassurance. */
-  :root {
-    color-scheme: light dark;
-    --paper: #fbfbf8;
-    --panel: #ffffff;
-    --ink: #1a1b1e;
-    --muted: #63656b;
-    --rule: #e5e5df;
-    --lemon: #e3b505;
-    --alarm: #b3261e;
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, "Cascadia Mono", monospace;
-  }
-  @media (prefers-color-scheme: dark) {
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>repo-manager</title>
+  <style>
     :root {
-      --paper: #131417;
-      --panel: #191a1e;
-      --ink: #e9e9e4;
-      --muted: #9a9ca3;
-      --rule: #2c2d33;
-      --lemon: #f2c541;
-      --alarm: #ff8a7a;
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --panel-2: #f1f4f7;
+      --text: #17202a;
+      --muted: #647385;
+      --line: #d7dde5;
+      --accent: #176b87;
+      --accent-2: #0f766e;
+      --danger: #b42318;
+      --warn: #9a5b00;
+      --ok: #14743f;
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--paper);
-    color: var(--ink);
-    font: 400 15px/1.6 var(--sans);
-    -webkit-font-smoothing: antialiased;
-  }
-  code, .mono { font-family: var(--mono); font-size: .92em; }
-  a { color: inherit; text-underline-offset: 2px; text-decoration-color: var(--rule); }
-  a:hover { text-decoration-color: currentColor; }
-  :focus-visible { outline: 2px solid var(--lemon); outline-offset: 2px; border-radius: 2px; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 28px; }
 
-  /* --- masthead ------------------------------------------------------------------ */
-  .mast { padding-top: 34px; }
-  .wordmark {
-    font: 500 13px/1 var(--sans); letter-spacing: .01em; color: var(--muted);
-    padding-bottom: 6px; border-bottom: 2px solid var(--lemon); display: inline-block;
-  }
-
-  /* The hero is the question the page exists to answer. The verdict is carried by the
-     rule beside it, never by colouring one word of the sentence. */
-  .verdict-head { margin: 26px 0 0; padding-left: 18px; border-left: 3px solid var(--rule); }
-  .verdict-head.attention { border-left-color: var(--lemon); }
-  .verdict-head.blocked { border-left-color: var(--alarm); }
-  .verdict-head h1 {
-    font: 500 30px/1.25 var(--sans); letter-spacing: -.02em; margin: 0 0 6px;
-  }
-  .verdict-head h1 .bucket { font-family: var(--mono); font-size: .86em; letter-spacing: 0; }
-  .verdict-head p { margin: 0; max-width: 62ch; color: var(--muted); }
-  .verdict-head p.reason { color: var(--ink); }
-
-  .tally { margin: 22px 0 0; display: flex; flex-wrap: wrap; gap: 26px; font-size: 13.5px; color: var(--muted); }
-  .tally b { font-weight: 600; color: var(--ink); }
-  .tally .bad b { color: var(--alarm); }
-
-  nav { display: flex; gap: 26px; margin-top: 26px; border-bottom: 1px solid var(--rule); }
-  nav button {
-    appearance: none; background: none; border: 0; cursor: pointer; font: 500 15px/1 var(--sans);
-    color: var(--muted); padding: 0 0 11px; margin-bottom: -1px; border-bottom: 2px solid transparent;
-  }
-  nav button:hover { color: var(--ink); }
-  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--lemon); }
-  nav .n { color: var(--muted); font-weight: 400; font-size: 12.5px; margin-left: 6px; font-family: var(--mono); }
-
-  main { padding: 26px 0 96px; }
-
-  .filters { display: flex; gap: 10px; margin-bottom: 20px; }
-  input[type="search"], select {
-    font: 400 14px var(--sans); padding: 8px 11px; border: 1px solid var(--rule);
-    background: var(--panel); color: var(--ink); border-radius: 3px;
-  }
-  input[type="search"] { flex: 1 1 auto; min-width: 0; }
-
-  /* --- a bucket reads as one report, not a stack of identical cards ---------------- */
-  .report { background: var(--panel); border: 1px solid var(--rule); border-left-width: 3px; margin-bottom: 26px; }
-  .report.attention { border-left-color: var(--lemon); }
-  .report.blocked { border-left-color: var(--alarm); }
-  .report > header { padding: 20px 26px 16px; }
-  .report h2 { font: 600 20px/1.2 var(--mono); margin: 0 0 8px; letter-spacing: -.01em; }
-  .meta { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 18px; }
-  .meta .frozen { color: var(--lemon); }
-  section { padding: 18px 26px; border-top: 1px solid var(--rule); }
-  section > h3 { font: 600 13px/1.3 var(--sans); margin: 0 0 10px; color: var(--muted); }
-  section > p, section > dl { max-width: 68ch; }
-  section > p { margin: 0 0 8px; }
-
-  ol.todos, ul.plain { list-style: none; margin: 0; padding: 0; max-width: 72ch; }
-  ol.todos li, ul.plain li { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid var(--rule); }
-  ol.todos li:first-child, ul.plain li:first-child { border-top: 0; padding-top: 0; }
-  .pri { font: 600 12px/1.6 var(--mono); flex: 0 0 22px; }
-  .pri.p0 { color: var(--alarm); }
-  .pri.p1 { color: var(--lemon); }
-  .dot { flex: 0 0 22px; color: var(--muted); }
-
-  table { width: 100%; border-collapse: collapse; }
-  th {
-    text-align: left; font: 600 12.5px/1.3 var(--sans); color: var(--muted);
-    padding: 0 14px 9px 0; border-bottom: 1px solid var(--rule); white-space: nowrap;
-  }
-  td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--rule); font-size: 14px; vertical-align: top; }
-  th:last-child, td:last-child { padding-right: 0; }
-  .listing { background: var(--panel); border: 1px solid var(--rule); padding: 18px 22px; }
-  tbody tr.row { cursor: pointer; }
-  tbody tr.row:hover td { background: color-mix(in srgb, var(--lemon) 9%, transparent); }
-  tr.detail > td { background: color-mix(in srgb, var(--lemon) 5%, transparent); padding: 4px 0 18px; }
-  tr.detail .inner { padding: 14px 18px; max-width: 78ch; }
-  tr.detail h3 { font: 600 13px/1.3 var(--sans); color: var(--muted); margin: 16px 0 8px; }
-  tr.detail h3:first-child { margin-top: 0; }
-  tr.detail p { margin: 0 0 8px; }
-  .nowrap { white-space: nowrap; }
-  .quiet { color: var(--muted); }
-  .attention-text { color: var(--lemon); font-weight: 600; }
-  .blocked-text { color: var(--alarm); font-weight: 600; }
-
-  /* The release page is machine-parsed, so it is shown exactly as it is stored. The
-     Discord post is prose, so it is shown the way its readers will see it. */
-  pre.exact {
-    margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
-    font-size: 13px; line-height: 1.65; background: var(--paper); padding: 16px 18px;
-    border: 1px solid var(--rule); max-height: 420px; overflow: auto;
-  }
-  .post { max-width: 68ch; }
-  .post h4 { font: 600 15px/1.35 var(--sans); margin: 18px 0 6px; }
-  .post h4:first-child { margin-top: 0; }
-  .post p { margin: 0 0 8px; }
-  .post ul { margin: 0 0 8px; padding-left: 20px; }
-
-  dl.evidence { margin: 0; max-width: 72ch; }
-  dl.evidence dt { font: 600 13px/1.5 var(--sans); color: var(--muted); margin-top: 12px; }
-  dl.evidence dt:first-child { margin-top: 0; }
-  dl.evidence dd { margin: 0; }
-
-  .plan th, .plan td { font-size: 13.5px; }
-  .plan td:first-child { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
-
-  .empty { color: var(--muted); padding: 56px 0; max-width: 54ch; }
-  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
-  .actions button {
-    font: 500 13px var(--sans); padding: 7px 13px; border: 1px solid var(--rule);
-    background: var(--panel); color: var(--ink); border-radius: 3px; cursor: pointer;
-  }
-  .actions button:hover:not(:disabled) { border-color: var(--lemon); }
-  .actions button:disabled { color: var(--muted); cursor: default; }
-  .result { font-size: 13px; color: var(--muted); }
-
-  @media (max-width: 720px) {
-    .wrap { padding: 0 18px; }
-    .verdict-head h1 { font-size: 24px; }
-    .hide-narrow { display: none; }
-    .report > header, section, tr.detail .inner { padding-left: 18px; padding-right: 18px; }
-  }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-</style>
+    * { box-sizing: border-box; }
+    html {
+      height: 100%;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      height: 100%;
+      overflow: hidden;
+    }
+    button, input, select {
+      font: inherit;
+    }
+    .shell {
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      overflow: hidden;
+    }
+    aside {
+      background: #15202b;
+      color: #eef4f8;
+      padding: 20px 16px;
+      border-right: 1px solid #0c141c;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 18px;
+      margin-bottom: 4px;
+    }
+    .repo {
+      color: #b9c7d3;
+      font-size: 13px;
+      word-break: break-word;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 18px 0;
+    }
+    .metric {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 20px;
+      line-height: 1.1;
+    }
+    .metric span {
+      color: #b9c7d3;
+      font-size: 12px;
+    }
+    nav {
+      display: grid;
+      gap: 6px;
+      margin-top: 14px;
+    }
+    .sidebar-stats {
+      margin-top: auto;
+      padding-top: 18px;
+      display: grid;
+      gap: 10px;
+    }
+    .sidebar-stat {
+      border-top: 1px solid rgba(255,255,255,0.12);
+      padding-top: 10px;
+    }
+    .sidebar-stat span {
+      display: block;
+      color: #b9c7d3;
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+    .sidebar-stat strong {
+      color: #ffffff;
+      font-size: 14px;
+      font-weight: 650;
+    }
+    .sidebar-stat small {
+      display: block;
+      color: #b9c7d3;
+      font-size: 12px;
+      margin-top: 3px;
+    }
+    .nav-button {
+      border: 0;
+      width: 100%;
+      text-align: left;
+      color: #dce7ee;
+      background: transparent;
+      border-radius: 6px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .nav-button.active {
+      color: #ffffff;
+      background: rgba(255,255,255,0.14);
+    }
+    main {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      justify-content: space-between;
+    }
+    h1 {
+      font-size: 20px;
+      margin: 0;
+      letter-spacing: 0;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .search {
+      width: min(420px, 42vw);
+      min-width: 220px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: #fff;
+    }
+    .content {
+      min-width: 0;
+      min-height: 0;
+      padding: 18px 20px 28px;
+      overflow: hidden;
+    }
+    .split {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(420px, 0.92fr) minmax(360px, 1.08fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    /* The PR list is the scanning surface and needs room for a description; the review
+       beside it is read one at a time and has been sitting on slack. The old split left
+       the list 535px against 558px of fixed columns, which squeezed Description to 35px
+       and then, once the head stopped overflowing and forcing the pane wider, to nothing. */
+    #view-prs.split {
+      grid-template-columns: minmax(560px, 1.2fr) minmax(340px, 0.8fr);
+    }
+    .single {
+      height: 100%;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      /* The PR head carries a title, a perspective, two filters, a count and the sync
+         controls, which is more than fits across a split pane. Without wrapping the row
+         simply overflows and the panel clips whatever is furthest right — which silently
+         ate the freshness label and the Refresh button. */
+      flex-wrap: wrap;
+      gap: 8px 12px;
+    }
+    .panel-head h2 {
+      font-size: 15px;
+      margin: 0;
+    }
+    .pr-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .pr-toggle input {
+      accent-color: var(--accent, #6b8afd);
+      margin: 0;
+    }
+    .pr-toggle input[type="text"] {
+      width: 110px;
+      font: inherit;
+      font-size: 12px;
+      padding: 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+    }
+    /* Freshness sits at the right end of the PR panel head, pushed there so it reads as a
+       property of the whole column rather than of any one control beside it. */
+    /* Held together on one line and pushed to the right end of whichever row they land
+       on, so the freshness reads as a property of the column rather than another filter. */
+    .sync-group {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sync-state {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    /* A sync that failed is the one thing here allowed to raise its voice: the column is
+       still showing its last known answer, and the reader has to know it is not live. */
+    .sync-state.stale {
+      color: #9a6b00;
+    }
+    .sync-state.failed {
+      color: #b4232a;
+      font-weight: 600;
+    }
+    .sync-button {
+      font-size: 12px;
+      padding: 4px 9px;
+    }
+    .table-wrap {
+      overflow: auto;
+      min-height: 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    /* Fixed column widths and a fixed layout mean a pane narrower than their sum does not
+       shrink the columns — it silently starves whichever column has no width of its own.
+       A floor plus the scroll box the wrap already provides is what keeps Description
+       readable instead of letting it vanish. */
+    #view-prs table {
+      min-width: 690px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background: var(--panel-2);
+      color: #435366;
+      font-size: 12px;
+      text-transform: uppercase;
+      z-index: 1;
+    }
+    tr {
+      cursor: pointer;
+    }
+    tbody tr:hover {
+      background: #f6fafb;
+    }
+    tbody tr.selected {
+      background: #e8f3f6;
+    }
+    .commit-cell {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #1d5268;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .description {
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .pr-check {
+      cursor: pointer;
+      vertical-align: middle;
+      accent-color: #1f77b4;
+    }
+    /* A checked-off PR stays in the list but has stopped asking for anything. */
+    #pr-rows tr.checked-off td:not(:first-child) {
+      opacity: 0.5;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      height: 22px;
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 650;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .badge.clean, .badge.ready {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.resolved {
+      color: var(--accent-2);
+      background: #e6f6f4;
+      border-color: #b9e4df;
+    }
+    .badge.needs-attention {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.blocker, .badge.blocked, .badge.high {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    .pr-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .badge.routine {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.elevated {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    /* Status colors answer "do I need to act?":
+       green = no, gray = someone else is handling it, yellow = yes, red = urgent. */
+    .badge.merge, .badge.approved, .badge.requests {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.in-progress, .badge.handled, .badge.waiting, .badge.in-discussion, .badge.waiting-for-rfc {
+      color: #5c6470;
+      background: #f0f1f3;
+      border-color: #d8dbe0;
+    }
+    .badge.review, .badge.needs-reviewer, .badge.needs-triage, .badge.waiting-for-me {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.needs-core {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    /* A PR the author still owes work on, and the check that says why. */
+    .badge.not-ready, .badge.bundled {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.focused, .badge.adequate, .badge.accurate, .badge.none-found {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.gaps, .badge.discrepancies {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.missing {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    .badge.not-applicable, .badge.unknown, .badge.tone-neutral {
+      color: #5c6470;
+      background: #f0f1f3;
+      border-color: #d8dbe0;
+    }
+    .badge.tone-ok {
+      color: var(--ok);
+      background: #e9f7ef;
+      border-color: #bfe7d0;
+    }
+    .badge.tone-warn {
+      color: var(--warn);
+      background: #fff5df;
+      border-color: #f4d79a;
+    }
+    .badge.tone-road {
+      background: #dbe7f5;
+      color: #24507f;
+    }
+    .badge.tone-danger {
+      color: var(--danger);
+      background: #fff0ee;
+      border-color: #f4c4bd;
+    }
+    .detail {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+      min-height: 0;
+      overflow: auto;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .kv strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .section h3 {
+      font-size: 13px;
+      text-transform: uppercase;
+      color: #435366;
+      margin: 0 0 8px;
+      letter-spacing: 0;
+    }
+    .section p {
+      margin: 0;
+      line-height: 1.5;
+    }
+    .pr-split {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 20px 0 18px;
+    }
+    .md > * + * {
+      margin-top: 10px;
+    }
+    .md > h4:first-child {
+      margin-top: 0;
+    }
+    .md h4 {
+      font-size: 13px;
+      text-transform: uppercase;
+      color: #435366;
+      margin: 18px 0 0;
+      letter-spacing: 0;
+    }
+    .md ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .md ul ul {
+      margin-top: 4px;
+      color: #5a6b7f;
+    }
+    .md li {
+      line-height: 1.5;
+    }
+    /* A checkbox is the marker. The list sits at the text margin, as a to-do list does. */
+    .md li.task {
+      list-style: none;
+      margin-left: -20px;
+    }
+    /* The comment reads at three weights, and they follow the markup's own nesting rather
+       than a list of known headings: the lead verdict, the sections under it, and the blocks
+       inside a fold. A fold is subordinate to the section it explains, so it carries no rule
+       of its own — a border-top there read as a divider between top-level parts and made
+       "Explanation" outrank the "Review suggestion" it belongs to. */
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+    th.sortable:hover {
+      color: #1f2a37;
+    }
+    th.sorted {
+      color: #1f2a37;
+      font-weight: 700;
+    }
+    .md-verdict {
+      margin-bottom: 14px;
+    }
+    .md-section {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1f2a37;
+      margin-top: 22px;
+    }
+    .md-subhead {
+      font-size: 13px;
+      font-weight: 650;
+      color: #435366;
+    }
+    .md details {
+      margin-top: 12px;
+    }
+    .md summary {
+      cursor: pointer;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      list-style: none;
+      width: fit-content;
+    }
+    .md summary::-webkit-details-marker {
+      display: none;
+    }
+    /* The caret leads the label. It used to be pushed to margin-left:auto, which on a pane
+       this wide left it a screen away from the word it discloses. */
+    .md summary::before {
+      content: "\25b8";
+      color: #98a2ae;
+      font-size: 10px;
+    }
+    .md details[open] > summary::before {
+      content: "\25be";
+    }
+    .md details[open] > summary {
+      margin-bottom: 8px;
+    }
+    /* Open, the fold's contents are railed off so they read as inside something. */
+    .md details[open] {
+      border-left: 2px solid var(--line);
+      padding-left: 12px;
+      margin-left: 2px;
+    }
+    .md-fold-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #8794a4;
+      font-weight: 600;
+    }
+    .md summary:hover .md-fold-label {
+      color: #5a6b7f;
+    }
+    .md-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: #5a6b7f;
+      font-weight: 650;
+    }
+    .md-footer {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .md code {
+      background: rgba(31, 119, 180, 0.08);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 12px;
+    }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li {
+      margin: 4px 0;
+      line-height: 1.45;
+    }
+    .evidence-list {
+      display: grid;
+      gap: 10px;
+    }
+    .evidence-item {
+      border-left: 3px solid var(--line);
+      padding-left: 10px;
+    }
+    .evidence-item h4 {
+      margin: 0 0 4px;
+      color: #435366;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: capitalize;
+    }
+    .evidence-item p {
+      margin: 0;
+      line-height: 1.5;
+    }
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .todo-count {
+      color: #27384a;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .todo-count.done {
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .todo-list {
+      display: grid;
+      gap: 8px;
+    }
+    .plan-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .plan-table th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 600;
+      padding: 0 10px 6px 0;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    .plan-table td {
+      padding: 7px 10px 7px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .plan-table td:first-child { white-space: nowrap; font-weight: 500; }
+    .todo-item {
+      line-height: 1.45;
+    }
+    .priority {
+      color: var(--warn);
+      font-weight: 700;
+      margin-right: 4px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      background: #0f1720;
+      color: #e7eef5;
+      border-radius: 8px;
+      padding: 14px;
+      max-height: 100%;
+      overflow: auto;
+    }
+    .empty {
+      padding: 18px;
+      color: var(--muted);
+    }
+    .copy {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    .copy:disabled {
+      color: #98a2ae;
+      background: #f6f7f9;
+      cursor: not-allowed;
+    }
+    .hidden {
+      display: none;
+    }
+    @media (max-width: 980px) {
+      body {
+        overflow: auto;
+      }
+      .shell {
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+      }
+      aside {
+        position: static;
+        overflow: visible;
+      }
+      main,
+      .content {
+        overflow: visible;
+      }
+      .split {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .single {
+        height: auto;
+      }
+      .search {
+        width: 100%;
+      }
+    }
+  </style>
 </head>
 <body>
-<div class="wrap mast">
-  <div class="wordmark">lemonade release</div>
-  <div id="hero"></div>
-  <div class="tally" id="tally"></div>
-  <nav id="tabs" role="tablist"></nav>
-</div>
-<main class="wrap"><div id="view"><p class="empty">Loading the state directory.</p></div></main>
-<script>
-const STATIC = !!window.REPO_MANAGER_STATIC;
-let DATA = window.REPO_MANAGER_DATA || null;
-let TAB = "releases";
-let QUERY = "";
-let FILTER = "";
-const OPEN = new Set();
-
-const esc = (value) => String(value == null ? "" : value)
-  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-// Enough Markdown for the Discord post: headings, bullets, bold, code. Everything is
-// escaped first, so nothing a review quotes can become markup.
-function md(text) {
-  const out = [];
-  let list = false;
-  const inline = (s) => s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-  for (const line of esc(text || "").split("\n")) {
-    const heading = line.match(/^#{1,6}\s+(.*)$/);
-    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
-    if (heading) {
-      if (list) { out.push("</ul>"); list = false; }
-      out.push(`<h4>${inline(heading[1])}</h4>`);
-    } else if (bullet) {
-      if (!list) { out.push("<ul>"); list = true; }
-      out.push(`<li>${inline(bullet[1])}</li>`);
-    } else {
-      if (list) { out.push("</ul>"); list = false; }
-      if (line.trim()) out.push(`<p>${inline(line)}</p>`);
-    }
-  }
-  if (list) out.push("</ul>");
-  return out.join("");
-}
-
-const tone = (verdict) => ({
-  "Blocked": "blocked", "Blocker": "blocked",
-  "Needs Attention": "attention",
-}[verdict] || "");
-const toneText = (verdict) => {
-  const t = tone(verdict);
-  return t ? `<span class="${t}-text">${esc(verdict)}</span>` : `<span class="quiet">${esc(verdict)}</span>`;
-};
-const day = (iso) => (iso || "").slice(0, 10);
-const short = (sha) => String(sha || "").slice(0, 7);
-const repoUrl = () => DATA.repo ? `https://github.com/${DATA.repo}` : "";
-const link = (path, text) => repoUrl() ? `<a href="${repoUrl()}${path}">${text}</a>` : text;
-const matches = (text) => !QUERY || String(text).toLowerCase().includes(QUERY);
-
-// --- masthead -------------------------------------------------------------------------
-
-function hero() {
-  const bucket = DATA.releases[0];
-  const box = document.getElementById("hero");
-  if (!bucket) {
-    box.innerHTML = `<div class="verdict-head"><h1>No release has been built yet</h1>
-      <p>Run <code>repo-manager release build</code> to write a bucket's verdict, release page, and post.</p></div>`;
-    return;
-  }
-  const said = { "Ready": "is ready to ship", "Needs Attention": "needs attention",
-                 "Blocked": "is blocked" }[bucket.verdict] || "has not been reviewed";
-  box.innerHTML = `<div class="verdict-head ${tone(bucket.verdict)}">
-    <h1><span class="bucket">${esc(bucket.bucket)}</span> ${esc(said)}</h1>
-    ${bucket.verdict_reason ? `<p class="reason">${esc(bucket.verdict_reason)}</p>` : ""}
-  </div>`;
-}
-
-function tally() {
-  const c = DATA.counts;
-  const parts = [];
-  if (DATA.repo) parts.push(`<span><b>${esc(DATA.repo)}</b></span>`);
-  parts.push(`<span><b>${c.commits}</b> ${c.commits === 1 ? "commit" : "commits"} reviewed</span>`);
-  if (c.blockers) parts.push(`<span class="bad"><b>${c.blockers}</b> open ${c.blockers === 1 ? "blocker" : "blockers"}</span>`);
-  if (c.prs) parts.push(`<span><b>${c.prs}</b> pull ${c.prs === 1 ? "request" : "requests"} triaged</span>`);
-  document.getElementById("tally").innerHTML = parts.join("");
-}
-
-function tabs() {
-  const spec = [["releases", "Releases", DATA.releases.length],
-                ["commits", "Commits", DATA.commits.length],
-                ["prs", "Pull requests", DATA.prs.length]];
-  document.getElementById("tabs").innerHTML = spec.map(([id, label, n]) =>
-    `<button role="tab" data-tab="${id}" aria-selected="${TAB === id}">${label}<span class="n">${n}</span></button>`
-  ).join("");
-}
-
-function filterBar(placeholder, options) {
-  const choices = (options || []).map((o) =>
-    `<option value="${esc(o)}"${FILTER === o ? " selected" : ""}>${esc(o)}</option>`).join("");
-  return `<div class="filters">
-    <input type="search" id="q" placeholder="${esc(placeholder)}" value="${esc(QUERY)}" aria-label="${esc(placeholder)}">
-    ${options && options.length ? `<select id="f" aria-label="Filter"><option value="">Everything</option>${choices}</select>` : ""}
-  </div>`;
-}
-
-// --- views ----------------------------------------------------------------------------
-
-function releasesView() {
-  if (!DATA.releases.length) {
-    return `<p class="empty">No release has been built yet. <code>repo-manager release build --branch main</code>
-      reviews the range since the last tag and writes the bucket's verdict, release page, and post.</p>`;
-  }
-  const rows = DATA.releases.filter((r) => matches(`${r.bucket} ${r.verdict} ${r.verdict_reason} ${r.branch}`));
-  if (!rows.length) return `<p class="empty">No release bucket matches that search.</p>`;
-  return rows.map((r) => {
-    const meta = [
-      r.branch ? esc(r.branch) : "",
-      r.range_start ? `since ${esc(r.range_start)}` : "",
-      r.head_sha ? `at <span class="mono">${esc(short(r.head_sha))}</span>` : "",
-      r.commits ? `${r.commits} ${r.commits === 1 ? "commit" : "commits"}` : "",
-      r.is_hotfix ? `hotfix over ${esc(r.last_stable_tag)}` : "",
-      r.reviewed_at ? `reviewed ${esc(day(r.reviewed_at))}` : "",
-    ].filter(Boolean).map((m) => `<span>${m}</span>`).join("");
-    const frozen = r.frozen.length
-      ? `<span class="frozen">edited by hand: ${esc(r.frozen.join(", "))}</span>` : "";
-    const todos = (r.prioritized_todos || []).map((t) =>
-      `<li><span class="pri ${t.priority === "P0" ? "p0" : "p1"}">${esc(t.priority || "P1")}</span>
-        <span>${esc(t.text || "")}</span></li>`).join("");
-    const breaking = (r.breaking_changes || []).map((b) =>
-      `<li><span class="dot">&bull;</span><span>${esc(b)}</span></li>`).join("");
-    const plan = (r.tester_plan || []).map((p) =>
-      `<tr><td>${esc(p.platform)}</td><td>${esc(p.changed)}</td><td>${esc(p.exercise)}</td></tr>`).join("");
-    const evidence = Object.entries(r.evidence || {}).map(([k, v]) =>
-      `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v)}</dd>`).join("");
-    const issues = (r.candidate_issues || []).map((n) => link(`/issues/${n}`, `#${n}`)).join(", ");
-    return `<article class="report ${tone(r.verdict)}">
+  <div class="shell">
+    <aside>
+      <div class="brand">repo-manager</div>
+      <div class="repo" id="repo-name"></div>
+      <div class="metrics">
+        <div class="metric"><strong id="metric-commits">0</strong><span>commit reviews</span></div>
+        <div class="metric"><strong id="metric-todos">0</strong><span>open to-dos</span></div>
+      </div>
+      <nav>
+        <button class="nav-button active" data-view="commits">Commit DB</button>
+        <button class="nav-button" data-view="prs">PR Reviews</button>
+        <button class="nav-button" data-view="release">Release Review</button>
+        <button class="nav-button" data-view="announcement">Announcement</button>
+      </nav>
+      <div class="sidebar-stats">
+        <div class="sidebar-stat"><span>Contributions</span><strong id="stat-contributions">0</strong></div>
+        <div class="sidebar-stat"><span>Unique authors</span><strong id="stat-authors">0</strong></div>
+        <div class="sidebar-stat"><span>Unique reviewers</span><strong id="stat-reviewers">0</strong></div>
+        <div class="sidebar-stat"><span>Date range</span><strong id="stat-days">No reviews</strong><small id="stat-dates"></small></div>
+      </div>
+    </aside>
+    <main>
       <header>
-        <h2>${esc(r.bucket)}</h2>
-        <div class="meta">${meta}${frozen}</div>
+        <h1 id="view-title">Commit DB</h1>
+        <div class="toolbar">
+          <select class="search" id="tag-select" aria-label="Release tag"></select>
+          <input class="search" id="search" placeholder="Filter commits, verdicts, authors, descriptions">
+          <button class="copy hidden" id="copy-announcement">Copy announcement</button>
+        </div>
       </header>
-      ${r.verdict_reason ? `<section><h3>Can we ship?</h3><p>${esc(r.verdict_reason)}</p></section>` : ""}
-      ${todos ? `<section><h3>Before tagging</h3><ol class="todos">${todos}</ol></section>` : ""}
-      ${breaking ? `<section><h3>Breaking changes</h3><ul class="plain">${breaking}</ul></section>` : ""}
-      ${issues ? `<section><h3>Tester reports in this verdict</h3><p>${issues}</p></section>` : ""}
-      ${plan ? `<section><h3>What testers should exercise</h3><table class="plan">
-        <thead><tr><th>Platform</th><th>What changed</th><th>What to try</th></tr></thead>
-        <tbody>${plan}</tbody></table></section>` : ""}
-      ${evidence ? `<section><h3>Evidence behind the verdict</h3><dl class="evidence">${evidence}</dl></section>` : ""}
-      ${r.notes ? `<section><h3>notes.md, as the release page will read it</h3>
-        <pre class="exact">${esc(r.notes)}</pre></section>` : ""}
-      ${r.announcement ? `<section><h3>announcement.md, as Discord will render it</h3>
-        <div class="post">${md(r.announcement)}</div></section>` : ""}
-    </article>`;
-  }).join("");
-}
+      <section class="content">
+        <div id="view-commits" class="split">
+          <section class="panel">
+            <div class="panel-head"><h2>Saved Commit Reviews</h2><span class="muted" id="commit-count"></span></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 48px;">#</th>
+                    <th style="width: 132px;">Commit</th>
+                    <th style="width: 150px;">Verdict</th>
+                    <th style="width: 92px;">To-Dos</th>
+                    <th>Description</th>
+                    <th style="width: 130px;">Author</th>
+                  </tr>
+                </thead>
+                <tbody id="commit-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Commit Review</h2><span class="muted" id="commit-selected"></span></div>
+            <div class="detail" id="commit-detail"></div>
+          </section>
+        </div>
 
-function commitsView() {
-  if (!DATA.commits.length) {
-    return `<p class="empty">No commit has been reviewed yet. <code>repo-manager commit sweep --branch main</code>
-      reviews every commit in the range that has no file.</p>`;
-  }
-  const bucketList = [...new Set(DATA.commits.map((c) => c.bucket).filter(Boolean))];
-  const rows = DATA.commits.filter((c) => (!FILTER || c.bucket === FILTER) &&
-    matches(`${c.summary} ${c.author} ${c.verdict} ${c.sha} ${c.pr_number} ${c.subject}`));
-  const bar = filterBar("Search summaries, authors, SHAs", bucketList);
-  if (!rows.length) return bar + `<p class="empty">No commit review matches that search.</p>`;
-  const body = rows.map((c) => {
-    const todos = (c.maintainer_todos || []).map((t) =>
-      `<li><span class="dot">&bull;</span><span>${esc(t)}</span></li>`).join("");
-    const shouts = (c.shout_outs || []).map((s) => `<li><span class="dot">&bull;</span><span>${
-      esc(typeof s === "string" ? s : `${s.handle || ""} — ${s.reason || ""}`)}</span></li>`).join("");
-    const evidence = Object.entries(c.evidence || {}).map(([k, v]) =>
-      `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v)}</dd>`).join("");
-    const detail = OPEN.has("c" + c.sha) ? `<tr class="detail"><td colspan="6"><div class="inner">
-      ${c.verdict_reason ? `<p>${esc(c.verdict_reason)}</p>` : ""}
-      ${todos ? `<h3>What a maintainer should do</h3><ul class="plain">${todos}</ul>` : ""}
-      ${shouts ? `<h3>Shout outs</h3><ul class="plain">${shouts}</ul>` : ""}
-      ${evidence ? `<h3>Evidence</h3><dl class="evidence">${evidence}</dl>` : ""}
-      <p class="quiet">${link(`/commit/${esc(c.sha)}`, `<span class="mono">${esc(short(c.sha))}</span>`)}
-        ${c.cherry_picked_from ? `, cherry-picked from <span class="mono">${esc(short(c.cherry_picked_from))}</span>` : ""}
-        ${c.reviewed_at ? `, reviewed ${esc(day(c.reviewed_at))}` : ""}</p>
-    </div></td></tr>` : "";
-    return `<tr class="row" data-open="c${esc(c.sha)}" tabindex="0">
-      <td class="nowrap quiet">${esc(day(c.committed_at))}</td>
-      <td class="nowrap mono">${esc(short(c.sha))}</td>
-      <td class="nowrap">${c.pr_number ? link(`/pull/${c.pr_number}`, `#${c.pr_number}`) : ""}</td>
-      <td class="nowrap hide-narrow">${esc(c.author)}</td>
-      <td class="nowrap">${toneText(c.verdict)}</td>
-      <td>${esc(c.summary || c.subject)}</td></tr>${detail}`;
-  }).join("");
-  return bar + `<div class="listing"><table>
-    <thead><tr><th>Merged</th><th>Commit</th><th>PR</th><th class="hide-narrow">Author</th>
-    <th>Verdict</th><th>What it does</th></tr></thead><tbody>${body}</tbody></table></div>`;
-}
+        <div id="view-prs" class="split hidden">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Saved PR Reviews</h2>
+              <label class="muted pr-toggle" title="GitHub login whose perspective the Status column reflects">Status as
+                <input type="text" id="pr-viewer" spellcheck="false"></label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed PRs</label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide PRs not into main</label>
+              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-drafts" checked> Hide draft PRs</label>
+              <span class="muted" id="pr-count"></span>
+              <span class="sync-group">
+                <span class="sync-state" id="pr-sync"></span>
+                <button class="copy sync-button" id="pr-refresh" title="Fetch the current state of every reviewed PR from GitHub now">Refresh</button>
+              </span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width: 34px;" title="Checked off: stays checked until the PR's Status changes"></th>
+                    <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
+                    <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
+                    <th style="width: 104px;" class="sortable" data-sort="attention" title="Elevated when the label, body, or docs and tests need attention">Attention</th>
+                    <th class="sortable" data-sort="description">Title</th>
+                    <th style="width: 130px;" class="sortable" data-sort="author">Author</th>
+                  </tr>
+                </thead>
+                <tbody id="pr-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>PR Review</h2><span class="muted" id="pr-selected"></span></div>
+            <div class="detail" id="pr-detail"></div>
+          </section>
+        </div>
 
-function prsView() {
-  if (!DATA.prs.length) {
-    return `<p class="empty">No pull request has been triaged yet. <code>repo-manager pr sweep</code>
-      triages every open PR whose file is out of date.</p>`;
-  }
-  const labels = [...new Set(DATA.prs.map((p) => p.label).filter(Boolean))];
-  const rows = DATA.prs.filter((p) => (!FILTER || p.label === FILTER) &&
-    matches(`${p.title} ${p.author} ${p.label} ${p.scope} ${p.number}`));
-  const bar = filterBar("Search titles, authors, labels", labels);
-  if (!rows.length) return bar + `<p class="empty">No triage matches that search.</p>`;
-  const body = rows.map((p) => {
-    const concerns = (p.concerns || []).map((item) => {
-      const nested = item.startsWith("  - ");
-      return `<li><span class="dot">${nested ? "&mdash;" : "&bull;"}</span><span>${
-        md(item.trim()).replace(/^<p>|<\/p>$/g, "")}</span></li>`;
-    }).join("");
-    const detail = OPEN.has("p" + p.number) ? `<tr class="detail"><td colspan="7"><div class="inner">
-      ${p.explanation.diff ? `<h3>What the diff changes</h3><p>${esc(p.explanation.diff)}</p>` : ""}
-      <h3>What a reviewer has to worry about</h3>
-      ${concerns ? `<ul class="plain">${concerns}</ul>` : `<p class="quiet">Nothing to flag.</p>`}
-      ${p.explanation.reviewers ? `<h3>Why these reviewers</h3><p>${esc(p.explanation.reviewers)}</p>` : ""}
-      <p class="quiet">${p.head_sha ? `<span class="mono">${esc(short(p.head_sha))}</span>` : ""}
-        ${p.reviewed_at ? `, triaged ${esc(day(p.reviewed_at))}` : ""}
-        ${p.comment_url ? `, <a href="${esc(p.comment_url)}">comment posted</a>` : ""}</p>
-      ${STATIC ? "" : `<div class="actions" data-pr="${p.number}">
-        <button data-act="comment">Post comment</button>
-        <button data-act="label">Apply ${esc(p.label)}</button>
-        <button data-act="reviewers">Request reviewers</button>
-        <span class="result" role="status"></span></div>`}
-    </div></td></tr>` : "";
-    return `<tr class="row" data-open="p${p.number}" tabindex="0">
-      <td class="nowrap">${p.url ? `<a href="${esc(p.url)}">#${p.number}</a>` : `#${p.number}`}</td>
-      <td>${esc(p.title)}</td>
-      <td class="nowrap hide-narrow">${esc(p.author)}</td>
-      <td class="nowrap mono">${esc(p.label)}</td>
-      <td class="nowrap hide-narrow quiet">${esc(p.scope)}</td>
-      <td class="nowrap">${p.body_matches_diff === "no"
-        ? `<span class="blocked-text">no</span>` : `<span class="quiet">yes</span>`}</td>
-      <td class="nowrap">${p.docs_and_tests === "gaps"
-        ? `<span class="attention-text">gaps</span>` : `<span class="quiet">ok</span>`}</td>
-      </tr>${detail}`;
-  }).join("");
-  return bar + `<div class="listing"><table>
-    <thead><tr><th>PR</th><th>Title</th><th class="hide-narrow">Author</th><th>Label</th>
-    <th class="hide-narrow">Scope</th><th>Body matches</th><th>Docs &amp; tests</th></tr></thead>
-    <tbody>${body}</tbody></table></div>`;
-}
+        <div id="view-release" class="single hidden">
+          <section class="panel">
+            <div class="panel-head"><h2>Release-Level Review</h2></div>
+            <div class="detail" id="release-detail"></div>
+          </section>
+        </div>
 
-// --- wiring ---------------------------------------------------------------------------
+        <div id="view-announcement" class="single hidden">
+          <section class="panel">
+            <div class="panel-head"><h2>Announcement</h2></div>
+            <div class="detail" id="announcement-detail"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
 
-function draw(keepFocus) {
-  if (!DATA) return;
-  hero();
-  tally();
-  tabs();
-  document.getElementById("view").innerHTML = { releases: releasesView, commits: commitsView, prs: prsView }[TAB]();
-  const q = document.getElementById("q");
-  if (q) {
-    q.addEventListener("input", (event) => { QUERY = event.target.value.toLowerCase(); draw(true); });
-    if (keepFocus) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
-  }
-  const f = document.getElementById("f");
-  if (f) f.addEventListener("change", (event) => { FILTER = event.target.value; draw(); });
-}
+  <script>
+    const isStatic = Boolean(window.REPO_MANAGER_STATIC);
 
-function toggle(key) {
-  if (OPEN.has(key)) OPEN.delete(key); else OPEN.add(key);
-  draw();
-}
+    // What this browser remembers about how I left the dashboard: which PRs I have checked
+    // off, and how I had the list sorted. Neither is a fact about the repo, so neither is
+    // worth a round trip to the server or a row in the workspace database.
+    const PR_CHECKS_KEY = "repo-manager:pr-checks";
+    const PR_SORT_KEY = "repo-manager:pr-sort";
 
-document.addEventListener("click", (event) => {
-  const tab = event.target.closest("nav button");
-  if (tab) { TAB = tab.dataset.tab; QUERY = ""; FILTER = ""; draw(); return; }
-  const act = event.target.closest(".actions button");
-  if (act) { runAction(act); return; }
-  if (event.target.closest("a")) return;
-  const row = event.target.closest("tr[data-open]");
-  if (row) toggle(row.dataset.open);
-});
+    function readStored(key, fallback) {
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(key));
+        return stored && typeof stored === "object" ? stored : fallback;
+      } catch (error) {
+        return fallback;
+      }
+    }
 
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  const row = event.target.closest && event.target.closest("tr[data-open]");
-  if (row) { event.preventDefault(); toggle(row.dataset.open); }
-});
+    function writeStored(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      } catch (error) {
+        // Storage blocked or full. The page still remembers while it is open.
+      }
+    }
 
-async function runAction(button) {
-  const box = button.closest(".actions");
-  const result = box.querySelector(".result");
-  const endpoints = { comment: "/api/pr-comment", label: "/api/pr-label", reviewers: "/api/pr-reviewers" };
-  box.querySelectorAll("button").forEach((b) => (b.disabled = true));
-  result.textContent = "Working…";
-  try {
-    const response = await fetch(endpoints[button.dataset.act], {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number: Number(box.dataset.pr) }),
+    // Read once, at startup, and authoritative from then on: a browser that refuses to
+    // store any of this must still behave normally for as long as the page is open.
+    const prChecks = readStored(PR_CHECKS_KEY, {});
+
+    // A column the table no longer offers is not a sort order, so it is forgotten along
+    // with its direction rather than leaving the list sorted by nothing in particular.
+    function readPrSort() {
+      const stored = readStored(PR_SORT_KEY, {});
+      const columns = Array.from(
+        document.querySelectorAll("#view-prs th.sortable"), (th) => th.dataset.sort
+      );
+      return columns.includes(stored.key)
+        ? { key: stored.key, desc: Boolean(stored.desc) }
+        : { key: "status", desc: false };
+    }
+
+    const rememberedSort = readPrSort();
+
+    const state = {
+      data: null,
+      view: "commits",
+      selectedTag: "",
+      selectedCommit: 0,
+      selectedPr: 0,
+      selectedRelease: 0,
+      selectedAnnouncement: 0,
+      filter: "",
+      route: {},
+      prActionMessage: null,
+      hideClosedPrs: true,
+      hideNonMainPrs: true,
+      hideDraftPrs: true,
+      prSort: rememberedSort.key,
+      prSortDesc: rememberedSort.desc,
+      prViewer: ""
+    };
+    let suppressRouteUpdate = false;
+    const $ = (id) => document.getElementById(id);
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+
+    function badge(value) {
+      const cls = String(value || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      return `<span class="badge ${cls}">${esc(value || "Unknown")}</span>`;
+    }
+
+    // The five answers are one-word verdicts; colour says which way each one points.
+    function verdictBadge(value, kind) {
+      const v = String(value || "");
+      let tone = "neutral";
+      if (kind === "label") tone = v === "rfc:required" ? "danger" : v === "rfc:on-roadmap" ? "road" : v ? "ok" : "neutral";
+      if (kind === "scope") tone = /^(fix|working-group|rfc)\b/.test(v) ? "ok" : v ? "warn" : "neutral";
+      if (kind === "yesno") tone = v === "yes" ? "ok" : v === "no" ? "warn" : "neutral";
+      if (kind === "quality") tone = v === "ok" ? "ok" : v === "gaps" ? "warn" : "neutral";
+      if (kind === "attention") tone = v === "routine" ? "ok" : v === "elevated" ? "warn" : "neutral";
+      return `<span class="badge tone-${tone}">${esc(v || "—")}</span>`;
+    }
+
+    function statusBadge(row) {
+      if (isStatic) {
+        return `<span class="muted" title="The published site is rendered without network access. Run repo-manager site serve for the live Status column.">not live</span>`;
+      }
+      if (!row.review_status) {
+        // Three different silences, and only one of them is a dash. A merged or closed PR
+        // genuinely needs nothing. A PR the mirror has not reached yet needs an unknown
+        // amount, and drawing that as "nothing needed" is the exact lie this rewrite was
+        // written to stop telling.
+        if (row.state_known === false) {
+          return `<span class="badge tone-neutral" title="Not fetched from GitHub yet">syncing…</span>`;
+        }
+        const settled = row.pr_state ? `${row.pr_state.toLowerCase()} — nothing needed` : "";
+        return `<span class="muted" title="${esc(settled)}">—</span>`;
+      }
+      // "Approved (1/2)" is not the green "Approved": the rung still wants someone.
+      if (/\(\d+\/\d+\)/.test(row.review_status)) {
+        return `<span class="badge tone-neutral" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
+      }
+      const cls = row.review_status.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      return `<span class="badge ${cls}" title="${esc(row.review_status_detail || "")}">${esc(row.review_status)}</span>`;
+    }
+
+    function shortSha(value) {
+      return String(value || "").slice(0, 10);
+    }
+
+    function parseRoute() {
+      const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+      const params = new URLSearchParams(rawHash || window.location.search.slice(1));
+      const view = params.get("view");
+      return {
+        view: ["commits", "prs", "release", "announcement"].includes(view) ? view : "",
+        tag: params.get("tag") || "",
+        commit: params.get("commit") || "",
+        pr: params.get("pr") || "",
+        releaseHead: params.get("releaseHead") || "",
+        announcementHead: params.get("announcementHead") || ""
+      };
+    }
+
+    function applyRouteFromUrl() {
+      const route = parseRoute();
+      state.route = route;
+      if (!route.view && route.commit) route.view = "commits";
+      if (!route.view && route.pr) route.view = "prs";
+      if (!route.view && route.releaseHead) route.view = "release";
+      if (!route.view && route.announcementHead) route.view = "announcement";
+      if (state.data && route.commit && !route.tag) {
+        const row = (state.data.commit_reviews || []).find((item) => matchSha(item.commit_sha, route.commit));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (state.data && route.releaseHead && !route.tag) {
+        const row = (state.data.release_reviews || []).find((item) => matchSha(item.head_sha, route.releaseHead));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (state.data && route.announcementHead && !route.tag) {
+        const row = (state.data.release_announcements || []).find((item) => matchSha(item.head_sha, route.announcementHead));
+        if (row && row.tag_start) route.tag = row.tag_start;
+      }
+      if (route.view) state.view = route.view;
+      if (route.tag) state.selectedTag = route.tag;
+    }
+
+    function updateRoute() {
+      if (suppressRouteUpdate || !state.data) return;
+      const params = new URLSearchParams();
+      params.set("view", state.view);
+      if (state.selectedTag) params.set("tag", state.selectedTag);
+      if (state.view === "commits") {
+        const row = filteredCommits()[state.selectedCommit] || filteredCommits()[0];
+        if (row && row.commit_sha) params.set("commit", row.commit_sha);
+      } else if (state.view === "prs") {
+        const row = filteredPrs()[state.selectedPr] || filteredPrs()[0];
+        if (row && row.pr_number) params.set("pr", String(row.pr_number));
+      } else if (state.view === "release") {
+        const row = filteredReleases()[state.selectedRelease] || filteredReleases()[0];
+        if (row && row.head_sha) params.set("releaseHead", row.head_sha);
+      } else if (state.view === "announcement") {
+        const row = filteredAnnouncements()[state.selectedAnnouncement] || filteredAnnouncements()[0];
+        if (row && row.head_sha) params.set("announcementHead", row.head_sha);
+      }
+      const next = `#${params.toString()}`;
+      if (window.location.hash !== next) {
+        history.replaceState(null, "", next);
+      }
+    }
+
+    function matchSha(value, target) {
+      if (!value || !target) return false;
+      const full = String(value).toLowerCase();
+      const wanted = String(target).toLowerCase();
+      return full === wanted || full.startsWith(wanted);
+    }
+
+    function scrollSelected(root) {
+      requestAnimationFrame(() => {
+        const selected = root.querySelector(".selected");
+        if (selected) selected.scrollIntoView({ block: "nearest" });
+      });
+    }
+
+    function asList(items) {
+      if (!items || !items.length) return `<p class="muted">None.</p>`;
+      return `<ul>${items.map((item) => {
+        if (typeof item === "string") return `<li>${esc(item)}</li>`;
+        const priority = item.priority ? `${esc(item.priority)}: ` : "";
+        const handle = item.handle ? `${esc(item.handle)}: ` : "";
+        return `<li>${priority}${handle}${esc(item.text || item.reason || JSON.stringify(item))}</li>`;
+      }).join("")}</ul>`;
+    }
+
+    function breakingList(items) {
+      if (!items || !items.length) return `<p class="muted">None.</p>`;
+      return `<div class="todo-list">${items.map((item) =>
+        `<div class="todo-item"><span>${esc(item)}</span></div>`).join("")}</div>`;
+    }
+
+    // One row per platform, which is how a tester reads it: find the machine in front of
+    // you, and the row says what moved and what to try.
+    function testerPlan(entries) {
+      if (!entries || !entries.length) return `<p class="muted">No tester plan recorded.</p>`;
+      return `<table class="plan-table"><thead><tr>
+          <th style="width: 120px;">Platform</th><th>What changed</th><th>What to try</th>
+        </tr></thead><tbody>${entries.map((entry) => `
+          <tr><td>${esc(entry.platform)}</td><td>${esc(entry.changed)}</td><td>${esc(entry.exercise)}</td></tr>
+        `).join("")}</tbody></table>`;
+    }
+
+    function evidenceList(evidence) {
+      const entries = Object.entries(evidence || {}).filter(([, value]) => value);
+      if (!entries.length) return `<p class="muted">No evidence recorded.</p>`;
+      return `<div class="evidence-list">${entries.map(([key, value]) => `
+        <div class="evidence-item">
+          <h4>${esc(key.replaceAll("_", " "))}</h4>
+          <p>${esc(value)}</p>
+        </div>
+      `).join("")}</div>`;
+    }
+
+    function todoCount(row) {
+      const total = (row.todo_items || []).length;
+      return `<span class="todo-count ${total ? "" : "done"}">${total}</span>`;
+    }
+
+    function displayVerdict(row) {
+      return row.verdict;
+    }
+
+    // A to-do is read, not checked off. Nothing the dashboard owns is state any more: the
+    // release admin resolves an item by editing the artifact the item came from.
+    function todoList(items) {
+      if (!items || !items.length) return `<p class="muted">None.</p>`;
+      return `<div class="todo-list">${items.map((item) => `
+        <div class="todo-item">
+          <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}</span>
+        </div>
+      `).join("")}</div>`;
+    }
+
+    // --- Freshness ------------------------------------------------------------------
+    //
+    // The page reads a local mirror of GitHub, so it always has an answer and the only
+    // open question is how old that answer is. Everything below exists to keep that
+    // question answered on screen, and to keep asking it while someone is looking.
+
+    // Polling is a local read; the server decides whether a poll is worth a GitHub call.
+    // Thirty seconds is short enough that a review landing while you watch shows up on its
+    // own, and the digest means a poll that changes nothing costs a request and no redraw.
+    const PR_POLL_MS = 30000;
+    let pollTimer = null;
+    let syncing = false;
+
+    function agoLabel(iso) {
+      const then = Date.parse(iso || "");
+      if (!Number.isFinite(then)) return "";
+      const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+      if (seconds < 60) return `${seconds}s ago`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      return `${Math.round(seconds / 86400)}d ago`;
+    }
+
+    // Redrawn on a one-second timer as well as on every load, because "synced 4s ago" that
+    // stays 4s ago is worse than no label at all — it is a claim about right now that
+    // quietly stops being true.
+    function renderSyncState() {
+      const el = $("pr-sync");
+      if (!el || isStatic) return;
+      const sync = (state.data && state.data.pr_sync) || {};
+      el.classList.remove("stale", "failed");
+      if (syncing) {
+        el.textContent = "syncing…";
+        el.title = "Fetching the current state of every reviewed PR from GitHub";
+        return;
+      }
+      if (!sync.synced_at) {
+        el.classList.add("stale");
+        el.textContent = "not synced yet";
+        el.title = "No PR state has been fetched from GitHub yet.";
+        return;
+      }
+      const ago = agoLabel(sync.synced_at);
+      if (sync.error) {
+        el.classList.add("failed");
+        el.textContent = `synced ${ago} · GitHub unreachable`;
+        el.title = `The last sync attempt failed: ${sync.error}\nThe Status column is showing the last state fetched successfully.`;
+        return;
+      }
+      el.textContent = `synced ${ago}`;
+      el.title = `PR state fetched from GitHub at ${sync.synced_at}`;
+    }
+
+    // A poll that finds the same digest touches nothing. That is what makes it safe to
+    // poll at all: the reader's selection, scroll position and half-typed search box are
+    // not disturbed thirty seconds after they stopped interacting with the page.
+    function applyData(payload, options) {
+      const quiet = Boolean(options && options.quiet);
+      const unchanged = quiet && state.data && payload.digest && payload.digest === state.data.digest;
+      state.data = payload;
+      if (unchanged) {
+        renderSyncState();
+        return false;
+      }
+      const viewerInput = $("pr-viewer");
+      if (viewerInput && document.activeElement !== viewerInput) {
+        viewerInput.value = state.prViewer || state.data.pr_viewer || "";
+      }
+      // Redrawing the list rewrites its innerHTML, which resets the scroll box to the top.
+      // On a poll nobody asked for, that would drag the reader back up the table.
+      const wrap = document.querySelector("#view-prs .table-wrap");
+      const scrollTop = wrap ? wrap.scrollTop : 0;
+      applyRouteFromUrl();
+      renderAll();
+      if (wrap && quiet) wrap.scrollTop = scrollTop;
+      renderSyncState();
+      return true;
+    }
+
+    async function reloadData(options) {
+      if (isStatic) {
+        state.data = window.REPO_MANAGER_STATIC_DATA || {};
+        applyRouteFromUrl();
+        renderAll();
+        return;
+      }
+      const viewerParam = state.prViewer ? `?viewer=${encodeURIComponent(state.prViewer)}` : "";
+      const response = await fetch(`/api/data${viewerParam}`);
+      applyData(await response.json(), options);
+    }
+
+    // Chained rather than an interval, so a slow response can never stack polls behind
+    // itself, and hidden tabs stop entirely: nobody is reading, so nothing needs fetching
+    // and GitHub does not get asked.
+    function schedulePoll() {
+      if (isStatic) return;
+      clearTimeout(pollTimer);
+      if (document.visibilityState !== "visible") return;
+      pollTimer = setTimeout(async () => {
+        try {
+          await reloadData({ quiet: true });
+        } catch (error) {
+          // Keep showing the last good render. The label already carries the sync's own
+          // verdict, and a failed poll is not news worth clearing the screen over.
+        }
+        schedulePoll();
+      }, PR_POLL_MS);
+    }
+
+    async function runSync() {
+      if (isStatic || syncing) return;
+      const button = $("pr-refresh");
+      syncing = true;
+      if (button) button.disabled = true;
+      renderSyncState();
+      try {
+        const response = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ viewer: state.prViewer || "" })
+        });
+        const result = await response.json();
+        syncing = false;
+        if (result.data) applyData(result.data, { quiet: true });
+      } catch (error) {
+        syncing = false;
+        await reloadData({ quiet: true }).catch(() => {});
+      } finally {
+        syncing = false;
+        if (button) button.disabled = false;
+        renderSyncState();
+        schedulePoll();
+      }
+    }
+
+    function section(title, body) {
+      return `<div class="section"><h3>${esc(title)}</h3>${body}</div>`;
+    }
+
+    function field(label, value) {
+      return `<div class="kv"><span>${esc(label)}</span><strong>${esc(value || "")}</strong></div>`;
+    }
+
+    function linkedField(label, href, value) {
+      if (!href || !value) return field(label, value);
+      return `<div class="kv"><span>${esc(label)}</span><strong><a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(value)}</a></strong></div>`;
+    }
+
+    function filteredCommits() {
+      const rows = state.data.commit_reviews || [];
+      const query = state.filter.trim().toLowerCase();
+      const tagged = state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+      if (!query) return tagged;
+      return tagged.filter((row) => [
+        row.commit_sha, row.verdict, row.summary, row.author, row.verdict_reason, row.tag_start, row.branch
+      ].join(" ").toLowerCase().includes(query));
+    }
+
+    function prVisible(row) {
+      if (state.hideClosedPrs && row.pr_state && row.pr_state !== "OPEN") return false;
+      if (state.hideNonMainPrs && row.base_ref && row.base_ref !== "main") return false;
+      // Only a mirrored draft is hidden; a PR the sync has not reached is shown, like the
+      // other two toggles, rather than silently dropped.
+      if (state.hideDraftPrs && row.state_known && row.pr_is_draft) return false;
+      return true;
+    }
+
+    // Ranked by how much the PR wants from *me*, which is the order the Status column is
+    // for: my own turn first, then the ones only I can staff, then everything already in
+    // somebody else's hands. Ascending is most-action-first, because that is what a
+    // maintainer opening the dashboard is looking for.
+    const STATUS_ACTION_RANK = {
+      "Review": 0,
+      "Merge": 1,
+      "Needs reviewer": 2,
+      "In progress": 3,
+      "Waiting for RFC": 4
+    };
+    function prSortValue(row, key) {
+      switch (key) {
+        case "pr": return Number(row.pr_number) || 0;
+        case "status": {
+          const rank = STATUS_ACTION_RANK[row.review_status];
+          // An unknown or absent status sorts with the quiet end rather than the top.
+          return rank === undefined ? 90 : rank;
+        }
+        case "attention": return row.attention === "elevated" ? 0 : 1;
+        case "author": return String(row.author || "").toLowerCase();
+        case "description": return String(row.pr_title || "").toLowerCase();
+        default: return 0;
+      }
+    }
+
+    function sortPrs(rows) {
+      const key = state.prSort;
+      if (!key) return rows;
+      const dir = state.prSortDesc ? -1 : 1;
+      // Sorted on a copy: state.data.pr_reviews is the cached payload, and reordering it
+      // in place would make the next render depend on the previous one.
+      return rows.slice().sort((a, b) => {
+        const av = prSortValue(a, key), bv = prSortValue(b, key);
+        if (av < bv) return -1 * dir;
+        if (av > bv) return 1 * dir;
+        // Ties settle on PR number so the order never wobbles between refreshes.
+        return (Number(a.pr_number) || 0) - (Number(b.pr_number) || 0);
+      });
+    }
+
+    function filteredPrs() {
+      const rows = (state.data.pr_reviews || []).filter(prVisible);
+      const query = state.filter.trim().toLowerCase();
+      if (!query) return sortPrs(rows);
+      return sortPrs(rows.filter((row) => [
+        String(row.pr_number), row.pr_title, row.author, row.label, row.scope, row.attention, row.review_status
+      ].join(" ").toLowerCase().includes(query)));
+    }
+
+    function filteredReleases() {
+      const rows = state.data.release_reviews || [];
+      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+    }
+
+    function filteredAnnouncements() {
+      const rows = state.data.release_announcements || [];
+      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
+    }
+
+    function renderShell() {
+      const data = state.data;
+      const tags = data.tags || [];
+      if (state.selectedTag && !tags.includes(state.selectedTag)) {
+        state.selectedTag = "";
+      }
+      if (!state.selectedTag && tags.length) {
+        state.selectedTag = tags[0];
+      }
+      $("tag-select").innerHTML = tags.length ? tags.map((tag) => `<option value="${esc(tag)}" ${tag === state.selectedTag ? "selected" : ""}>${esc(tag)}</option>`).join("") : `<option value="">No tags</option>`;
+      const commits = filteredCommits();
+      const releases = filteredReleases();
+      const announcements = filteredAnnouncements();
+      $("repo-name").textContent = `${data.config.repo} · ${data.config.branch || "main"}`;
+      $("metric-commits").textContent = commits.length;
+      $("metric-todos").textContent = commits.reduce((sum, row) => sum + (row.todo_items || []).length, 0) + releases.reduce((sum, row) => sum + (row.todo_items || []).length, 0);
+      $("stat-contributions").textContent = commits.length;
+      $("stat-authors").textContent = new Set(commits.map((row) => row.author).filter(Boolean)).size;
+      $("stat-reviewers").textContent = new Set(commits.flatMap((row) => row.reviewers || [])).size;
+      const range = dateRange(commits);
+      $("stat-days").textContent = range.start && range.end ? `${range.days} days` : "No reviews";
+      $("stat-dates").textContent = range.start && range.end ? `${range.start} to ${range.end}` : "";
+    }
+
+    function dateRange(rows) {
+      const dates = rows.map((row) => row.merge_date || row.commit_date || row.reviewed_at).filter(Boolean).map((value) => new Date(value)).filter((date) => !Number.isNaN(date.getTime()));
+      if (!dates.length) return {};
+      const start = new Date(Math.min(...dates));
+      const end = new Date(Math.max(...dates));
+      const dayMs = 24 * 60 * 60 * 1000;
+      return {
+        start: start.toISOString().slice(0, 10),
+        end: end.toISOString().slice(0, 10),
+        days: Math.floor((Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()) - Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate())) / dayMs) + 1
+      };
+    }
+
+    function renderCommits() {
+      const rows = filteredCommits();
+      if (state.route.commit) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.commit_sha, state.route.commit));
+        if (routedIndex !== -1) {
+          state.selectedCommit = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedCommit = Math.min(state.selectedCommit, rows.length - 1);
+      }
+      $("commit-count").textContent = `${rows.length} shown`;
+      $("commit-rows").innerHTML = rows.map((row, index) => `
+        <tr data-index="${index}" class="${index === state.selectedCommit ? "selected" : ""}">
+          <td>${index + 1}</td>
+          <td class="commit-cell" title="${esc(row.commit_sha)}">${esc(shortSha(row.commit_sha))}</td>
+          <td>${badge(displayVerdict(row))}</td>
+          <td>${todoCount(row)}</td>
+          <td><div class="description">${esc(row.summary)}</div></td>
+          <td>${esc(row.author || "")}</td>
+        </tr>
+      `).join("");
+      scrollSelected($("commit-rows"));
+      $("commit-rows").querySelectorAll("tr").forEach((tr) => {
+        tr.addEventListener("click", async () => {
+          const index = Number(tr.dataset.index);
+          state.selectedCommit = index;
+          state.route = {};
+          renderCommits();
+          updateRoute();
+        });
+      });
+      const row = rows[state.selectedCommit] || rows[0];
+      if (!row) {
+        $("commit-detail").innerHTML = `<div class="empty">No commit reviews saved yet.</div>`;
+        $("commit-selected").textContent = "";
+        return;
+      }
+      $("commit-selected").textContent = shortSha(row.commit_sha);
+      const evidence = row.evidence || {};
+      const prUrl = row.pr_number ? `https://github.com/${state.data.config.repo}/pull/${row.pr_number}` : "";
+      $("commit-detail").innerHTML = [
+        field("Commit", row.commit_sha),
+        linkedField("PR", prUrl, row.pr_number ? `#${row.pr_number}` : ""),
+        field("Author", row.author),
+        row.merge_date ? field("Merged", row.merge_date) : "",
+        field("Audited", row.reviewed_at),
+        generatedInField(row),
+        section("Description", `<p>${esc(row.summary)}</p>`),
+        section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(row.verdict_reason || "")}</p>`),
+        section("Maintainer To-Do", todoList(row.todo_items)),
+        section("Shout Outs", asList(row.shout_outs)),
+        section("Evidence", evidenceList(evidence))
+      ].join("");
+    }
+
+    async function runPrAction(path, prNumber) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pr_number: prNumber })
+      });
+      let result = {};
+      try {
+        result = await response.json();
+      } catch (error) {
+        result = {};
+      }
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || "Action failed");
+      }
+      return result;
+    }
+
+    function describePrActionResult(kind, result) {
+      if (kind === "comment") {
+        // Not the URL: the reload that follows puts the same link in the "Posted comment"
+        // line right below this one, and the two together read as two comments.
+        return result.action === "updated" ? "Updated the review comment." : "Posted the review comment.";
+      }
+      if (kind === "label") {
+        const steps = { label: "applied the label", draft: "marked as draft", message: "posted the RFC request" };
+        const done = (result.done || []).map((step) => steps[step] || step);
+        return `${result.label}: ${done.join(", ") || "already applied, nothing to do"}.`;
+      }
+      const parts = [];
+      if ((result.requested || []).length) parts.push(`Requested: ${result.requested.join(", ")}`);
+      (result.skipped || []).forEach((item) => parts.push(`Skipped ${item.handle} (${item.reason})`));
+      (result.failed || []).forEach((item) => parts.push(`Failed ${item.handle}: ${item.reason}`));
+      (result.warnings || []).forEach((warning) => parts.push(warning));
+      return parts.join(" · ") || "No reviewers left to request.";
+    }
+
+    function prActions(row) {
+      const disabled = isStatic ? "disabled" : "";
+      const message = state.prActionMessage && state.prActionMessage.pr === row.pr_number
+        ? `<p class="muted" id="pr-action-result">${esc(state.prActionMessage.text)}</p>`
+        : `<p class="muted hidden" id="pr-action-result"></p>`;
+      const commentLink = row.comment_url
+        ? `<p class="muted">Comment on GitHub: <a href="${esc(row.comment_url)}" target="_blank" rel="noopener noreferrer">${esc(row.comment_url)}</a></p>`
+        : "";
+      // A covered rung has no slate below the rule, so the button would be acting on names
+      // that are not on screen — and on #3210 one of those names was a reviewer already
+      // requested on the PR. The tooltip says who is covering it, so the button explains
+      // itself rather than just refusing. `repo-manager request-pr-reviewers N` still works:
+      // typing the command is an explicit override, clicking a button you cannot read is not.
+      // The label button is the same act the GitHub Action will perform on every new PR:
+      // apply the triage's rfc: label, and for rfc:required also draft the PR and post the
+      // standard request. Once GitHub already shows the label there is nothing left to do.
+      // For rfc:required the button stays live: the message step is not visible from the
+      // mirror, and every step is idempotent, so a click on a PR that is done says so.
+      const labelApplied = row.label !== "rfc:required" && (row.pr_labels || []).includes(row.label);
+      const labelButton = row.label === "rfc:required" ? "Request RFC" : `Apply ${row.label}`;
+      const labelTitle = labelApplied
+        ? `${row.label} is already applied on GitHub`
+        : row.label === "rfc:required"
+          ? "Apply rfc:required, mark the PR as a draft, and post the standard RFC request (steps already done are skipped)"
+          : `Apply the ${row.label} label on GitHub`;
+      const covered = (row.coverage || {}).adequate;
+      const who = ((row.coverage || {}).who || []).join(", ");
+      const reviewersTitle = covered
+        ? `Not needed — this PR already has the reviewers its rung asks for${who ? ` (${who})` : ""}`
+        : "Request the suggested reviewers on GitHub";
+      return `
+        <div class="pr-actions">
+          <button class="copy" id="pr-post-comment" data-pr="${row.pr_number}" ${disabled}>Post review comment</button>
+          <button class="copy" id="pr-request-reviewers" data-pr="${row.pr_number}" title="${esc(reviewersTitle)}" ${disabled || (covered ? "disabled" : "")}>Request reviewers</button>
+          <button class="copy" id="pr-apply-label" data-pr="${row.pr_number}" title="${esc(labelTitle)}" ${disabled || (labelApplied ? "disabled" : "")}>${esc(labelButton)}</button>
+        </div>
+        ${message}
+        ${commentLink}`;
+    }
+
+    function attachPrActionHandlers(row) {
+      if (isStatic) return;
+      const bindings = [
+        ["pr-post-comment", "/api/pr-comment", "comment"],
+        ["pr-request-reviewers", "/api/pr-reviewers", "reviewers"],
+        ["pr-apply-label", "/api/pr-apply-label", "label"]
+      ];
+      bindings.forEach(([id, path, kind]) => {
+        const button = $(id);
+        if (!button) return;
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          const original = button.textContent;
+          button.textContent = "Working...";
+          try {
+            const result = await runPrAction(path, Number(button.dataset.pr));
+            const warnings = (result.warnings || []).length && kind === "comment"
+              ? ` (${result.warnings.join("; ")})` : "";
+            state.prActionMessage = {
+              pr: Number(button.dataset.pr),
+              text: describePrActionResult(kind, result) + warnings
+            };
+            await reloadData();
+          } catch (error) {
+            button.disabled = false;
+            button.textContent = original;
+            alert(error.message);
+          }
+        });
+      });
+    }
+
+    function generatedInField(row) {
+      const seconds = Number(row.generation_seconds || (row.details || {}).generation_seconds || 0);
+      if (!seconds || seconds <= 0) return "";
+      return field("Generated in", `${Math.round(seconds)} seconds`);
+    }
+
+    // The comment is markdown, and the pane is a preview of it, so the pane has to render
+    // markdown. Only the subset render_pr_review_comment actually emits is handled —
+    // headings, checklists, nested notes, and inline emphasis. Anything else falls through
+    // as a paragraph, which is the right failure for a preview: it shows the literal text.
+    function mdInline(text) {
+      return esc(text)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\s(])\*([^*]+)\*/g, "$1<em>$2</em>")
+        .replace(/(^|[\s(])_([^_]+)_/g, "$1<em>$2</em>");
+    }
+
+    // The line that leads the comment, and the only pill that keeps its full sentence: a
+    // chip reading "not ready" alone, floating above the to-dos, is a status nobody can
+    // read without the markdown behind it. The value here is the badge's colour class.
+    const MD_VERDICTS = {
+      "ready for review": "ready",
+      "not ready for review yet": "not-ready"
+    };
+
+    // "Focus: <b>focused</b>" — the label stays a label, the verdict becomes the pill the
+    // list columns use. On GitHub the same line is bold text; only the rendering differs.
+    function mdSummary(text) {
+      const parts = text.match(/^(.*?):\s*<b>(.*?)<\/b>(.*)$/);
+      // A bare summary ("Explanation") is a control, not a heading — the section it belongs
+      // to is the line above it, and a fold that outweighs its own section inverts the page.
+      if (!parts) return `<span class="md-fold-label">${mdInline(text)}</span>`;
+      return `<span class="md-label">${mdInline(parts[1])}</span> ${mdBadge(parts[2])}${mdInline(parts[3])}`;
+    }
+
+    // Section verdicts carry counts ("2 to resolve"), so they cannot each have a class of
+    // their own. The pill is coloured by what the verdict means instead: green when there is
+    // nothing to do, yellow when there is, red when something is absent that should not be,
+    // grey when nobody looked.
+    function mdBadge(verdict) {
+      const value = verdict.trim().toLowerCase();
+      let tone = "neutral";
+      if (/^(none found|none|adequate|accurate|focused|all cleared|not-applicable)$/.test(value)) {
+        tone = "ok";
+      } else if (/(to resolve|^gaps$|discrepancies|bundled|suggested|no maintainer)/.test(value)) {
+        tone = "warn";
+      } else if (/^missing$/.test(value)) {
+        tone = "danger";
+      }
+      return `<span class="badge tone-${tone}">${esc(verdict)}</span>`;
+    }
+
+    // `depth` is how many <details> deep this line sits. Emphasis follows nesting: a bold
+    // line at the top level is a section of the comment, the same line inside a fold is a
+    // block within one. Reading weight off the markup rather than off a list of known
+    // titles is what keeps "Why this rung" from ever outranking "Review suggestion".
+    function mdParagraph(line, depth) {
+      // The lead verdict keeps its whole sentence inside the pill; every other pill is a
+      // one-word answer to a labelled question and does not need one.
+      const lead = line.match(/^\*\*([^*]+)\*\*(?:\s*—\s*(.*))?$/);
+      if (lead) {
+        const tone = MD_VERDICTS[lead[1].trim().toLowerCase()];
+        if (tone) {
+          return `<p class="md-verdict"><span class="badge ${tone}">${esc(lead[1])}</span> ${mdInline(lead[2] || "")}</p>`;
+        }
+      }
+      // The five triage lines: "**label:** `rfc:required`". The key stays a label and the
+      // value becomes the same pill the list columns use.
+      const triageLine = line.match(/^\*\*(label|scope|body matches diff|docs and tests):\*\*\s*`([^`]*)`\s*$/);
+      if (triageLine) {
+        const kind = { "label": "label", "scope": "scope", "body matches diff": "yesno", "docs and tests": "quality" }[triageLine[1]];
+        return `<p><span class="md-label">${esc(triageLine[1])}</span> ${verdictBadge(triageLine[2], kind)}</p>`;
+      }
+      const reviewersLine = line.match(/^\*\*(suggested reviewers):\*\*\s*(.*)$/);
+      if (reviewersLine) {
+        return `<p><span class="md-label">${esc(reviewersLine[1])}</span> ${mdInline(reviewersLine[2])}</p>`;
+      }
+      // Inside the Explanation fold each check heads its block as "**Name: verdict**".
+      // The verdict is the pill, the name is the label.
+      const verdict = line.match(/^\*\*(.*):\s*(.+?)\*\*$/);
+      if (verdict) {
+        return `<p><span class="md-label">${mdInline(verdict[1])}</span> ${mdBadge(verdict[2])}</p>`;
+      }
+      // A bold line standing on its own is a heading, and how loud it is depends on where.
+      if (lead && !lead[2]) {
+        return `<p class="${depth ? "md-subhead" : "md-section"}">${mdInline(lead[1])}</p>`;
+      }
+      // What was inspected to earn a clean bill is supporting evidence, not a finding.
+      if (/^Checked:/.test(line)) {
+        return `<p class="muted">${mdInline(line)}</p>`;
+      }
+      // The AI-assistance footer is end matter: below the review, and below its rule.
+      if (/^_AI-assisted triage/.test(line)) {
+        return `<p class="md-footer">${mdInline(line)}</p>`;
+      }
+      return `<p>${mdInline(line)}</p>`;
+    }
+
+    function markdown(text) {
+      const out = [];
+      let depth = 0;        // how many <ul> are open
+      let folds = 0;        // how many <details> are open
+      let itemOpen = false; // the <li> at the deepest level is not closed yet
+      // A nested list belongs inside its parent <li>, so the parent stays open across the
+      // deeper level and closes only when that level does.
+      const setDepth = (want) => {
+        while (depth > want) {
+          if (itemOpen) out.push("</li>");
+          out.push("</ul>");
+          depth--;
+          itemOpen = depth > 0;
+        }
+        while (depth < want) { out.push("<ul>"); depth++; itemOpen = false; }
+      };
+      const pushItem = (html, cls) => {
+        if (itemOpen) out.push("</li>");
+        out.push(`<li${cls ? ` class="${cls}"` : ""}>${html}`);
+        itemOpen = true;
+      };
+      for (const raw of String(text || "").split("\n")) {
+        const line = raw.replace(/\s+$/, "");
+        if (!line.trim()) { setDepth(0); continue; }
+        // The comment folds each section into <details>, so the preview does too — same
+        // defaults, so a section open on GitHub is open here. These are the only raw HTML
+        // tags the comment emits; everything else is still escaped on the way through.
+        if (line === "</details>") { setDepth(0); folds = Math.max(0, folds - 1); out.push("</details>"); continue; }
+        const fold = line.match(/^<details( open)?><summary>(.*?)<\/summary>(<\/details>)?$/);
+        if (fold) {
+          setDepth(0);
+          out.push(`<details${fold[1] || ""}><summary>${mdSummary(fold[2])}</summary>${fold[3] || ""}`);
+          if (!fold[3]) folds++;
+          continue;
+        }
+        const heading = line.match(/^#{1,6}\s+(.*)$/);
+        if (heading) { setDepth(0); out.push(`<h4>${mdInline(heading[1])}</h4>`); continue; }
+        const item = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (item) {
+          setDepth(item[1].length >= 2 ? 2 : 1);
+          const task = item[2].match(/^\[([ xX])\]\s+(.*)$/);
+          // A checkbox is already a marker; the bullet beside it is a second one.
+          pushItem(task
+            ? `${task[1].toLowerCase() === "x" ? "\u2611" : "\u2610"} ${mdInline(task[2])}`
+            : mdInline(item[2]), task ? "task" : "");
+          continue;
+        }
+        setDepth(0);
+        out.push(mdParagraph(line, folds));
+      }
+      setDepth(0);
+      return out.join("");
+    }
+
+    // The arrow is drawn in the header text rather than by CSS, so it survives the innerHTML
+    // rewrite the table does on every render.
+    function markPrSortHeader() {
+      document.querySelectorAll('#view-prs th.sortable').forEach((th) => {
+        const active = th.dataset.sort === state.prSort;
+        th.classList.toggle("sorted", active);
+        const label = th.dataset.label || (th.dataset.label = th.textContent.trim());
+        th.textContent = active ? `${label} ${state.prSortDesc ? "\u25be" : "\u25b4"}` : label;
+      });
+    }
+
+    function attachPrSortHandlers() {
+      document.querySelectorAll('#view-prs th.sortable').forEach((th) => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.sort;
+          // Same column toggles direction; a new column starts in its natural order, which
+          // for status and attention means most-urgent-first.
+          if (state.prSort === key) {
+            state.prSortDesc = !state.prSortDesc;
+          } else {
+            state.prSort = key;
+            state.prSortDesc = false;
+          }
+          writeStored(PR_SORT_KEY, { key: state.prSort, desc: state.prSortDesc });
+          state.selectedPr = 0;
+          renderPrReviews();
+        });
+      });
+    }
+
+    // Checking a box writes one key to the store and draws the checkmark, and that is the
+    // entire transaction — no request, no refetch, no redraw.
+    //
+    // Every workspace on this machine serves its dashboard from the same localhost origin
+    // and so shares one store, which is why the repo belongs in the key.
+    function prCheckKey(row) {
+      return `${row.repo}|${row.pr_number}`;
+    }
+
+    // A check-off also goes stale by sitting there: after a week I have stopped carrying
+    // the PR around in my head, so the box stops claiming I have, whatever GitHub has been
+    // doing meanwhile.
+    const PR_CHECK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+    // A check-off says "I have dealt with this PR as it stands", so it is stored with the
+    // Status it was made against and the time it was made, and lasts only as long as both
+    // hold. Two things that look like a Status change are not: a blank Status is gh
+    // telling us nothing rather than telling us something new, and a Status written from
+    // another perspective is the "Status as" box being retyped, which relabels the whole
+    // column without anything having happened on GitHub. Neither may sweep the checkmarks
+    // away; the week runs regardless.
+    function reconcilePrChecks(rows) {
+      const viewer = state.data.pr_viewer || "";
+      const now = Date.now();
+      const live = new Set();
+      let changed = false;
+      for (const row of rows) {
+        const key = prCheckKey(row);
+        live.add(key);
+        const entry = prChecks[key];
+        if (!entry) continue;
+        const status = row.review_status || "";
+        const moved = status && entry.viewer === viewer && entry.status !== status;
+        // Written as a failure to be recent, so an entry with no readable time on it —
+        // one stored before check-offs were timed — is expired rather than immortal.
+        const expired = !(now - Date.parse(entry.at) < PR_CHECK_TTL_MS);
+        if (moved || expired) {
+          delete prChecks[key];
+          changed = true;
+        }
+      }
+      // A review this dashboard no longer holds has nothing left to check off. Another
+      // workspace's rows are simply absent here, so only these repos are pruned.
+      const repos = new Set(rows.map((row) => row.repo));
+      for (const key of Object.keys(prChecks)) {
+        if (repos.has(key.slice(0, key.lastIndexOf("|"))) && !live.has(key)) {
+          delete prChecks[key];
+          changed = true;
+        }
+      }
+      if (changed) writeStored(PR_CHECKS_KEY, prChecks);
+    }
+
+    function setPrCheck(row, checked) {
+      if (checked) {
+        prChecks[prCheckKey(row)] = {
+          status: row.review_status || "",
+          viewer: state.data.pr_viewer || "",
+          at: new Date().toISOString()
+        };
+      } else {
+        delete prChecks[prCheckKey(row)];
+      }
+      writeStored(PR_CHECKS_KEY, prChecks);
+    }
+
+    // The date is in the tooltip because the box now disappears on its own: without it,
+    // a check that expires overnight looks like the dashboard losing my work.
+    function prCheckTitle(entry) {
+      if (!entry) return "Check off this PR";
+      return `Checked off ${entry.at.slice(0, 10)} \u2014 clears when the Status changes, or a week after checking`;
+    }
+
+    function prCheckBox(entry) {
+      const title = prCheckTitle(entry);
+      return `<input type="checkbox" class="pr-check" ${entry ? "checked" : ""} title="${title}" aria-label="${title}">`;
+    }
+
+    let prSortWired = false;
+
+    function renderPrReviews() {
+      if (!prSortWired) { attachPrSortHandlers(); prSortWired = true; }
+      // Against every saved review, not just the visible ones: a PR hidden by a filter
+      // moves on GitHub too, and its box must already be clear when the filter comes off.
+      reconcilePrChecks(state.data.pr_reviews || []);
+      const rows = filteredPrs();
+      if (state.route.pr) {
+        const routedIndex = rows.findIndex((row) => String(row.pr_number) === String(state.route.pr));
+        if (routedIndex !== -1) {
+          state.selectedPr = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedPr = Math.min(state.selectedPr, rows.length - 1);
+      }
+      $("pr-count").textContent = `${rows.length} shown`;
+      $("pr-rows").innerHTML = rows.map((row, index) => {
+        const entry = prChecks[prCheckKey(row)];
+        return `
+        <tr data-index="${index}" class="${index === state.selectedPr ? "selected" : ""}${entry ? " checked-off" : ""}">
+          <td>${prCheckBox(entry)}</td>
+          <td>#${row.pr_number}</td>
+          <td>${statusBadge(row)}</td>
+          <td title="${esc(row.attention_detail || "")}">${verdictBadge(row.attention, "attention")}</td>
+          <td><div class="description">${esc(row.pr_title || "")}</div></td>
+          <td>${esc(row.author || "")}</td>
+        </tr>
+      `;
+      }).join("");
+      markPrSortHeader();
+      scrollSelected($("pr-rows"));
+      $("pr-rows").querySelectorAll("tr").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          state.selectedPr = Number(tr.dataset.index);
+          state.route = {};
+          state.prActionMessage = null;
+          renderPrReviews();
+          updateRoute();
+        });
+      });
+      $("pr-rows").querySelectorAll(".pr-check").forEach((box) => {
+        // Checking a box is not picking a row, so the click stops before the <tr>.
+        box.addEventListener("click", (event) => event.stopPropagation());
+        box.addEventListener("change", () => {
+          const tr = box.closest("tr");
+          const row = rows[Number(tr.dataset.index)];
+          setPrCheck(row, box.checked);
+          // The browser has already drawn the checkmark; the row catches up to it, and
+          // nothing else on the page has learned anything that would change what it shows.
+          tr.classList.toggle("checked-off", box.checked);
+          box.title = prCheckTitle(prChecks[prCheckKey(row)]);
+          box.setAttribute("aria-label", box.title);
+        });
+      });
+      const row = rows[state.selectedPr] || rows[0];
+      if (!row) {
+        $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager review-pr N</code> or <code>repo-manager sweep-prs</code> to review open PRs.</div>`;
+        $("pr-selected").textContent = "";
+        return;
+      }
+      $("pr-selected").textContent = `#${row.pr_number}`;
+      const prUrl = `https://github.com/${state.data.config.repo}/pull/${row.pr_number}`;
+      $("pr-detail").innerHTML = [
+        linkedField("PR", prUrl, `#${row.pr_number} — ${row.pr_title || ""}`),
+        // Dashboard-only by the same test as the rest of this block: a reader of the comment
+        // is already on the PR, whose own body says what it does. A reader skimming the
+        // dashboard has no other way to tell one row from another.
+        field("Author", row.author),
+        row.pr_state ? field("State", `${row.pr_state}${row.base_ref ? ` → ${row.base_ref}` : ""}`) : "",
+        field("Head", shortSha(row.head_sha)),
+        field("Reviewed", row.reviewed_at),
+        generatedInField(row),
+        row.review_status ? section("Review Status", `<p>${statusBadge(row)} ${esc(row.review_status_detail || "")}</p>`) : "",
+        section("Actions", prActions(row)),
+        // The rule is the line between the two audiences. Above it is the dashboard's own:
+        // things GitHub already shows on the PR itself (number, author, state) but that a
+        // dashboard reader cannot see, plus the Status this viewer's perspective computes,
+        // plus the buttons. Below it is the review, and the review is the comment — what is
+        // rendered there is exactly what Post review comment submits, with nothing after it.
+        `<hr class="pr-split">`,
+        `<div class="md">${markdown(row.comment_markdown)}</div>`
+      ].join("");
+      attachPrActionHandlers(row);
+    }
+
+    function renderRelease() {
+      const rows = filteredReleases();
+      if (state.route.releaseHead) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.releaseHead));
+        if (routedIndex !== -1) {
+          state.selectedRelease = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedRelease = Math.min(state.selectedRelease, rows.length - 1);
+      }
+      const row = rows[state.selectedRelease] || rows[0];
+      if (!row) {
+        $("release-detail").innerHTML = `<div class="empty">Run <code>repo-manager release-review TAG</code> to create one.</div>`;
+        return;
+      }
+      const details = row.details || {};
+      $("release-detail").innerHTML = [
+        field("Repo", row.repo),
+        field("Release", row.tag_start),
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Head", row.head_sha),
+        field("Audited", row.reviewed_at),
+        generatedInField(row),
+        section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(details.verdict_reason || row.verdict_reason || "")}</p>`),
+        section("Prioritized To-Do", todoList(row.todo_items)),
+        section("Breaking Changes", breakingList(row.breaking_changes)),
+        section("Tester Plan", testerPlan(row.tester_plan)),
+        row.frozen && row.frozen.length
+          ? section("Edited by hand", `<p class="muted">repo-manager will not overwrite ${esc(row.frozen.join(", "))}. Pass <code>--force</code> to regenerate.</p>`)
+          : "",
+        section("Evidence", evidenceList(details.evidence))
+      ].join("");
+    }
+
+    function renderAnnouncement() {
+      const rows = filteredAnnouncements();
+      if (state.route.announcementHead) {
+        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.announcementHead));
+        if (routedIndex !== -1) {
+          state.selectedAnnouncement = routedIndex;
+        }
+      }
+      if (rows.length) {
+        state.selectedAnnouncement = Math.min(state.selectedAnnouncement, rows.length - 1);
+      }
+      const row = rows[state.selectedAnnouncement] || rows[0];
+      if (!row) {
+        $("announcement-detail").innerHTML = `<div class="empty">Run <code>repo-manager announce TAG</code> to create an announcement.</div>`;
+        return;
+      }
+      $("announcement-detail").innerHTML = [
+        field("Release", row.tag_start),
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Head", row.head_sha),
+        field("Generated", row.generated_at),
+        generatedInField(row),
+        section("Website Release Highlights", `<pre id="release-highlights-markdown">${esc(row.release_highlights_markdown || "No website release highlights artifact saved.")}</pre>`),
+        section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.markdown || "")}</pre>`)
+      ].join("");
+    }
+
+    function setView(view) {
+      state.view = view;
+      document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+      $("view-commits").classList.toggle("hidden", view !== "commits");
+      $("view-prs").classList.toggle("hidden", view !== "prs");
+      $("view-release").classList.toggle("hidden", view !== "release");
+      $("view-announcement").classList.toggle("hidden", view !== "announcement");
+      $("search").classList.toggle("hidden", view !== "commits" && view !== "prs");
+      $("copy-announcement").classList.toggle("hidden", view !== "announcement");
+      $("view-title").textContent = view === "commits" ? "Commit DB" : view === "prs" ? "PR Reviews" : view === "release" ? "Release Review" : "Announcement";
+      updateRoute();
+    }
+
+    function renderAll() {
+      renderShell();
+      renderCommits();
+      renderPrReviews();
+      renderRelease();
+      renderAnnouncement();
+      setView(state.view);
+    }
+
+    document.querySelectorAll(".nav-button").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.route = {};
+        setView(button.dataset.view);
+      });
     });
-    const data = await response.json();
-    result.textContent = data.ok
-      ? (data.url || [...(data.done || []), ...(data.requested || [])].join(", ") || "Done.")
-      : `Did not happen: ${data.error || "unknown error"}`;
-  } catch (error) {
-    result.textContent = `Did not happen: ${error}`;
-  }
-  box.querySelectorAll("button").forEach((b) => (b.disabled = false));
-}
+    $("search").addEventListener("input", (event) => {
+      state.filter = event.target.value;
+      state.selectedCommit = 0;
+      state.selectedPr = 0;
+      state.route = {};
+      renderCommits();
+      renderPrReviews();
+      updateRoute();
+    });
+    $("pr-viewer").addEventListener("change", async (event) => {
+      state.prViewer = event.target.value.trim().replace(/^@/, "");
+      await reloadData();
+    });
+    $("pr-hide-closed").addEventListener("change", (event) => {
+      state.hideClosedPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
+      updateRoute();
+    });
+    $("pr-hide-non-main").addEventListener("change", (event) => {
+      state.hideNonMainPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
+      updateRoute();
+    });
+    $("pr-hide-drafts").addEventListener("change", (event) => {
+      state.hideDraftPrs = event.target.checked;
+      state.selectedPr = 0;
+      renderPrReviews();
+      updateRoute();
+    });
+    $("tag-select").addEventListener("change", (event) => {
+      state.selectedTag = event.target.value;
+      state.selectedCommit = 0;
+      state.selectedPr = 0;
+      state.selectedRelease = 0;
+      state.selectedAnnouncement = 0;
+      state.route = {};
+      renderAll();
+    });
+    $("copy-announcement").addEventListener("click", async () => {
+      const markdown = $("announcement-markdown");
+      await navigator.clipboard.writeText(markdown ? markdown.textContent : "");
+      $("copy-announcement").textContent = "Copied";
+      setTimeout(() => $("copy-announcement").textContent = "Copy announcement", 1000);
+    });
+    window.addEventListener("hashchange", () => {
+      if (!state.data) return;
+      suppressRouteUpdate = true;
+      applyRouteFromUrl();
+      renderAll();
+      suppressRouteUpdate = false;
+    });
 
-(async function load() {
-  if (!DATA) DATA = await (await fetch("/api/data")).json();
-  draw();
-})();
-</script>
+    // The published dashboard is a file, not a server: there is nothing behind these two
+    // to press, and offering a Refresh that cannot refresh is worse than offering none.
+    if (isStatic) {
+      $("pr-refresh").classList.add("hidden");
+      $("pr-sync").classList.add("hidden");
+    }
+    $("pr-refresh").addEventListener("click", runSync);
+
+    // Coming back to the tab is the strongest signal there is that someone wants current
+    // information, so it does not wait out the poll interval. Leaving stops the clock: a
+    // dashboard left open on a hidden tab overnight makes no requests at all.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") {
+        clearTimeout(pollTimer);
+        return;
+      }
+      reloadData({ quiet: true }).catch(() => {});
+      schedulePoll();
+    });
+
+    // Only ever rewrites the one span, so it is free to run while the reader works.
+    setInterval(renderSyncState, 1000);
+
+    reloadData()
+      .then(() => schedulePoll())
+      .catch((error) => {
+        document.body.innerHTML = `<div class="empty">Failed to load repo-manager data: ${esc(error.message)}</div>`;
+      });
+  </script>
 </body>
 </html>

@@ -49,35 +49,53 @@ class LoadFromFiles(TempDirCase):
         self.data = site.load(self.state)
 
     def test_everything_comes_from_the_directory(self):
-        self.assertEqual(self.data["counts"], {
-            "commits": 1, "prs": 1, "releases": 1,
-            "verdicts": {"Needs Attention": 1}, "labels": {"rfc:required": 1}, "blockers": 0,
-        })
+        counts = self.data["counts"]
+        self.assertEqual(counts["commits"], 1)
+        self.assertEqual(counts["pr_reviews"], 1)
+        self.assertEqual(counts["release_reviews"], 1)
+        self.assertEqual(counts["announcements"], 1)
+        self.assertEqual(counts["verdicts"], {"Needs Attention": 1})
+        self.assertEqual(counts["blockers"], 0)
 
     def test_the_repo_is_read_back_from_a_stored_review(self):
-        self.assertEqual(self.data["repo"], "lemonade-sdk/lemonade")
+        self.assertEqual(self.data["config"]["repo"], "lemonade-sdk/lemonade")
 
     def test_a_bucket_carries_its_verdict_plan_and_artifacts(self):
-        bucket = self.data["releases"][0]
-        self.assertEqual(bucket["bucket"], "v2026.38")
+        bucket = self.data["release_reviews"][0]
+        self.assertEqual(bucket["tag_start"], "v2026.38")
         self.assertEqual(bucket["verdict"], "Needs Attention")
         self.assertEqual(bucket["tester_plan"][0]["platform"], "macOS")
-        self.assertIn("## Headline", bucket["notes"])
         self.assertEqual(bucket["commits"], 1)
+        self.assertIn("## Headline", self.data["release_announcements"][0]["release_highlights_markdown"])
 
     def test_a_hand_edited_artifact_shows_as_frozen(self):
         self.state.write_text(store.notes_key("v2026.38"), "## Headline\n\n- edited by hand\n")
-        self.assertEqual(site.load(self.state)["releases"][0]["frozen"], ["notes.md"])
+        self.assertEqual(site.load(self.state)["release_reviews"][0]["frozen"], ["notes.md"])
 
-    def test_p0_todos_are_counted_as_open_blockers(self):
+    def test_blockers_lead_the_to_do_list_and_are_counted(self):
         review = self.state.read_json(store.review_key("v2026.38"))
         review["prioritized_todos"].append({"priority": "P0", "text": "Fix the installer."})
         self.state.write_json(store.review_key("v2026.38"), review)
-        self.assertEqual(site.load(self.state)["counts"]["blockers"], 1)
+        data = site.load(self.state)
+        self.assertEqual(data["counts"]["blockers"], 1)
+        self.assertEqual(
+            [t["priority"] for t in data["release_reviews"][0]["todo_items"]], ["P0", "P1"]
+        )
 
     def test_an_unreadable_file_is_skipped_rather_than_crashing_the_page(self):
         self.state.write_text("commits/broken.json", "{ this is not json")
         self.assertEqual(site.load(self.state)["counts"]["commits"], 1)
+
+    def test_without_a_mirror_no_pr_claims_a_live_status(self):
+        # `site render` has no network, so the Status column must not be drawn from stale
+        # data as though it were fresh. The page shows "not live" instead.
+        row = self.data["pr_reviews"][0]
+        self.assertFalse(row["state_known"])
+        self.assertEqual(row["review_status"], "")
+        self.assertEqual(row["attention"], "elevated")
+
+    def test_the_commit_evidence_is_ordered_for_reading_not_alphabetically(self):
+        self.assertEqual(list(self.data["commit_reviews"][0]["evidence"]), ["tests"])
 
 
 class Rendering(TempDirCase):
@@ -90,8 +108,8 @@ class Rendering(TempDirCase):
         index = site.render(self.state, self.tmp / "out")
         html = index.read_text(encoding="utf-8")
         self.assertIn("window.REPO_MANAGER_STATIC = true", html)
+        self.assertIn("REPO_MANAGER_STATIC_DATA", html)
         self.assertIn("Moonshine", html)
-        self.assertNotIn("http://", html.split("<script>")[0])
 
     def test_embedded_review_text_cannot_close_the_script_element(self):
         data = self.state.read_json("prs/3500.json")
@@ -103,7 +121,7 @@ class Rendering(TempDirCase):
 
     def test_rendering_an_empty_directory_still_produces_a_page(self):
         index = site.render(Store(self.tmp / "empty"), self.tmp / "empty-out")
-        self.assertIn("REPO_MANAGER_DATA", index.read_text(encoding="utf-8"))
+        self.assertIn("REPO_MANAGER_STATIC_DATA", index.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

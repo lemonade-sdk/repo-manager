@@ -25,10 +25,10 @@ def add_parser(sub, shared):
 def cmd_render(args):
     ctx = Context(args)
     index = site.render(ctx.store, args.out)
-    data = site.load(ctx.store)
+    counts = site.load(ctx.store)["counts"]
     print(
-        f"Wrote {index}: {data['counts']['releases']} bucket(s), "
-        f"{data['counts']['commits']} commit review(s), {data['counts']['prs']} PR triage(s)"
+        f"Wrote {index}: {counts['release_reviews']} release review(s), "
+        f"{counts['commits']} commit review(s), {counts['pr_reviews']} PR triage(s)"
     )
     return 0
 
