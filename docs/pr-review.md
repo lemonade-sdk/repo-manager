@@ -44,37 +44,38 @@ Each surface that changes an existing behavior also says what it replaced, in `w
 
 ## Model
 
-The three skills are written for Qwen3.6-35B-A3B running under Pi: short prompts with the context inlined, a closed vocabulary, and a JSON schema with an example. Python gathers the context (`gh pr view`, the diff, the guides and charters at the base ref, the RFC, linked issues) and the model reads a brief rather than driving scripts. Set `"model"` in the workspace `config.json` to pin the Pi model; `REPO_MANAGER_PI_MODEL` overrides it. Runs are sequential — the model is one local server.
+The three skills are written for Qwen3.6-35B-A3B running under Pi: short prompts with the context inlined, a closed vocabulary, and a JSON schema with an example. Python gathers the context (`gh pr view`, the diff, the guides and charters at the base ref, the RFC, linked issues) and the model reads a brief rather than driving scripts. `REPO_MANAGER_PI_MODEL` names the model; `repo-manager pi setup` writes the provider config that points Pi at a Lemonade server. Runs are sequential — the model is one local server.
 
 ## Commands
 
 ```bash
-repo-manager review-pr 1234                    # triage one PR and store it
-repo-manager review-pr 1234 --no-store         # print the comment instead
-repo-manager review-pr 1234 --replay SHA       # judge the PR as it stood at SHA
-repo-manager sweep-prs [--force] [--since D]   # open PRs opened on/after D (default 2026-09-10) lacking a current triage
-repo-manager pr-table                          # the five columns for every stored triage
-repo-manager pr-row N                          # one triage as its comment
-repo-manager post-pr-review 1234 [--dry-run]   # post or update the comment
-repo-manager request-pr-reviewers 1234         # request the suggested reviewers
-repo-manager apply-pr-label 1234 [--dry-run]   # apply the label; for rfc:required also draft + RFC request
+repo-manager pr review 1234                    # triage one PR and write prs/1234.json
+repo-manager pr review 1234 --no-store         # print the comment instead
+repo-manager pr review 1234 --replay SHA       # judge the PR as it stood at SHA
+repo-manager pr sweep [--force] [--since D]    # open PRs opened on/after D (default 2026-09-10) whose file is out of date
+repo-manager pr post 1234 [--dry-run]          # post or update the comment
+repo-manager pr request-reviewers 1234         # request the suggested reviewers
+repo-manager pr label 1234 [--dry-run]         # apply the label; for rfc:required also draft + RFC request
 ```
+
+To read a stored triage, open the dashboard (`repo-manager site serve`) or `jq` the file.
 
 ## Acting on the label
 
-`apply-pr-label` is the one code path that turns a triage into an act on GitHub, and it is what the dashboard's **Request RFC** / **Apply label** button and the future GitHub Action both call, so the three cannot drift. It applies the triage's `rfc:` label (removing any other `rfc:` label), and when the label is `rfc:required` it also converts the PR to a draft and posts the standard message:
+`pr label` is the one code path that turns a triage into an act on GitHub, and it is what the dashboard's **Request RFC** / **Apply label** button and the future GitHub Action both call, so the three cannot drift. It applies the triage's `rfc:` label (removing any other `rfc:` label), and when the label is `rfc:required` it also converts the PR to a draft and posts the standard message:
 
 > Thanks for your PR! Please be aware that PRs that change Lemonade's scope, surface area, or user/dev experience need an approved request for comment (RFC) discussion before they can be reviewed. You can learn about the process [here](https://github.com/lemonade-sdk/lemonade/blob/main/docs/dev/contribute.md). If you believe this assessment was made in error, please contact a maintainer on the #dev channel of the Lemonade Discord.
 
-Every step is idempotent: a label already present is not re-added, a draft is not re-drafted, and the message is posted once and found again by its HTML marker. `--label` overrides the stored triage's label, which is how a maintainer corrects one. The Action will run `review-pr` on each new PR and then `apply-pr-label`; nothing else is needed for it beyond a workspace and `gh` credentials.
+Every step is idempotent: a label already present is not re-added, a draft is not re-drafted, and the message is posted once and found again by its HTML marker. `--label` overrides the stored triage's label, which is how a maintainer corrects one. The Action will run `pr review` on each new PR and then `pr label`; nothing else is needed for it beyond a state directory and `gh` credentials.
 
-A PR that carries `rfc:required` on GitHub shows **Waiting for RFC** (grey) in the Status column whatever its reviewer state, because it is waiting on a discussion, not on a reviewer.
-
-Artifacts are stored in `.repo-manager/reviews/prs/<repo>/pr-N.json` and in the `pr_reviews` table. The table was recreated for this design; the pre-policy reviews were judged against a contribution guide that no longer exists.
+Each triage is one file, `prs/<number>.json`, holding the three tiers' output, the derived
+five lines, the prose behind them, and what GitHub said about the PR when it was triaged.
+Posting a comment records its id and URL in the same file, so the next `pr post` updates the
+comment it already owns rather than opening a second one.
 
 ## Evaluating against the maintainer's judgment
 
-`scripts/eval-triage.py` runs the triage on a batch of PRs without storing them and scores the label against a ground-truth file:
+`scripts/eval-triage.py` runs the triage on a batch of PRs against a scratch state directory and scores the label against a ground-truth file:
 
 ```bash
 scripts/eval-triage.py --truth scripts/triage-ground-truth.json --out runs/batch-1 3468 3494 3470
@@ -84,4 +85,8 @@ Ground truth is `{"3468": {"label": "rfc:required", "weight": 2}}`; `--replay pr
 
 ## Dashboard
 
-The **PR Reviews** tab lists one **Attention** column, `routine` or `elevated` (elevated when the label is `rfc:required`, the body does not match the diff, or docs and tests have gaps; the tooltip says which), plus the live **Status** column, with three header toggles on by default that hide closed PRs, PRs not into main, and draft PRs, (Merge, Review, Needs reviewer, In progress) from the `Status as` login's perspective. The detail pane shows the comment exactly as `post-pr-review` would post it, with the **Post review comment** and **Request reviewers** buttons above the rule.
+The **Pull requests** tab lists the five derived lines per PR, filterable by label. Opening a
+row shows what the diff changes, the concerns exactly as the comment would list them, and why
+each reviewer is named. When the page is being served rather than rendered statically, that
+row also carries the **Post comment**, **Apply label**, and **Request reviewers** buttons,
+which call the same code paths the CLI does.

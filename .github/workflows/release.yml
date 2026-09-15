@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install .
+
+      # The tag is the version. Consumers pin to tags and read the version back from the
+      # installed CLI, so a tag whose package reports something else would quietly ship the
+      # wrong pin. Checking it here is the only place that can catch it.
+      - name: Check the version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          reported="$(repo-manager --version | awk '{print $2}')"
+          if [ "$tag" != "$reported" ]; then
+            echo "Tag $GITHUB_REF_NAME reports version $reported; bump __version__ in repo_manager/__init__.py." >&2
+            exit 1
+          fi
+          echo "repo-manager $reported, pinned to pi $(repo-manager pi version)"
+
+      - name: Test
+        run: python -m unittest discover tests -v
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

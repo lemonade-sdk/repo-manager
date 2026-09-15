@@ -1,60 +1,83 @@
-# Release Review & Announcement
+# Release Artifacts
 
-## Release review
-
-Create a release-readiness review from stored [commit reviews](commit-review.md):
+Job 2: everything a candidate ships with. One command builds all of it.
 
 ```bash
-repo-manager release-review
+repo-manager release build --branch release-v2026.38 --head "$GITHUB_SHA"
 ```
 
-The review is one verdict (`Ready`/`Needs Attention`/`Blocked`) plus a tight prioritized to-do list: P0 means do not ship until resolved, P1 means verify before shipping; there is no P2 and no nitpick tier. Pi receives a per-commit digest (summaries, verdicts, open to-dos, test/compatibility/security evidence) rather than the full review payload, and the result is validated (verdict/list agreement, at most 6 items, actionable phrasing) with automatic retry and resumable feedback, like `announce`.
+`release build` is what the release workflow calls, as a `needs:` dependency of the job that
+creates the GitHub release. Its exit code matters: a failure fails the release job, because a
+published release page with no notes is worse than a candidate that did not publish.
 
-## Announcement
+In order, it:
 
-Generate a Discord-friendly release announcement:
+1. Works out the bucket from the branch, the range start from the tag list, and the head from
+   `--head` (default: the branch tip).
+2. Runs `commit sweep` over the range, so any commit review missed on `main` is done now.
+3. Writes `releases/<bucket>/review.json`, then `notes.md`, then `announcement.md`.
+
+Each step is attempted even when an earlier one failed, so one run reports everything that is
+wrong rather than only the first thing. The three steps are also available on their own —
+`release review`, `release notes`, `release announce` — which is what you want while tuning a
+skill.
+
+## review.json
+
+The maintainer's verdict and the tester's plan.
+
+- `verdict` is computed from the to-do list, never read from the model: `Blocked` with any
+  P0, `Needs Attention` with any P1, `Ready` when the list is empty. The two can never
+  disagree, because there is only one of them.
+- `prioritized_todos` is the whole worksheet. A to-do earns its place only if the maintainer
+  would regret shipping without it *and* users would notice. Each one ends with the PR and
+  handle to chase: `(#3456, @someone)`.
+- `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
+  against it — one bullet per entry, enforced — so a breaking change cannot reach users
+  unannounced. Documenting one is therefore never a to-do.
+- `tester_plan` carries one entry per platform (Windows, Ubuntu PPA, Snap, Docker, macOS,
+  Fedora, Debian), each saying what changed there and what a human should exercise. A
+  platform nothing touched still gets its smoke check.
+
+**Tester reports.** Open issues in the tracked repo carrying the `candidate` label, filed
+since the bucket's branch was cut, are folded into the prompt. Every one of them must appear
+in the to-do list naming the outcome to choose — fix later, hotfix, or revert — and the run
+fails validation if one is dropped. A human already decided it mattered by filing it.
+
+## notes.md
+
+Exactly `## Headline` followed by `## Breaking Changes`. This is machine-consumed: the
+lemonade release action reads it through the GitHub contents API and puts it on the release
+page. Its structure is enforced — the two sections, single-depth bullets, three to five
+headline bullets, and a breaking-change bullet count equal to the review's list.
+
+It also shapes the release: the announcement is written from these headline bullets, so the
+stories and their order are decided once, here.
+
+## announcement.md
+
+The Discord post, in the maintainer's voice. The CLI checks only what it can — that the post
+exists, stays under 45 non-blank lines, pings the right audience, and covers every canonical
+breaking change. Voice and story shaping are the skill's job.
+
+**Hotfixes.** When the bucket already has a stable tag, the post covers only the commits
+since that tag and opens with `@release` rather than `@everyone`. The people reading it are
+running the build that broke.
+
+## Human edits are authoritative
+
+repo-manager records the SHA-256 of every file it writes into a bucket in
+`releases/<bucket>/generated.json`. Before writing, it compares. A file whose content no
+longer matches — or that has no recorded hash at all — was edited by a human, and
+`release build` prints which files are frozen and skips them.
 
 ```bash
-repo-manager announce
+repo-manager release notes --branch release-v2026.38 --force
 ```
 
-This writes two artifacts under `.repo-manager/reviews/releases/`: a website release-highlights markdown file containing only `## Headline` and `## Breaking Changes`, plus the Discord announcement markdown.
+`--force` writes anyway and re-records the hash. That is the only way to overwrite the
+release admin's words.
 
-Generation is staged: Pi first writes a story-plan JSON (3-5 stories, which ones earn sections), then derives both artifacts from it. The plan and artifacts are all validated (plan shape and story coherence, heading/plan consistency, format, voice, length, bullet limits, and an 8-word phrase-overlap check against prior announcements). The announcement prompt feeds Pi an announcement-specific projection of the commit reviews (summaries, authors, credit handles, docs) rather than the full review payload with verdicts and evidence. If validation fails, repo-manager automatically re-runs Pi with the specific errors and the failed drafts, up to 3 attempts. Validation feedback is persisted under `.repo-manager/reviews/releases/.pending/`, so if a run is interrupted, re-running `announce` resumes from the last failed attempt instead of starting over; the feedback file is cleared on success.
-
-When generating these, repo-manager fetches the last three prior GitHub releases and passes their `## Headline` / `## Breaking Changes` sections to Pi as the style reference for the website release-highlights artifact. It separately passes the last three saved local announcements as style references for the Discord announcement.
-
-Replace a saved announcement with Markdown you wrote or already posted:
-
-```bash
-repo-manager override-announcement v10.7.0 ./posted-announcement.md
-```
-
-You can also pipe Markdown through stdin:
-
-```bash
-cat posted-announcement.md | repo-manager override-announcement v10.7.0 -
-```
-
-## Stable regeneration
-
-Release reviews and announcements are updated in place for a given release bucket. Re-running `release-review` for the same release includes the existing release review, to-do completion state, checklist issue state, and issue comments in the prompt so equivalent to-dos are kept stable instead of duplicated. Re-running `announce` includes the existing release notes and announcement artifacts as continuity baselines, plus artifact issue comments, so accepted wording and structure stay stable unless new evidence or maintainer feedback requires a change. See [Syncing & Publishing](syncing.md) for how `sync` feeds checklist state and maintainer comments back into these prompts.
-
-## Release inference
-
-By default, release pipeline commands infer the current release:
-
-```bash
-repo-manager status
-repo-manager sweep
-repo-manager release-review
-repo-manager announce
-```
-
-This follows the `vNext` resolution rules. When the tracked repo's `CMakeLists.txt` advances past the latest `v*` tag, repo-manager resolves the current release to that concrete tag. For example, if CMake moves from `10.7.0` to `10.8.0`, the inferred release becomes `v10.8.0`; local database rows, saved release to-dos, issue mappings, and synced GitHub issue titles/bodies are migrated from `vNext` to `v10.8.0`. If a matching release branch such as `release-v10.8.0` exists, release commands use that branch instead of the configured default branch unless `--branch` is passed explicitly. Once `v10.8.0` is tagged, inference returns to `vNext` on the configured default branch until CMake advances past the latest tag again.
-
-`status` prints the lifecycle inputs and selected state: CMake release, latest `v*` tag, selected release bucket, release branch presence, selected branch, local review counts, to-do counts, and mapped issue counts.
-
-Use `--since TAG` only when you need to override the inferred previous `v*` tag.
-
-You can still pass an explicit release bucket, such as `repo-manager all v10.8.0`, when you need to override inference.
+The tradeoff is real and accepted: a hotfix landing after the admin edited `notes.md` is not
+reflected until they edit again or someone passes `--force`. The admin is already in that
+file during the candidate week.
