@@ -411,8 +411,13 @@ def review_errors(data, issues, index=None, ratings=None):
 
 
 def rating_targets(index):
-    """The to-do ids, in commit order, as the prompt asks for them back."""
-    return "\n".join(f"- {todo_id}: {source['text']}" for todo_id, source in index.items())
+    """The ids to rate, in commit order.
+
+    Ids only. Every one of these already appears in the digest above with its text, and a
+    release with eighty to-dos would otherwise spend a second copy of all of them here —
+    against a model that has to hold the digest, the answer and this list at once.
+    """
+    return " ".join(index)
 
 
 def issues_block(issues):
@@ -489,21 +494,19 @@ do not count the entries yourself.
 {coverage}
 {json.dumps(rows, indent=2)}
 
-## Rate every one of these {len(index)} to-do(s)
+## Rate all {len(index)} to-dos
 
-Return `ratings` with one entry per id below — P0, P1 or P2 — and the platforms it applies to.
-Every one of them is on the checklist whichever way you rate it; the priority is how a tester
-knows what to do first and what is not this release's problem. Do not retype the text: the
-maintainer reads the words the commit review already wrote, and the caller carries them over
-for you.
+`ratings` needs one entry per id below — P0, P1 or P2, plus the platforms it applies to. Each
+id's text is in the digest above; do not retype it, the caller carries the words over. Every
+to-do is on the checklist whichever way you rate it, so the priority is only the order a tester
+works in.
 
 {rating_targets(index)}
 
-Final reminders: rating is the job, and filtering is not — an id you leave out of `ratings` is
-not an item you removed, it is a judgement you failed to make, and it lands in P1 by default.
-Put a tester's `candidate` issue in `extra_items`, because no commit review wrote it. Do not
-write a verdict; whether this release ships is the release admin's call, not yours. The
-evidence is read by somebody who has never seen this digest, so name the feature or behavior.
+Rating is the job; filtering is not. An id missing from `ratings` is not an item you removed,
+it is a judgement you did not make, and it lands in P1. Put a `candidate` issue in
+`extra_items`. Write no verdict — whether this ships is the release admin's call. The evidence
+is read by somebody who has never seen this digest, so name the feature or behavior.
 
 {feedback}"""
 
