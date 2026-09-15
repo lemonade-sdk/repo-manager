@@ -179,7 +179,13 @@ release." is the register to hit.
   `open_release_risks`, or other alternates.
 - `breaking_changes` is the canonical, deduplicated list of every user-facing breaking change
   shipping in this release — one entry per distinct change, each a single sentence naming the
-  change and its migration ("Removed X; use Y instead."). This list is the source of truth:
+  change and its migration ("Removed X; use Y instead."). **Write each entry as the user
+  experiences it**, because the release page and the Discord post are both built from this
+  list and inherit whatever is in it. Name what changed for someone running Lemonade and what
+  they must do about it; leave out how it was implemented — build-system internals, action
+  names, file paths, and refactors belong in `evidence.breaking_changes`, not here. "Versions
+  are now dated, like 2026.39.1 instead of 11.9.0; pin the new format if you pin versions." is
+  the register, not a summary of which scripts changed. This list is the source of truth:
   the release-notes and release-announcement steps read it and must surface every entry, so it
   must be complete and must not merge two real breaking changes into one entry or list a
   non-breaking change. Use `[]` when there are none. It must agree with

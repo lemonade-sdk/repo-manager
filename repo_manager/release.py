@@ -358,6 +358,9 @@ gets the smoke check that proves the build works there.
 {platforms}
 
 ## Per-commit digest of the stored commit reviews
+
+This digest holds exactly {len(rows)} commit review(s). Use that number if you state one;
+do not count the entries yourself.
 {coverage}
 {json.dumps(rows, indent=2)}
 
@@ -426,7 +429,7 @@ MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+")
 BREAKING_HEADING = re.compile(r"^#{1,6}\s+.*breaking\s+changes", re.IGNORECASE)
 
 
-def notes_errors(markdown, canonical):
+def notes_errors(markdown, canonical, bucket=""):
     """The structural contract for the machine-parsed file, and nothing else.
 
     The lemonade release action parses this by its `## Headline` and `## Breaking Changes`
@@ -457,6 +460,7 @@ def notes_errors(markdown, canonical):
             errors.append("The Breaking Changes section must contain only bullets, or be empty.")
             break
     errors.extend(breaking_count_errors(len(breaking_lines), canonical, "notes.md"))
+    errors.extend(bucket_as_tag_errors(text, bucket, "notes.md") if bucket else [])
     return errors
 
 
@@ -502,11 +506,27 @@ def breaking_count_errors(count, canonical, where):
     ]
 
 
-def announcement_errors(markdown, canonical, hotfix):
+def bucket_as_tag_errors(markdown, bucket, where):
+    """A release link built from the bucket name points at a tag that cannot exist.
+
+    The bucket is `v2026.39`; the tag a human eventually cuts is `v2026.39.1`. The post is
+    written before anyone tags, so the number is unknowable — which means any
+    `releases/tag/<bucket>` URL is wrong the moment it is written, not merely stale.
+    """
+    if re.search(rf"releases/tag/{re.escape(bucket)}(?![.\d])", markdown or ""):
+        return [
+            f"{where} links to releases/tag/{bucket}, which will never exist: {bucket} is the "
+            f"release bucket, and the tag is {bucket}.<number>, unknown until a human cuts it. "
+            "Link to the repository's releases page instead."
+        ]
+    return []
+
+
+def announcement_errors(markdown, canonical, hotfix, bucket=""):
     text = (markdown or "").strip()
     if not text:
         return ["announcement.md is empty."]
-    errors = []
+    errors = bucket_as_tag_errors(text, bucket, "The announcement") if bucket else []
     lines = [line for line in text.splitlines() if line.strip()]
     if len(lines) > MAX_ANNOUNCEMENT_LINES:
         errors.append(
@@ -670,7 +690,7 @@ Write the website release highlights Markdown to: {paths['notes']}
 
     def validate(contents):
         text = contents["notes"]
-        return text, notes_errors(text, canonical)
+        return text, notes_errors(text, canonical, bucket.name)
 
     text = generate("release-notes", {"notes": ".md"}, prompt, validate,
                     checkout=str(bucket.checkout.path))
@@ -729,7 +749,7 @@ fixes be subsumed by the outcome they enabled.
 
     def validate(contents):
         text = contents["announcement"]
-        return text, announcement_errors(text, canonical, bucket.is_hotfix)
+        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name)
 
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,
                     checkout=str(bucket.checkout.path))

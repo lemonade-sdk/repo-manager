@@ -65,6 +65,9 @@ Breaking Changes rules:
 - One concise bullet per entry in the caller's canonical breaking-changes list, which comes
   from the release review and is the source of truth. Cover every entry, one bullet each —
   the bullet count must equal the list's. Do not drop, merge, or add changes.
+- The list is source material, not copy. Rewrite each entry as product copy the way you
+  rewrite everything else on this page: what users get and what they must do, never how it
+  was built. Pasting an entry verbatim is how build-system detail reaches the release page.
 - Add the migration action when the entry names one.
 - If the list is empty, leave the section heading present with no bullets. Do not write "None".
 

@@ -211,6 +211,29 @@ class ArtifactReconciliation(unittest.TestCase):
         self.assertEqual(release.count_breaking_bullets(post), 2)
         self.assertEqual(release.count_breaking_bullets("## Headline\n\n- a\n"), -1)
 
+    def test_a_link_built_from_the_bucket_name_is_rejected(self):
+        # `v2026.39` is the bucket; the tag will be `v2026.39.<n>`, uncut when the post is
+        # written. So this URL is wrong the moment it is typed, not merely stale.
+        post = ("## Lemonade v2026.39\n\n@everyone here we go.\n\n"
+                "Full notes: https://github.com/lemonade-sdk/lemonade/releases/tag/v2026.39\n")
+        errors = release.announcement_errors(post, [], hotfix=False, bucket="v2026.39")
+        self.assertTrue(any("will never exist" in e for e in errors), errors)
+
+    def test_a_link_to_a_real_tag_in_the_bucket_is_fine(self):
+        post = ("## Lemonade v2026.39\n\n@everyone a fix.\n\n"
+                "https://github.com/lemonade-sdk/lemonade/releases/tag/v2026.39.1\n")
+        self.assertEqual(release.announcement_errors(post, [], hotfix=False, bucket="v2026.39"), [])
+
+    def test_a_link_to_the_releases_page_is_fine(self):
+        post = ("## Lemonade v2026.39\n\n@everyone here we go.\n\n"
+                "https://github.com/lemonade-sdk/lemonade/releases\n")
+        self.assertEqual(release.announcement_errors(post, [], hotfix=False, bucket="v2026.39"), [])
+
+    def test_the_notes_file_is_held_to_the_same_link_rule(self):
+        notes = (self.NOTES + "\nSee https://github.com/lemonade-sdk/lemonade/releases/tag/v2026.39\n")
+        errors = release.notes_errors(notes, ["Removed --foo."], bucket="v2026.39")
+        self.assertTrue(any("will never exist" in e for e in errors), errors)
+
     def test_breaking_change_objects_are_folded_into_sentences(self):
         self.assertEqual(
             release.normalize_breaking_changes(

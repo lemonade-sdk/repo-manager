@@ -73,9 +73,11 @@ Shape the post like the references, scaled to the release:
 - A `Breaking Changes` section, present exactly when the caller's canonical
   breaking-changes list is non-empty, placed right after the opener (or News). That list
   comes from the release review and is the source of truth: surface every entry, one bullet
-  each — never drop, merge, or add one — saying what users must do. Reword each in this
-  post's voice, but the bullet count must equal the list's. When the list is empty, omit the
-  section.
+  each — never drop, merge, or add one — saying what users must do. The bullet count must
+  equal the list's, but the wording must not: rewrite each entry in this post's voice, the
+  same way you rewrite everything else here. Say what changed for the reader and what they
+  do about it, and cut the implementation — a reader on Discord does not need to know which
+  build scripts moved. When the list is empty, omit the section.
 - One `### heading` per story, matching the website highlights' headline bullets when the
   caller provided them. When several changes advance the same theme — GPU support landing
   for two vendors, several backends arriving on a new OS — they share one section with one
@@ -90,7 +92,10 @@ Shape the post like the references, scaled to the release:
   bullet by stating the benefit ("CI system overhaul by myself and @handle to make
   contributing more fun"); changes with no audience at all are simply omitted.
 - A closing line that links the full release notes, worded differently from every prior post,
-  optionally inviting feedback or teasing a screenshot.
+  optionally inviting feedback or teasing a screenshot. Link to the repository's releases
+  page (`https://github.com/lemonade-sdk/lemonade/releases`). Never build a link from the
+  bucket name: `v2026.39` is the bucket, the tag will be `v2026.39.<number>`, and nobody has
+  cut it yet when you are writing, so `releases/tag/v2026.39` is a link to nothing.
 
 Total length tracks the release: roughly 15 non-blank lines for a patch, up to 30-40 for a
 flagship. The CLI rejects posts over 45 non-blank lines.
