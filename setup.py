@@ -18,8 +18,9 @@ def data_files():
     files = []
     for root in ("skills", "scripts"):
         for path in Path(root).rglob("*"):
-            if path.is_file():
-                files.append((str(Path("share") / "repo-manager" / path.parent), [str(path)]))
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            files.append((str(Path("share") / "repo-manager" / path.parent), [str(path)]))
     return files
 
 

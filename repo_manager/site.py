@@ -7,7 +7,6 @@ release, because rendering happens in the state repo and nowhere near one.
 """
 
 import json
-import re
 import socket
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

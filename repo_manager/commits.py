@@ -8,7 +8,7 @@ import re
 import time
 
 from repo_manager import github, prose, store
-from repo_manager.pi import generate
+from repo_manager.pi import extract_json_object, generate
 
 
 VERDICTS = ("Clean", "Needs Attention", "Blocker")
@@ -134,8 +134,6 @@ def review(ctx, sha, bucket, branch="main", range_start="", force=False):
         ) + ("\n" + feedback if feedback else "")
 
     def validate(contents):
-        from repo_manager.pi import extract_json_object
-
         data = extract_json_object(contents["review"])
         if data is None:
             return None, ["The artifact file must contain a valid JSON object."]

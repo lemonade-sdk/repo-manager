@@ -9,7 +9,7 @@ test_validators.py are for.
 import unittest
 from unittest import mock
 
-from repo_manager import buckets, release, store
+from repo_manager import release, store
 from repo_manager.context import Context
 from repo_manager.store import Store
 from tests.helpers import TempDirCase, commit_file, git, init_repo
