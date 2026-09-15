@@ -741,6 +741,9 @@
       font-size: 12px;
       white-space: nowrap;
     }
+    .todo-source a {
+      color: var(--accent);
+    }
     .plain-item {
       line-height: 1.45;
     }
@@ -1369,8 +1372,18 @@
       const done = todoItemDone(item, scope);
       // The PR and the handle are fields, not something appended to the sentence: the text
       // has to stay exactly what the commit review wrote for the two boxes to be one box.
-      const source = item.pr_number
-        ? ` <span class="todo-source">(#${esc(item.pr_number)}${item.author ? `, ${esc(item.author)}` : ""})</span>`
+      //
+      // The number links to this item's own commit review, which is where a tester goes when
+      // the instruction is not enough — the summary, the verdict and the evidence behind it,
+      // one click away, rather than a PR on GitHub that makes them read a diff. The route
+      // carries no bucket: the page resolves that from the commit itself.
+      const number = item.pr_number
+        ? (item.commit
+            ? `<a href="#view=commits&commit=${esc(item.commit)}" title="Open this commit's review">#${esc(item.pr_number)}</a>`
+            : `#${esc(item.pr_number)}`)
+        : "";
+      const source = number
+        ? ` <span class="todo-source">(${number}${item.author ? `, ${esc(item.author)}` : ""})</span>`
         : "";
       return `<label class="todo-item ${done ? "done" : ""}">
         <input type="checkbox" class="todo-check" data-index="${index}" ${done ? "checked" : ""}>

@@ -30,7 +30,9 @@ one-word answer, frozen at the moment the model ran, would be wrong the first ti
 worked an item and would invite a reader to ship on it.
 
 - `checklist` holds **every** maintainer to-do in the range, in the words the commit review
-  wrote, and the skill never touches those words. The digest hands the model an `id` per
+  wrote, and the skill never touches those words. Which means the checklist is only ever as
+  usable as those to-dos are: the reader is a tester with the candidate installed who has never
+  seen the code, and that is enforced where the to-do is written, not here. The digest hands the model an `id` per
   to-do; the model answers with a priority and the platforms it applies to; Python assembles
   the list. That division is the point. A skill that also chose which to-dos survived could
   drop one silently, and the only evidence would be an absence nobody can see. Now an
@@ -51,8 +53,14 @@ worked an item and would invite a reader to ship on it.
 **Tester reports.** Open issues in the tracked repo carrying the `candidate` label, filed
 since the bucket's branch was cut, are folded into the prompt. No commit review wrote these,
 so they are the one thing the skill supplies the words for — it returns them in `extra_items`,
-each naming the outcome to choose (fix later, hotfix, or revert), and the run fails validation
-if one is dropped. A human already decided it mattered by filing it.
+each written as the reproduction a tester can run, and the run fails validation if one is
+dropped. A human already decided it mattered by filing it.
+
+The item is the reproduction, not the decision. Whether a report is fixed later, hotfixed or
+reverted is the release admin's call and they make it from what the tester finds; "decide
+whether to revert" gives the tester nothing to do and the admin nothing new to decide with.
+Because these are the skill's own prose rather than a commit review's, they are held to the
+same test every to-do is — see [commit reviews](commit-review.md#who-the-to-dos-are-for).
 
 ## notes.md
 

@@ -71,11 +71,19 @@ item for what it would cost *users* if this release shipped without it, and let 
 
 Open `candidate` issues are tester feedback on a build of this bucket: a human installed a
 candidate and something went wrong. No commit review wrote these, so they are the one thing you
-supply the words for — put each one in `extra_items`. Each says what the report is and which
-outcome to pick: **fix later** (ship as is, the issue stays open), **hotfix** (fix on the
-release branch before tagging), or **revert** (take the offending change back out). Name the
-issue number in the text so a reader can open it, and pick the priority from what the report
-describes. A human already decided it was worth filing, so it is rarely the last thing a
+supply the words for — put each one in `extra_items`. Write each as the work a tester can do:
+reproduce it. Say what to install or run, what the reporter saw, and what to look for. Name the
+issue number so a reader can open it, and pick the priority from what the report describes.
+
+Do not write the decision as the item. Whether a report is fixed later, hotfixed or reverted is
+the release admin's call, and they make it from what the tester finds — an item that says
+"decide whether to revert" gives the tester nothing to do and the admin nothing new to decide
+with.
+
+Write it for the same reader every other item on this checklist is written for: somebody with
+the candidate installed who has never seen the code. Name what they can touch, say what to do
+and what they should see, and do not point at a function, a source file or a commit SHA — the
+caller rejects those, the same way it does for a commit review's to-dos. A human already decided it was worth filing, so it is rarely the last thing a
 tester should get to.
 
 ## Breaking changes
@@ -132,13 +140,20 @@ CLI reads that file after the skill exits. Use exactly this shape:
   issues. Leave it `[]` when there are none. Never restate a digest to-do here.
 - `breaking_changes` is the canonical, deduplicated list of every user-facing breaking change
   shipping in this release — one entry per distinct change, each a single sentence naming the
-  change and its migration ("Removed X; use Y instead."). **Write each entry as the user
-  experiences it**, because the release page and the Discord post are both built from this
-  list and inherit whatever is in it. Name what changed for someone running Lemonade and what
-  they must do about it; leave out how it was implemented — build-system internals, action
-  names, file paths, and refactors belong in `evidence.breaking_changes`, not here. "Versions
-  are now dated, like 2026.39.1 instead of 11.9.0; pin the new format if you pin versions." is
-  the register, not a summary of which scripts changed. This list is the source of truth: the
+  change and its migration ("Removed X; use Y instead."). **Write each entry as the person who
+  upgrades meets it**, because the release page and the Discord post are both built from this
+  list and publish whatever is in it, word for word, to people who have never seen this
+  repository. Say what used to work, what happens now, and what they have to change. Leave out
+  how it was done: a module that moved, a build variable that was renamed, a function whose
+  return type changed, a script that was rewritten. Those explain the break to a maintainer and
+  belong in `evidence.breaking_changes`; in this list they reach a user as a sentence they
+  cannot act on.
+
+  The test for an entry is whether somebody running Lemonade, who will never read this diff,
+  can tell from it whether they are affected and what to do. "Versions are now dated, like
+  2026.39.1 instead of 11.9.0; pin the new format if you pin versions." passes it. "CMake
+  version extraction moved to a Python-based git state derivation system" does not — it is
+  true, and it tells that person nothing. This list is the source of truth: the
   release-notes and release-announcement steps read it and must surface every entry, so it must
   be complete and must not merge two real breaking changes into one entry or list a
   non-breaking change. Use `[]` when there are none. It must agree with

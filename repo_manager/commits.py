@@ -33,6 +33,34 @@ FALSE_GREEN = re.compile(
 # The same sentence, negated, is the honest answer a clean review gives.
 NOT_REALLY = re.compile(r"\b(no|not|nothing|none|never|without)\b", re.IGNORECASE)
 
+# A to-do is copied verbatim onto the checklist of a tester who has never seen this code, so
+# the two ways it fails them are worth catching mechanically rather than hoping. Both are
+# about shape, not taste: neither asks whether the item is a *good* idea.
+#
+# Naming something only the source can explain. A tester cannot open a header to find out what
+# to type, and a SHA tells them nothing at all.
+# Some extensions double as product names a user does meet — llama.cpp is a backend, not a
+# translation unit — so those count as a file only with a path attached. The rest name a file
+# whatever they are next to.
+CODE_ALTITUDE = (
+    (re.compile(r"\b\w+\(\)"), "a function or method call"),
+    (re.compile(r"\b[\w.-]*[\w-]/[\w./-]*\.(?:c|cc|cpp|js|jsx|go|rs)\b", re.IGNORECASE),
+     "a source file"),
+    (re.compile(r"\b[\w./-]+\.(?:h|hpp|hxx|cs|py|java|ts|tsx|cmake)\b", re.IGNORECASE),
+     "a source file"),
+    (re.compile(r"\bCMakeLists\b", re.IGNORECASE), "a build file"),
+    # A hex run with a digit in it is a SHA; one without is an English word ("defaced").
+    (re.compile(r"(?<![\w/])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![\w/])"), "a commit SHA"),
+)
+
+# Openers with no pass and no fail. "Verify that X" is a task; "verify whether X" is a
+# question, and the tester has nothing to report back either way.
+NO_OUTCOME = re.compile(
+    r"^\s*(?:please\s+)?(?:consider|investigate|look into|evaluate|assess|explore|revisit"
+    r"|think about|review whether|(?:verify|decide|determine)\s+(?:whether|if)\b)",
+    re.IGNORECASE,
+)
+
 
 def normalize_verdict(value):
     text = " ".join(str(value or "").split()).lower()
@@ -76,8 +104,43 @@ def validation_errors(data):
                     f"evidence.{key} is required: a sentence of what you found "
                     "(or 'none observed' when that is the honest answer)."
                 )
+    errors.extend(todo_errors(todos))
     if not isinstance(data.get("shout_outs", []), list):
         errors.append("shout_outs must be a list, empty when nobody meets the bar.")
+    return errors
+
+
+def todo_errors(todos):
+    """Whether each to-do is usable by the tester it will be handed to.
+
+    Only the two failures that can be read off the sentence itself. Whether an item is worth a
+    tester's time is a judgement the skill makes; whether it names a header file or opens with
+    "consider" is not a judgement at all, and leaving those to prose alone is how a checklist
+    fills up with instructions nobody can carry out.
+    """
+    errors = []
+    for index, todo in enumerate(todos):
+        text = (todo.get("text", "") if isinstance(todo, dict) else str(todo)).strip()
+        if not text:
+            errors.append(f"maintainer_todos[{index}] is empty.")
+            continue
+        for pattern, what in CODE_ALTITUDE:
+            found = pattern.search(text)
+            if found:
+                errors.append(
+                    f"maintainer_todos[{index}] names {what} (\"{found.group(0)}\"), which a "
+                    "tester cannot act on: they have the release candidate installed and have "
+                    "never seen this code. Name the command, flag, endpoint, setting or page "
+                    "they would use instead — or, if the concern has no user-visible surface, "
+                    "move it into evidence and drop the to-do."
+                )
+                break
+        if NO_OUTCOME.match(text):
+            errors.append(
+                f"maintainer_todos[{index}] opens with \"{text.split()[0]}\", so it has no pass "
+                "and no fail and the tester cannot report back. Say what to do and what they "
+                "should see — or move the question into evidence, where a maintainer reads it."
+            )
     return errors
 
 

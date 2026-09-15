@@ -64,6 +64,59 @@ class CommitReviewValidation(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TodosAreWrittenForATester(unittest.TestCase):
+    """A to-do is copied verbatim onto the checklist of somebody who has never seen the code.
+    These are the two failures readable off the sentence itself; the rest is the skill's job."""
+
+    def flagged(self, text):
+        return commits.todo_errors([{"text": text}])
+
+    def test_a_tester_sized_instruction_passes(self):
+        for text in (
+            "Run lemonade-server --version and confirm it prints 2026.39.1.",
+            "Install the Snap build on Ubuntu 24.04 and confirm the server starts.",
+            "Call GET /api/v1/health and confirm it answers 200 with the running version.",
+            "Open the Models page and confirm Llama-3.1-8B is listed.",
+            "Install the .deb on Debian 13 and confirm the service starts.",
+        ):
+            self.assertEqual(self.flagged(text), [], text)
+
+    def test_naming_something_only_the_source_explains_is_caught(self):
+        for text, why in (
+            ("Verify whether the matches() method is a hot path.", "a function"),
+            ("Confirm origin_utils.h still compiles.", "a header"),
+            ("Verify version.py still derives the tag.", "a module"),
+            ("Check that src/backends/engine.cpp builds.", "a path"),
+            ("Confirm CMakeLists picks up the new target.", "a build file"),
+            ("Confirm the refactor bcfc5c9 was re-reviewed.", "a SHA"),
+        ):
+            self.assertTrue(self.flagged(text), f"{why} was not caught: {text}")
+
+    def test_a_product_that_happens_to_look_like_a_filename_is_not(self):
+        # llama.cpp is a backend a user picks, not a translation unit; node.js is a runtime.
+        self.assertEqual(self.flagged("Confirm the llama.cpp backend answers after a swap."), [])
+        self.assertEqual(self.flagged("Confirm node.js clients can still connect."), [])
+
+    def test_an_english_word_spelled_in_hex_is_not_a_sha(self):
+        # "defaced" is seven characters of [a-f]; a real SHA has digits in it.
+        self.assertEqual(self.flagged("Check the defaced banner is gone on startup."), [])
+
+    def test_an_item_with_no_pass_or_fail_is_caught(self):
+        for text in (
+            "Consider caching the compiled pattern.",
+            "Investigate the latency regression.",
+            "Decide whether the race condition warrants a follow-up.",
+            "Verify whether the endpoint is on the release surface.",
+            "Evaluate the new allowlist policy.",
+        ):
+            self.assertTrue(self.flagged(text), text)
+
+    def test_the_same_verb_with_a_definite_outcome_is_fine(self):
+        # "Verify that X" is a task; "verify whether X" is a question.
+        self.assertEqual(
+            self.flagged("Verify that the installer is signed and Windows does not warn."), [])
+
+
 def todo_index(*texts):
     """The digest's to-do index, as `digest` hands it to `normalize_review`."""
     return {
@@ -218,11 +271,22 @@ class ReleaseReviewValidation(unittest.TestCase):
         issues = [{"number": 3600, "title": "Snap fails to start"}]
         errors = release.review_errors(review(), issues)
         self.assertTrue(any("#3600" in e for e in errors))
+        # The item is the reproduction, which is what a tester can do. What to do about the
+        # result is the release admin's call and is not a checklist line.
         passed = release.review_errors(review(checklist=[
+            {"priority": "P0", "platforms": ["Snap"],
+             "text": "Install the Snap build on Ubuntu 24.04 and confirm the server starts "
+                     "(#3600 reports it does not)."}
+        ]), issues)
+        self.assertEqual(passed, [])
+
+    def test_a_tester_report_written_as_a_decision_is_rejected(self):
+        issues = [{"number": 3600, "title": "Snap fails to start"}]
+        errors = release.review_errors(review(checklist=[
             {"priority": "P0", "platforms": ["Snap"],
              "text": "Decide whether to hotfix or revert the snap change (#3600)."}
         ]), issues)
-        self.assertEqual(passed, [])
+        self.assertTrue(any("no pass and no fail" in e for e in errors), errors)
 
 
 class ArtifactReconciliation(unittest.TestCase):

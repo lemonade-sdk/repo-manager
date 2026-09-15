@@ -5,7 +5,13 @@ description: Analyze a GitHub commit and judge whether it was good for the proje
 
 # Commit Review
 
-Review one commit in the context of its GitHub repository and associated PR. Produce a maintainer-focused verdict, not a line-by-line code review.
+Review one commit in the context of its GitHub repository and associated PR. Produce a verdict
+and its evidence for a maintainer, and a to-do list for a tester. Not a line-by-line code review.
+
+Those two readers are different people and want different things, and the to-do list is the one
+that leaves this repository: every item you write there is copied, word for word, onto the
+checklist a tester works through on a release candidate. Write it for them. The section "To-dos"
+below is not a style note; it is who the list is for.
 
 If the caller provides an output file path, write the artifact before finishing:
 
@@ -34,7 +40,7 @@ The JSON must use this shape:
   "verdict_reason": "One sentence explaining the core reason for the grade.",
   "maintainer_todos": [
     {
-      "text": "Concise maintainer action."
+      "text": "One thing a tester can do to the release candidate, and what they should see."
     }
   ],
   "evidence": {
@@ -136,6 +142,13 @@ Do not treat every new platform/build-system capability as release-blocking manu
 
 Flag any API breaking change whatsoever, including schema, protocol, config, CLI contract, exported API, documented behavior, persistence format, or integration behavior.
 
+Describe it the way the person who upgrades meets it: what used to work, what happens now, and
+what they have to change. The release notes and the Discord announcement are both built from
+this, so an entry written in terms of internal machinery — which module moved, which build
+variable was renamed, which function now returns something else — reaches users as a sentence
+they cannot act on. Record the internals in the same field afterwards if they matter, but lead
+with the upgrade.
+
 ### Security And Malice
 
 Look for any concern whatsoever that the commit is malicious or introduces a security vulnerability. Treat supply-chain changes, credential handling, network calls, code execution paths, auth changes, permission broadening, telemetry, obfuscation, and suspicious generated/minified blobs as high signal.
@@ -145,6 +158,64 @@ Look for any concern whatsoever that the commit is malicious or introduces a sec
 - API changes must be reflected comprehensively in the spec.
 - Major new features should include an example or guide.
 - Behavior changes must update existing affected documentation.
+
+## To-dos
+
+A to-do is read by a tester, not by you and not by the maintainer who merged this. Picture them:
+the release candidate is installed on their machine, they have never seen this repository, they
+do not know what this PR changed, and they are not going to read the diff. Every item you write
+has to survive that reader, and that gives you three rules.
+
+**Name what they can touch.** The command, the flag, the endpoint, the setting, the model, the
+installer, the page, the button — the thing as a user meets it. Never a function, method, class,
+file, header, module, variable, or commit SHA. Those can only be found by opening the source,
+which this reader will not do, and naming one tells them nothing about what to type. If the
+change has no user-visible surface you can name, that is a strong sign you are not looking at a
+to-do; see below.
+
+**Say what to do and what should happen.** Every to-do is an instruction with an observable
+outcome: do this, and you should see that. An item that opens with "Consider", "Investigate",
+"Look into", "Evaluate", "Assess", or "Verify/Decide/Determine whether" is a thought you had,
+not a task anyone can finish — it has no pass and no fail, so the tester has nothing to report
+back. If you cannot say what the right answer looks like, there is no to-do here.
+
+**Assume they have the release and nothing else.** No "the change", no "this PR", no "as
+@someone noted in review", no SHA, no pointing at the diff or the discussion. An item that only
+makes sense while looking at the PR is an item the tester cannot begin.
+
+The test, applied to every item before you keep it: *could somebody who has never seen this
+repository carry this out with only the release candidate installed, and know whether it
+passed?* Three ways the same item usually goes wrong, and what each looks like fixed:
+
+| Instead of | Write |
+|---|---|
+| Verify whether `parse_config()` is called per request and consider caching the compiled pattern. | Start the server with a large config file and confirm the first request answers in about the same time as later ones. |
+| Confirm the new `--flag` handling in the CLI entry point behaves as the reviewer expected. | Run `tool build --flag value` and confirm the output names the value you passed. |
+| Check that the post-approval commit did not change behavior. | Run the documented quickstart end to end and confirm each step produces the output the guide shows. |
+
+### What to do with everything else
+
+Plenty of what a review turns up is real and is not a to-do: a function that might be a hot
+path, a refactor worth revisiting, a reviewer who may not have seen a late commit, test debt, a
+question about internal structure, a decision somebody should make. That is not a reason to
+discard it, and it is not a reason to dress it up as a tester instruction. **Put it in
+`evidence`**, under whichever key it belongs to, where the maintainer reads it. Leave the to-do
+list to work a tester can actually do.
+
+This matters more than it sounds. A list that mixes the two costs the tester the ability to
+trust any of it: once two items in a row turn out to be unperformable, the rest stops being read.
+
+**The escape is for concerns with no user-visible surface, not for work that is awkward to
+phrase.** If this commit changes something a user can see — a command, a flag, an endpoint, a
+setting, an install path, a page — and nothing in the evidence shows somebody exercised it,
+that is a to-do, and your job is to find the words for it. Naming the surface is the work.
+Moving it to evidence because the first sentence you tried came out in terms of the code is
+the failure this section exists to prevent, and it is worse than the shape it replaced: an
+unperformable item at least tells the tester something exists. Silence tells them nothing.
+
+Write the to-do when either is true: the release ships behavior nobody has exercised by hand,
+or somebody upgrading could be surprised. Write nothing only when the commit genuinely leaves
+no one anything to do, which is a real and common answer for an internal refactor with tests.
 
 ## Verdict
 
@@ -162,9 +233,9 @@ If the commit introduces significant shipped or documented behavior that should 
 
 Keep the verdict, one-sentence explanation, maintainer to-do list, and evidence internally consistent:
 
-- If the evidence says a maintainer should check something before release, the verdict cannot be `Clean`; include a `Maintainer To-Do` section.
+- If somebody has to exercise this release by hand before it ships, the verdict cannot be `Clean`; write that exercise as a to-do. An internal concern recorded only in evidence does not by itself raise the verdict — plenty of real findings are notes to a maintainer rather than work anybody has to do first.
 - If the verdict is `Clean`, do not include language like "should verify before release", "maintainer should check", or "warrants manual verification" unless you explicitly conclude it is not part of the release surface and does not require maintainer action.
-- If manual release testing is uncertain, make the to-do "confirm whether this is in the release surface; if so, test it" rather than asserting a blocker.
+- If you are unsure whether the behavior is in the release surface, decide that here, on the evidence you have — it is your judgement, not the tester's errand. When it is in, write the test as a to-do. When it is out, say so in evidence and leave the list alone. What you must not do is hand the uncertainty over as an item, because "check whether this matters" is not something anybody can carry out.
 - Attribute findings carefully. Do not credit a shout out or major catch to a reviewer unless the evidence clearly supports that attribution.
 
 ## Output Format
@@ -194,8 +265,10 @@ One sentence explaining the core reason for the grade.
 ## Maintainer To-Do
 
 - Only include this section for Needs Attention or Blocker.
-- Keep items concise and focused on project quality.
-- Do not nitpick style or small local code issues unless they affect release quality, API compatibility, security, testing, review integrity, or documentation.
+- One instruction per item, written to the tester described in "To-dos": the surface they can
+  touch, what to do to it, and what they should see.
+- Anything that fails that test goes in Evidence instead. Do not reword an internal concern
+  into tester-shaped language to keep it on the list.
 
 ## Evidence
 

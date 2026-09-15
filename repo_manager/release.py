@@ -11,7 +11,7 @@ import json
 import re
 import time
 
-from repo_manager import buckets, github, gitops, prose, store
+from repo_manager import buckets, commits, github, gitops, prose, store
 from repo_manager.pi import extract_json_object, generate
 
 
@@ -369,6 +369,13 @@ def review_errors(data, issues, index=None, ratings=None):
             "digest. Use the `id` exactly as the digest spells it, and put anything that is not "
             "one of these to-dos in `extra_items`."
         )
+    # A to-do that came from a commit review was checked when that review was written. An
+    # extra item is the model's own prose, and lands on the same tester's checklist, so it
+    # answers to the same reader.
+    extra = [todo for todo in todos if not todo.get("commit")]
+    errors.extend(
+        error.replace("maintainer_todos", "extra_items") for error in commits.todo_errors(extra)
+    )
     evidence = data.get("evidence") or {}
     for key in EVIDENCE_KEYS:
         if not str(evidence.get(key, "")).strip():
