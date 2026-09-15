@@ -52,8 +52,13 @@ def todo_items(items):
     return rows
 
 
-def bucket_names(state):
-    names = set()
+def bucket_names(state, commits=()):
+    """Every bucket the directory knows about, newest first.
+
+    A bucket exists as soon as a commit is filed under it, not when its release artifacts
+    appear — otherwise the filter is empty exactly when a sweep is all that has run.
+    """
+    names = {row["tag_start"] for row in commits if row.get("tag_start")}
     for key in state.keys("releases"):
         parts = key.split("/")
         if len(parts) > 2:
@@ -95,7 +100,7 @@ def commit_rows(state):
 
 def release_rows(state, commits):
     reviews, announcements = [], []
-    for name in bucket_names(state):
+    for name in bucket_names(state, commits):
         review = state.read_json(store.review_key(name)) or {}
         frozen = [f for f in ("review.json", "notes.md", "announcement.md")
                   if store.is_frozen(state, name, f)]
@@ -235,7 +240,7 @@ def load(state, mirror=None, viewer=""):
     repo = repo or pr_repo or next((r.get("repo", "") for r in reviews if r.get("repo")), "")
     payload = {
         "config": {"repo": repo, "branch": next((r["branch"] for r in reviews if r["branch"]), "main")},
-        "tags": [name for name in bucket_names(state)],
+        "tags": bucket_names(state, commits),
         "counts": {
             "commits": len(commits),
             "release_reviews": len(reviews),

@@ -1854,7 +1854,7 @@
       });
       const row = rows[state.selectedPr] || rows[0];
       if (!row) {
-        $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager review-pr N</code> or <code>repo-manager sweep-prs</code> to review open PRs.</div>`;
+        $("pr-detail").innerHTML = `<div class="empty">Run <code>repo-manager pr review N</code> or <code>repo-manager pr sweep</code> to triage open PRs.</div>`;
         $("pr-selected").textContent = "";
         return;
       }
@@ -1896,7 +1896,7 @@
       }
       const row = rows[state.selectedRelease] || rows[0];
       if (!row) {
-        $("release-detail").innerHTML = `<div class="empty">Run <code>repo-manager release-review TAG</code> to create one.</div>`;
+        $("release-detail").innerHTML = `<div class="empty">Run <code>repo-manager release build --branch main</code> to review the range and write this bucket's verdict.</div>`;
         return;
       }
       const details = row.details || {};
@@ -1931,7 +1931,7 @@
       }
       const row = rows[state.selectedAnnouncement] || rows[0];
       if (!row) {
-        $("announcement-detail").innerHTML = `<div class="empty">Run <code>repo-manager announce TAG</code> to create an announcement.</div>`;
+        $("announcement-detail").innerHTML = `<div class="empty">Run <code>repo-manager release build --branch main</code> to write the release page and the Discord post.</div>`;
         return;
       }
       $("announcement-detail").innerHTML = [
