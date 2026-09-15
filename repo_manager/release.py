@@ -346,7 +346,7 @@ Head SHA: {bucket.head}
 {hotfix}
 Write the machine-readable JSON result to: {path}
 
-{feedback}{prior_review_block(ctx, bucket)}{issues_block(issues)}
+{prior_review_block(ctx, bucket)}{issues_block(issues)}
 ## Tester plan
 
 `tester_plan` carries one entry per platform below, in this order. For each, say what
@@ -370,7 +370,8 @@ concerns into shared to-dos. The verdict is computed from your to-do list, so yo
 contradict it. `verdict_reason`, the to-dos, and the evidence are for a human who has never
 seen this digest: name the feature or behavior, and let `verdict_reason` be just your
 one-or-two-sentence answer to "can we ship?".
-"""
+
+{feedback}"""
 
 
 def build_review(ctx, bucket, force=False):
@@ -660,11 +661,12 @@ Head SHA: {bucket.head}
 
 Write the website release highlights Markdown to: {paths['notes']}
 
-{feedback}{prior_notes_block(ctx.repo, bucket)}{breaking_block(canonical)}\
+{prior_notes_block(ctx.repo, bucket)}{breaking_block(canonical)}\
 ## Commit summaries for this release (the only source material)
 
 {json.dumps(announcement_digest(rows), indent=2)}
-"""
+
+{feedback}"""
 
     def validate(contents):
         text = contents["notes"]
@@ -712,7 +714,7 @@ Head SHA: {bucket.head}
 
 Write the Discord-friendly Markdown announcement to: {paths['announcement']}
 
-{hotfix}{feedback}{prior_announcements_block(ctx, bucket)}{shaping}{breaking_block(canonical)}\
+{hotfix}{prior_announcements_block(ctx, bucket)}{shaping}{breaking_block(canonical)}\
 ## Commit summaries for this release (the only source material)
 
 {json.dumps(announcement_digest(rows), indent=2)}
@@ -722,7 +724,8 @@ candidate sections would answer the same reader question, they are one story, an
 changes that are not a story become Additional Improvements bullets. Describe outcomes, never
 the work behind them — credit people as a clause in the feature sentence, and let enabling
 fixes be subsumed by the outcome they enabled.
-"""
+
+{feedback}"""
 
     def validate(contents):
         text = contents["announcement"]
