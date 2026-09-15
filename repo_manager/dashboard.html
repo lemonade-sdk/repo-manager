@@ -710,8 +710,39 @@
       text-decoration: line-through;
       text-decoration-thickness: 1px;
     }
-    .todo-item.done .priority {
+    /* The priority is the subsection the item sits in, not a word repeated down the
+       margin twenty times. */
+    .todo-group {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-weight: 700;
+      color: #435366;
+      margin: 16px 0 7px;
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+    }
+    .todo-group:first-child {
+      margin-top: 0;
+    }
+    .todo-group.p0 {
+      color: var(--danger);
+    }
+    .todo-group.p2 {
       color: var(--muted);
+    }
+    .todo-group .count {
+      font-weight: 500;
+      color: var(--muted);
+      text-transform: none;
+      letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
+    }
+    .todo-source {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
     }
     .plain-item {
       line-height: 1.45;
@@ -724,11 +755,6 @@
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
-    }
-    .priority {
-      color: var(--warn);
-      font-weight: 700;
-      margin-right: 4px;
     }
     /* --- stats ------------------------------------------------------------------------
        What the release is made of. Every figure is one row of one table: a number is worth
@@ -1251,8 +1277,20 @@
       return `${state.viewer}|${scope}|${hash32(text)}`;
     }
 
+    // A release checklist item and the commit to-do it came from are the same to-do, so
+    // they are the same box: the item names its commit, and the key is built from that
+    // rather than from whichever list it is being read in. Ticking it on the Releases tab
+    // ticks it on the Commits tab, because there was only ever one of it.
+    function todoItemScope(item, scope) {
+      return item.commit ? todoScope("commit", item.commit) : scope;
+    }
+
     function todoDone(scope, text) {
       return Boolean(todoChecks[todoKey(scope, text)]);
+    }
+
+    function todoItemDone(item, scope) {
+      return todoDone(todoItemScope(item, scope), item.text);
     }
 
     function setTodoDone(scope, text, done) {
@@ -1266,7 +1304,7 @@
     }
 
     function openTodos(items, scope) {
-      return (items || []).filter((item) => !todoDone(scope, item.text)).length;
+      return (items || []).filter((item) => !todoItemDone(item, scope)).length;
     }
 
     // The scopes on screen, so a box ticked in the reading pane can find the count cell in
@@ -1284,7 +1322,9 @@
       }
       for (const row of data.releases || []) {
         const scope = todoScope("release", row.bucket);
-        for (const item of row.todo_items || []) live.add(todoKey(scope, item.text));
+        for (const item of row.todo_items || []) {
+          live.add(todoKey(todoItemScope(item, scope), item.text));
+        }
       }
       const mine = `${state.viewer}|`;
       let changed = false;
@@ -1297,25 +1337,75 @@
       if (changed) writeStored(TODO_CHECKS_KEY, todoChecks);
     }
 
+    const PRIORITY_ORDER = ["P0", "P1", "P2"];
+    const PRIORITY_LABELS = {
+      "P0": "P0 — do not ship until resolved",
+      "P1": "P1 — verify before shipping",
+      "P2": "P2 — after this release"
+    };
+
     function todoCount(items, scope) {
       const total = (items || []).length;
       if (!total) return `<span class="todo-count done">0</span>`;
-      const open = openTodos(items, scope);
-      const title = `${open} of ${total} still open`;
-      return `<span class="todo-count ${open ? "" : "done"}" title="${esc(title)}">${open}<span class="of">/${total}</span></span>`;
+      const open = (items || []).filter((item) => !todoItemDone(item, scope));
+      const graded = PRIORITY_ORDER
+        .map((p) => [p, open.filter((item) => item.priority === p).length])
+        .filter(([, count]) => count);
+      const title = graded.length
+        ? `${graded.map(([p, count]) => `${count} ${p}`).join(", ")} still open, of ${total}`
+        : `${open.length} of ${total} still open`;
+      return `<span class="todo-count ${open.length ? "" : "done"}" title="${esc(title)}">${
+        open.length}<span class="of">/${total}</span></span>`;
+    }
+
+    // The priority is the subsection an item sits in. Stamping "P1" on twenty consecutive
+    // lines says the same thing twenty times and stops meaning anything; a heading says it
+    // once, and the eye can find where the work that stops the release ends.
+    function todoGroups(items) {
+      const present = [];
+      for (const item of items) {
+        const priority = item.priority || "";
+        if (!present.includes(priority)) present.push(priority);
+      }
+      const rank = (p) => (PRIORITY_ORDER.indexOf(p) === -1 ? 9 : PRIORITY_ORDER.indexOf(p));
+      present.sort((a, b) => rank(a) - rank(b));
+      return present.map((priority) =>
+        [priority, items.filter((item) => (item.priority || "") === priority)]);
+    }
+
+    function todoRow(item, index, scope) {
+      const where = (item.platforms || []).filter((p) => String(p).toLowerCase() !== "all");
+      const done = todoItemDone(item, scope);
+      // The PR and the handle are fields, not something appended to the sentence: the text
+      // has to stay exactly what the commit review wrote for the two boxes to be one box.
+      const source = item.pr_number
+        ? ` <span class="todo-source">(#${esc(item.pr_number)}${item.author ? `, ${esc(item.author)}` : ""})</span>`
+        : "";
+      return `<label class="todo-item ${done ? "done" : ""}">
+        <input type="checkbox" class="todo-check" data-index="${index}" ${done ? "checked" : ""}>
+        <span>${esc(item.text)}${source}${
+          where.length ? ` <span class="platforms">${where.map(esc).join(", ")}</span>` : ""}</span>
+      </label>`;
     }
 
     function todoList(items, scope) {
       if (!items || !items.length) return `<p class="muted">Nothing to check.</p>`;
-      return `<div class="todo-list">${items.map((item, index) => {
-        const where = (item.platforms || []).filter((p) => String(p).toLowerCase() !== "all");
-        const done = todoDone(scope, item.text);
-        return `<label class="todo-item ${done ? "done" : ""}">
-          <input type="checkbox" class="todo-check" data-index="${index}" ${done ? "checked" : ""}>
-          <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}${
-            where.length ? ` <span class="platforms">${where.map(esc).join(", ")}</span>` : ""}</span>
-        </label>`;
-      }).join("")}</div>`;
+      const index = new Map(items.map((item, position) => [item, position]));
+      const groups = todoGroups(items);
+      // An ungraded list — a commit's own to-dos, which nobody has prioritized — is just a
+      // list. Drawing one heading over the whole thing would be a label, not a grouping.
+      if (groups.length === 1 && !groups[0][0]) {
+        return `<div class="todo-list">${
+          items.map((item, position) => todoRow(item, position, scope)).join("")}</div>`;
+      }
+      return groups.map(([priority, rows]) => {
+        const open = rows.filter((item) => !todoItemDone(item, scope)).length;
+        const label = PRIORITY_LABELS[priority] || priority || "Unrated";
+        return `<div class="todo-group ${esc((priority || "").toLowerCase())}">${esc(label)}
+            <span class="count">${open} of ${rows.length} open</span></div>
+          <div class="todo-list">${
+            rows.map((item) => todoRow(item, index.get(item), scope)).join("")}</div>`;
+      }).join("");
     }
 
     // Ticking a box writes one key and redraws one label. The counts beside it catch up in
@@ -1326,10 +1416,23 @@
         box.addEventListener("change", () => {
           const item = items[Number(box.dataset.index)];
           if (!item) return;
-          setTodoDone(scope, item.text, box.checked);
+          setTodoDone(todoItemScope(item, scope), item.text, box.checked);
           box.closest(".todo-item").classList.toggle("done", box.checked);
           refreshTodoCounts();
+          refreshTodoGroupCounts(root, items, scope);
         });
+      });
+    }
+
+    // The group heading carries its own "n of m open", and the item that just moved is
+    // inside one of them.
+    function refreshTodoGroupCounts(root, items, scope) {
+      const headings = root.querySelectorAll(".todo-group .count");
+      const groups = todoGroups(items);
+      headings.forEach((heading, position) => {
+        const rows = (groups[position] || [])[1] || [];
+        const open = rows.filter((item) => !todoItemDone(item, scope)).length;
+        heading.textContent = `${open} of ${rows.length} open`;
       });
     }
 
@@ -1700,8 +1803,11 @@
         field("Audited", row.reviewed_at),
         generatedInField(row),
         section("Verdict", `<p>${badge(row.verdict)} ${esc(row.verdict_reason || "")}</p>`),
-        section("Tester Checklist", todoList(row.todo_items, todoScope("release", row.bucket))),
+        // Above the checklist: what this release does to users is the context the checklist
+        // is read in, and a tester who scrolls past twenty to-dos to reach it has already
+        // decided what to try.
         section("Breaking Changes", plainList(row.breaking_changes)),
+        section("Tester Checklist", todoList(row.todo_items, todoScope("release", row.bucket))),
         frozenNote(row),
         section("Evidence", evidenceList(row.evidence))
       ].join("");
@@ -1751,10 +1857,13 @@
       const commits = commitsIn(row.bucket);
       const releaseScope = todoScope("release", row.bucket);
       const checklist = row.todo_items || [];
-      const blockers = checklist.filter((item) => item.priority === "P0");
       const commitTodos = commits.reduce((sum, c) => sum + (c.todo_items || []).length, 0);
       const openCommitTodos = commits.reduce(
         (sum, c) => sum + openTodos(c.todo_items, todoScope("commit", c.commit_sha)), 0);
+      const byPriority = PRIORITY_ORDER.map((priority) => {
+        const rows = checklist.filter((item) => item.priority === priority);
+        return [priority, rows.filter((item) => !todoItemDone(item, releaseScope)).length, rows.length];
+      });
       const authors = new Set(commits.map((c) => c.author).filter(Boolean));
       const reviewers = new Set(commits.flatMap((c) => c.reviewers || []));
       const range = dateRange(commits);
@@ -1765,10 +1874,9 @@
       const inRange = commits.length + Number(row.commits_unreviewed || 0);
       return `<table class="stats-table"><tbody>
         ${statGroup("Left to do")}
-        ${statRow("Checklist items open", openTodos(checklist, releaseScope), checklist.length)}
-        ${statRow("Blockers open",
-                  blockers.filter((item) => !todoDone(releaseScope, item.text)).length,
-                  blockers.length)}
+        ${byPriority.map(([priority, open, total]) =>
+            statRow(PRIORITY_LABELS[priority] || priority, open, total)).join("")}
+        ${statRow("Checklist total", openTodos(checklist, releaseScope), checklist.length)}
         ${statRow("Commit to-dos open", openCommitTodos, commitTodos)}
         ${statGroup("Commits")}
         ${statRow("Reviewed", commits.length, inRange)}

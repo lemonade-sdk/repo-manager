@@ -120,8 +120,9 @@ that: a candidate with no release notes never publishes.
 - `pr-cover` — tier 2: for each surface, what covers it under `spec-driven-dev.md`.
 - `pr-quality` — tier 3: documentation and testing gaps. The `rfc:` label, the scope, and the
   reviewers are then derived in Python from all three.
-- `release-review` — the release verdict and the prioritized checklist a tester works through
-  on a release candidate, each item tagged with the platforms it applies to.
+- `release-review` — rates every maintainer to-do in the range P0, P1 or P2 and writes the
+  release verdict. It rates; Python assembles the checklist from the to-dos themselves, so
+  nothing can be dropped or reworded on the way through.
 - `release-notes` — the website release highlights, which also shape the release's stories.
 - `release-announcement` — the Discord post, in the maintainer's voice.
 

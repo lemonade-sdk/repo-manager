@@ -26,23 +26,32 @@ skill.
 
 The maintainer's verdict and the tester's plan.
 
-- `verdict` is computed from the to-do list, never read from the model: `Blocked` with any
-  P0, `Needs Attention` with any P1, `Ready` when the list is empty. The two can never
-  disagree, because there is only one of them.
-- `checklist` is the whole artifact, and its reader is a tester working through a candidate.
-  An item earns its place only if somebody would regret shipping without checking it *and*
-  users would notice. Each names the platforms it applies to, so a tester on Fedora reads only
-  what concerns them, and ends with the PR and handle to chase: `(#3456, @someone)`.
+- `checklist` holds **every** maintainer to-do in the range, in the words the commit review
+  wrote, and the skill never touches those words. The digest hands the model an `id` per
+  to-do; the model answers with a priority and the platforms it applies to; Python assembles
+  the list. That division is the point. A skill that also chose which to-dos survived could
+  drop one silently, and the only evidence would be an absence nobody can see. Now an
+  unrated id is a validation failure, not a deletion, and it lands in P1 by default.
+  Each item carries the `commit` it came from, plus `pr_number` and `author` as fields rather
+  than text appended to the sentence — which is what lets the dashboard treat the release
+  checklist item and the commit's to-do as one to-do, with one checkbox.
+- `priority` is the whole judgement the model contributes: **P0** do not ship until resolved,
+  **P1** verify before shipping, **P2** real work whose deadline is after this release. P2 is
+  a statement about timing, not worth; it is where the code-quality follow-ups and test debt
+  that used to be discarded now live, visible and out of the tester's way.
+- `verdict` is computed from those priorities, never read from the model: `Blocked` with any
+  P0, `Needs Attention` with any P1, `Ready` otherwise. A release whose every open item is P2
+  can ship, which is exactly what P2 means. The two can never disagree, because there is only
+  one of them.
 - `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.
-  Nothing is written for a platform the release did not touch: a tester already smoke-tests
-  the build they installed, and filler rows are what make a checklist unreadable.
 
 **Tester reports.** Open issues in the tracked repo carrying the `candidate` label, filed
-since the bucket's branch was cut, are folded into the prompt. Every one of them must appear
-in the to-do list naming the outcome to choose — fix later, hotfix, or revert — and the run
-fails validation if one is dropped. A human already decided it mattered by filing it.
+since the bucket's branch was cut, are folded into the prompt. No commit review wrote these,
+so they are the one thing the skill supplies the words for — it returns them in `extra_items`,
+each naming the outcome to choose (fix later, hotfix, or revert), and the run fails validation
+if one is dropped. A human already decided it mattered by filing it.
 
 ## notes.md
 

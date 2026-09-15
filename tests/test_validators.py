@@ -64,6 +64,36 @@ class CommitReviewValidation(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+def todo_index(*texts):
+    """The digest's to-do index, as `digest` hands it to `normalize_review`."""
+    return {
+        f"c0mmit{i}-1": {"text": text, "commit": f"{i}" * 40,
+                         "pr_number": 3500 + i, "author": "@dev"}
+        for i, text in enumerate(texts)
+    }
+
+
+def rated(*priorities, **overrides):
+    """A model answer that rates the index built from the same number of texts."""
+    data = {"verdict_reason": "Nothing blocks the release.",
+            "ratings": [{"id": f"c0mmit{i}-1", "priority": p} for i, p in enumerate(priorities)]}
+    data.update(overrides)
+    return data
+
+
+def normalized(answer, index):
+    """What `build_review` does: read the ratings, assemble, then validate the result.
+
+    The order matters — assembling rewrites the answer in place — so the tests go through
+    this rather than each getting it right on their own.
+    """
+    ratings = release.extract_ratings(answer)
+    data = release.normalize_review(answer, index)
+    data.setdefault("verdict_reason", "Nothing blocks the release.")
+    data["evidence"] = {key: "none observed" for key in release.EVIDENCE_KEYS}
+    return data, ratings
+
+
 def review(**overrides):
     data = {
         "verdict_reason": "Nothing blocks the release.",
@@ -79,28 +109,100 @@ class ReleaseReviewValidation(unittest.TestCase):
     def test_a_complete_review_passes(self):
         self.assertEqual(release.review_errors(review(), []), [])
 
-    def test_the_verdict_is_computed_from_the_list_not_read_from_the_model(self):
-        data = release.normalize_review({"verdict": "Ready", "checklist": [
-            {"priority": "P0", "text": "Fix the installer."}]})
+    def test_the_verdict_is_computed_from_the_priorities_not_read_from_the_model(self):
+        index = todo_index("Fix the installer.")
+        data = release.normalize_review({"verdict": "Ready", **rated("P0")}, index)
         self.assertEqual(data["verdict"], "Blocked")
-        data = release.normalize_review({"verdict": "Blocked", "checklist": [
-            {"priority": "P1", "text": "Check the installer."}]})
+        data = release.normalize_review({"verdict": "Blocked", **rated("P1")}, index)
         self.assertEqual(data["verdict"], "Needs Attention")
-        self.assertEqual(release.normalize_review({"checklist": []})["verdict"], "Ready")
+        # Everything deferred is a release that can ship, which is what P2 means.
+        self.assertEqual(release.normalize_review(rated("P2"), index)["verdict"], "Ready")
+        self.assertEqual(release.normalize_review(rated(), {})["verdict"], "Ready")
 
-    def test_a_misnamed_to_do_list_is_still_found(self):
-        # Pi has filed the same list under `open_todos` and under `todos`; a misnamed list must
-        # never collapse into a false "Ready".
-        data = release.normalize_review({"open_todos": [{"priority": "P0", "text": "Fix it."}]})
+    def test_every_to_do_reaches_the_checklist_whatever_the_model_sent_back(self):
+        # The model rates; the caller assembles. An item it forgot is still on the list, in
+        # P1, and the omission is reported rather than silently honoured as a deletion.
+        index = todo_index("Fix the installer.", "Tidy the imports.")
+        data = release.normalize_review(rated("P0"), index)
+        self.assertEqual([t["priority"] for t in data["checklist"]], ["P0", "P1"])
+        self.assertEqual([t["text"] for t in data["checklist"]],
+                         ["Fix the installer.", "Tidy the imports."])
+        _, ratings = normalized(rated("P0"), index)
+        errors = release.review_errors({**review(), **data}, [], index, ratings)
+        self.assertTrue(any("have no rating" in e for e in errors), errors)
+
+    def test_the_model_cannot_reword_a_to_do(self):
+        index = todo_index("Install the Fedora package and start the server.")
+        data = release.normalize_review(
+            {**rated("P1"), "checklist": [{"priority": "P0", "text": "Something else."}]}, index)
+        self.assertEqual([t["text"] for t in data["checklist"]],
+                         ["Install the Fedora package and start the server."])
+
+    def test_a_to_do_carries_the_commit_it_came_from(self):
+        index = todo_index("Fix the installer.")
+        item = release.normalize_review(rated("P0"), index)["checklist"][0]
+        self.assertEqual(item["commit"], "0" * 40)
+        self.assertEqual(item["pr_number"], 3500)
+
+    def test_a_rating_for_a_to_do_that_does_not_exist_is_caught(self):
+        index = todo_index("Fix the installer.")
+        data, ratings = normalized(
+            {"ratings": [{"id": "nosuch-9", "priority": "P0"}]}, index)
+        errors = release.review_errors(data, [], index, ratings)
+        self.assertTrue(any("not a to-do id" in e for e in errors), errors)
+
+    def test_a_tester_report_is_the_one_item_the_model_writes(self):
+        data = release.normalize_review(
+            {"extra_items": [{"priority": "P0", "text": "Tester report #4120: Snap fails."}]}, {})
+        self.assertEqual(data["checklist"][0]["text"], "Tester report #4120: Snap fails.")
+        self.assertEqual(data["checklist"][0]["commit"], "")
         self.assertEqual(data["verdict"], "Blocked")
-        self.assertEqual(data["checklist"],
-                         [{"priority": "P0", "platforms": ["all"], "text": "Fix it."}])
 
-    def test_an_empty_list_under_blocking_prose_is_caught(self):
-        errors = release.review_errors(
-            review(verdict_reason="One P0 remains: the Fedora package is untested."), []
-        )
-        self.assertTrue(any("checklist is empty" in e for e in errors))
+    def test_a_misnamed_ratings_list_is_still_found(self):
+        # Pi files the same answer under two or three names; a misnamed one must never
+        # collapse every to-do into the P1 default.
+        index = todo_index("Fix it.")
+        data = release.normalize_review(
+            {"priorities": [{"id": "c0mmit0-1", "priority": "P0"}]}, index)
+        self.assertEqual(data["verdict"], "Blocked")
+
+    def test_a_bare_mapping_of_id_to_priority_is_read_too(self):
+        index = todo_index("Fix it.")
+        data = release.normalize_review({"ratings": {"c0mmit0-1": "P0"}}, index)
+        self.assertEqual(data["verdict"], "Blocked")
+
+    def test_a_ready_verdict_under_blocking_prose_is_caught(self):
+        index = todo_index("Tidy the imports.")
+        data, ratings = normalized(
+            rated("P2", verdict_reason="One P0 remains: the Fedora package is untested."), index)
+        self.assertEqual(data["verdict"], "Ready")
+        errors = release.review_errors(data, [], index, ratings)
+        self.assertTrue(any("describes work that has to happen" in e for e in errors), errors)
+
+    def test_prose_carried_over_a_changed_list_is_caught(self):
+        # The failure this actually caught: a review with ten P1s went out still saying
+        # "Five manual verifications before shipping", copied from the run before it.
+        index = todo_index("Fix the installer.", "Check the docs endpoint.")
+        data, ratings = normalized(
+            rated("P1", "P1", verdict_reason="Five manual verifications before shipping."), index)
+        prior = {"verdict_reason": "Five manual verifications before shipping.",
+                 "checklist": [{"priority": "P1", "text": "Fix the installer."}]}
+        errors = release.review_errors(data, [], index, ratings, prior)
+        self.assertTrue(any("word-for-word" in e for e in errors), errors)
+
+    def test_prose_kept_over_an_unchanged_list_is_fine(self):
+        index = todo_index("Fix the installer.")
+        data, ratings = normalized(
+            rated("P1", verdict_reason="One verification before shipping."), index)
+        prior = {"verdict_reason": "One verification before shipping.",
+                 "checklist": [{"priority": "P1", "text": "Fix the installer."}]}
+        self.assertEqual(release.review_errors(data, [], index, ratings, prior), [])
+
+    def test_an_all_P2_release_with_honest_prose_passes(self):
+        index = todo_index("Tidy the imports.")
+        data, ratings = normalized(
+            rated("P2", verdict_reason="Nothing here needs a tester before shipping."), index)
+        self.assertEqual(release.review_errors(data, [], index, ratings), [])
 
     def test_an_empty_breaking_list_under_breaking_prose_is_caught(self):
         errors = release.review_errors(review(
@@ -111,14 +213,16 @@ class ReleaseReviewValidation(unittest.TestCase):
 
     def test_a_ready_verdict_may_say_nothing_blocks_the_release(self):
         self.assertEqual(release.review_errors(
-            review(verdict_reason="Nothing blocks the release; no P0s remain."), []), [])
+            review(verdict_reason="Nothing blocks the release; no P0s remain.",
+                   verdict="Ready"), []), [])
 
     def test_a_negation_only_covers_its_own_clause(self):
         errors = release.review_errors(review(
             verdict_reason="Nothing else blocks the release, though somebody should "
-                           "confirm the Fedora package before shipping."
+                           "confirm the Fedora package before shipping.",
+            verdict="Ready",
         ), [])
-        self.assertTrue(any("checklist is empty" in e for e in errors))
+        self.assertTrue(any("describes work that has to happen" in e for e in errors), errors)
 
     def test_saying_there_are_no_breaking_changes_is_not_a_contradiction(self):
         errors = release.review_errors(review(
@@ -130,17 +234,19 @@ class ReleaseReviewValidation(unittest.TestCase):
     def test_an_item_that_names_no_platform_applies_everywhere(self):
         # A tester should never have to guess whether silence means "all of them" or "we
         # forgot", so the absent case is spelled out rather than left empty.
-        data = release.normalize_review({"checklist": [{"priority": "P1", "text": "Check X."}]})
+        data = release.normalize_review(rated("P1"), todo_index("Check X."))
         self.assertEqual(data["checklist"][0]["platforms"], ["all"])
 
     def test_platforms_are_spelled_and_ordered_the_caller_way(self):
-        data = release.normalize_review({"checklist": [
-            {"priority": "P1", "text": "Check X.", "platforms": ["fedora", "WINDOWS"]}]})
+        data = release.normalize_review({"ratings": [
+            {"id": "c0mmit0-1", "priority": "P1", "platforms": ["fedora", "WINDOWS"]}]},
+            todo_index("Check X."))
         self.assertEqual(data["checklist"][0]["platforms"], ["Windows", "Fedora"])
 
     def test_all_beats_a_list_of_names(self):
-        data = release.normalize_review({"checklist": [
-            {"priority": "P1", "text": "Check X.", "platforms": ["Windows", "all"]}]})
+        data = release.normalize_review({"ratings": [
+            {"id": "c0mmit0-1", "priority": "P1", "platforms": ["Windows", "all"]}]},
+            todo_index("Check X."))
         self.assertEqual(data["checklist"][0]["platforms"], ["all"])
 
     def test_a_platform_this_project_does_not_test_on_is_caught(self):
@@ -315,11 +421,13 @@ class BotsAreNotContributors(unittest.TestCase):
 
 class PlatformShorthand(unittest.TestCase):
     def test_naming_every_platform_collapses_to_all(self):
-        data = release.normalize_review({"checklist": [
-            {"priority": "P1", "text": "Check the version.", "platforms": list(release.PLATFORMS)}]})
+        data = release.normalize_review({"ratings": [
+            {"id": "c0mmit0-1", "priority": "P1", "platforms": list(release.PLATFORMS)}]},
+            todo_index("Check the version."))
         self.assertEqual(data["checklist"][0]["platforms"], ["all"])
 
     def test_naming_most_of_them_does_not(self):
-        data = release.normalize_review({"checklist": [
-            {"priority": "P1", "text": "Check the version.", "platforms": list(release.PLATFORMS[:-1])}]})
+        data = release.normalize_review({"ratings": [
+            {"id": "c0mmit0-1", "priority": "P1", "platforms": list(release.PLATFORMS[:-1])}]},
+            todo_index("Check the version."))
         self.assertEqual(data["checklist"][0]["platforms"], list(release.PLATFORMS[:-1]))

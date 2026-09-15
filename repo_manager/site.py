@@ -33,9 +33,10 @@ def ordered_evidence(evidence, order):
 
 
 def blockers_first(todos):
-    """P0 before P1. A maintainer reading the to-do list should hit what stops the release
-    first, whatever order the model happened to write it in."""
-    return sorted(todos, key=lambda todo: 0 if todo.get("priority") == "P0" else 1)
+    """P0, then P1, then P2. A maintainer reading the to-do list should hit what stops the
+    release first, whatever order it happened to be written in."""
+    order = {"P0": 0, "P1": 1, "P2": 2}
+    return sorted(todos, key=lambda todo: order.get(todo.get("priority"), 1))
 
 
 def todo_items(items):
@@ -51,9 +52,16 @@ def todo_items(items):
             text = next((str(item[k]).strip() for k in ("text", "todo", "task", "action", "description")
                          if str(item.get(k, "")).strip()), json.dumps(item, sort_keys=True))
             rows.append({"text": text, "priority": item.get("priority", ""),
-                         "platforms": item.get("platforms") or []})
+                         "platforms": item.get("platforms") or [],
+                         # The commit this to-do came from, when it came from one. It is what
+                         # makes the release checklist and the commit review the same to-do,
+                         # and so the same checkbox, rather than two copies of one sentence.
+                         "commit": item.get("commit", ""),
+                         "pr_number": item.get("pr_number"),
+                         "author": item.get("author", "")})
         elif str(item).strip():
-            rows.append({"text": str(item).strip(), "priority": "", "platforms": []})
+            rows.append({"text": str(item).strip(), "priority": "", "platforms": [],
+                         "commit": "", "pr_number": None, "author": ""})
     return rows
 
 

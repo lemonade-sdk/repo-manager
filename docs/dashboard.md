@@ -39,6 +39,12 @@ the release owes, and an item is *resolved* by editing that artifact — `review
 commit review — in the GitHub web editor or a local clone. This is the line the file store
 draws: the dashboard reads state, it does not own any.
 
+**A to-do has one box, wherever you read it.** A release checklist item and the commit to-do it
+came from are the same to-do: the release review carries every to-do through verbatim and
+records the commit it came from, so the box is keyed to that commit rather than to whichever
+list you happen to be looking at. Tick it on the Releases tab and it is ticked on the Commits
+tab, because there was only ever one of it.
+
 An item the model has since reworded arrives unticked, because the words changed and what you
 worked through is no longer what the list is asking for.
 
@@ -48,18 +54,24 @@ The list is every bucket the directory knows about, newest first — including t
 that has only been swept, which shows its commit count and `not built`. Four sub-tabs read the
 selected release four ways:
 
-**Review** — the verdict and the one-or-two sentences answering "can we ship?", then the
-checklist a tester works through, blockers first, each item tagged with the platforms it
-applies to. Then the canonical breaking changes and the evidence. When a human has edited one
-of the bucket's files, it says which, and that `--force` is what overwrites it.
+**Review** — the verdict and the one-or-two sentences answering "can we ship?", then what
+this release does to users, then the checklist. Breaking changes come first because they are
+the context the checklist is read in; a tester who has to scroll past twenty to-dos to reach
+them has already decided what to try.
+
+The checklist is every maintainer to-do in the range, under P0, P1 and P2 headings. The
+priority is the subsection an item sits in, not a word repeated down the margin twenty times —
+the heading says it once, and the eye can find where the work that stops the release ends. Each
+item carries the platforms it applies to and the PR and handle to chase. Then the evidence, and,
+when a human has edited one of the bucket's files, which one and that `--force` overwrites it.
 
 **Release notes** and **Announcement** — the website highlights and the Discord post, as
 markdown, with a Copy button. They are shown verbatim because they are copied verbatim.
 
-**Stats** — what this release is made of: commits reviewed and how many in range still are
-not, open checklist items and blockers, open commit to-dos, how many of the commits are
-yours, unique authors and reviewers, the span of days, the verdict tally and the shout-outs.
-Every figure is about the selected release, because the release is the unit of work.
+**Stats** — what this release is made of, as one table: what is left under each priority,
+commits reviewed and how many in range still are not, how many of the commits are yours,
+unique authors and reviewers, the verdict tally and the span of days. Every figure is about
+the selected release, because the release is the unit of work.
 
 ## The Commits tab
 

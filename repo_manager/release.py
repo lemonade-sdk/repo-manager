@@ -70,19 +70,37 @@ class Bucket:
 
 
 def digest(ctx, shas):
-    """The per-commit digest the release skills read, in commit order.
+    """The per-commit digest the release skills read, in commit order, and an index of every
+    to-do in it.
 
     Only what a release decision turns on: who to ask, what shipped, what the commit review
     concluded, and the evidence behind it. Not the full review — a release with eighty
     commits would bury the model in prose it has already been given a verdict for.
+
+    Each to-do carries an `id`. That id is the whole contract with the release review: the
+    model answers with a priority per id and never retypes the text, so the checklist cannot
+    quietly lose an item, reword one, or drift from the commit review it came from.
     """
-    rows, missing = [], []
+    rows, missing, index = [], [], {}
     for sha in shas:
         data = ctx.store.read_json(store.commit_key(sha))
         if not data:
             missing.append(sha)
             continue
         evidence = data.get("evidence") or {}
+        todos = []
+        for position, item in enumerate(data.get("maintainer_todos") or [], start=1):
+            text = todo_text(item)
+            if not text:
+                continue
+            todo_id = f"{sha[:7]}-{position}"
+            todos.append({"id": todo_id, "text": text})
+            index[todo_id] = {
+                "text": text,
+                "commit": sha,
+                "pr_number": data.get("pr_number"),
+                "author": data.get("author", ""),
+            }
         rows.append({
             "sha": sha[:7],
             "pr_number": data.get("pr_number"),
@@ -90,7 +108,7 @@ def digest(ctx, shas):
             "summary": data.get("summary", ""),
             "verdict": data.get("verdict", ""),
             "verdict_reason": data.get("verdict_reason", ""),
-            "todos": [todo_text(item) for item in data.get("maintainer_todos") or []],
+            "todos": todos,
             "shout_outs": [
                 item.get("handle", "") if isinstance(item, dict) else str(item)
                 for item in data.get("shout_outs") or []
@@ -99,7 +117,7 @@ def digest(ctx, shas):
                 key: evidence[key] for key in DIGEST_EVIDENCE_KEYS if str(evidence.get(key, "")).strip()
             },
         })
-    return rows, missing
+    return rows, missing, index
 
 
 def todo_text(item):
@@ -129,25 +147,84 @@ def candidate_issues(ctx, bucket):
 # --- the review --------------------------------------------------------------------------
 
 
+PRIORITIES = ("P0", "P1", "P2")
+
+P0_WORDS = ("P0", "BLOCKING", "BLOCKER", "BLOCKED", "HIGH", "CRITICAL")
+P2_WORDS = ("P2", "P3", "LOW", "LATER", "DEFER", "DEFERRED", "BACKLOG", "NICE-TO-HAVE")
+
+
 def normalize_priority(value):
-    return "P0" if str(value or "").strip().upper() in ("P0", "BLOCKING", "BLOCKER", "HIGH") else "P1"
+    """P1 is the default, and deliberately so. An unrated or garbled item is one nobody has
+    decided about yet, and parking it in P2 hides it from the tester who should be deciding."""
+    text = str(value or "").strip().upper()
+    if text in P0_WORDS:
+        return "P0"
+    if text in P2_WORDS:
+        return "P2"
+    return "P1"
 
 
-# Pi does not reliably emit the documented key: across runs it has filed the same list under
-# `open_todos` and under `todos`. Recognize the list by what its key name implies rather than
-# chasing an ever-growing allowlist — the verdict is derived from that list, so a
-# misnamed-but-present list must never collapse into a false "Ready".
-TODO_KEY_HINTS = ("checklist", "todo", "action", "risk", "recommend", "blocker", "attention")
+def priority_rank(item):
+    priority = item.get("priority", "P1")
+    return PRIORITIES.index(priority) if priority in PRIORITIES else 1
 
 
-def extract_todos(data):
-    documented = data.get("checklist") or data.get("prioritized_todos")
-    if isinstance(documented, list) and documented:
-        return documented
-    for key, value in data.items():
-        if isinstance(value, list) and value and any(hint in key.lower() for hint in TODO_KEY_HINTS):
-            return value
-    return documented if isinstance(documented, list) else []
+# Pi does not reliably emit the documented key: across runs it has filed the same answer
+# under two or three different names. Recognize the list by what its key name implies rather
+# than chasing an ever-growing allowlist.
+RATING_KEY_HINTS = ("rating", "priorit", "checklist", "todo", "triage")
+EXTRA_KEY_HINTS = ("extra", "additional", "issue", "report", "new_item")
+
+
+def _named_collection(data, documented, hints, kinds):
+    value = data.get(documented)
+    if isinstance(value, kinds) and value:
+        return value
+    for key, other in data.items():
+        if isinstance(other, kinds) and other and any(hint in key.lower() for hint in hints):
+            return other
+    return value if isinstance(value, kinds) else None
+
+
+def _read_ratings(raw):
+    ratings = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            ratings[str(key).strip()] = value if isinstance(value, dict) else {"priority": value}
+    elif isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("id") or entry.get("todo_id") or entry.get("todo") or "").strip()
+            if key:
+                ratings[key] = entry
+    return ratings
+
+
+def extract_ratings(data):
+    """`{id: {priority, platforms}}`, however the model chose to shape its answer.
+
+    A list of objects is the documented form; a bare mapping of id to priority is the other
+    shape runs actually produce, and both say the same thing. A key name only suggests which
+    field holds the answer — what settles it is whether the entries carry ids, so a
+    hint-matching list of something else cannot answer for the ratings and read as "nothing
+    was rated".
+    """
+    candidates = [data.get("ratings")]
+    candidates += [value for key, value in data.items()
+                   if key != "ratings" and any(hint in key.lower() for hint in RATING_KEY_HINTS)]
+    for raw in candidates:
+        if isinstance(raw, (list, dict)) and raw:
+            ratings = _read_ratings(raw)
+            if ratings:
+                return ratings
+    return {}
+
+
+def extract_extra_items(data):
+    """Checklist items that are not a commit's to-do — a tester's `candidate` issue report."""
+    raw = _named_collection(data, "extra_items", EXTRA_KEY_HINTS, (list,))
+    return [entry for entry in (raw or []) if isinstance(entry, (dict, str))]
 
 
 def normalize_breaking_changes(value):
@@ -171,36 +248,67 @@ def normalize_breaking_changes(value):
     return items
 
 
-def normalize_review(data):
-    """Coerce Pi's output into the stored shape and derive the verdict from the to-do list.
+def normalize_review(data, index=None):
+    """Assemble the checklist here, from the index, and derive the verdict from it.
 
-    The list is the only source of truth. Computing the verdict here means the two can never
-    disagree, and there is no second ledger to reconcile against.
+    The model rates; this builds. Every to-do a commit review wrote is on the checklist with
+    the words that commit review used, whatever the model sent back — an item cannot be
+    dropped by an omission, reworded into something the maintainer never approved, or split
+    away from the commit it belongs to. What the model contributes is the priority and the
+    platforms, which is the judgement the release actually needs from it.
+
+    Carrying `commit` through is what lets the dashboard tick the same box in two places: the
+    release checklist and the commit review are the same to-do, so they are one checkbox.
     """
+    index = index or {}
+    ratings = extract_ratings(data)
     todos = []
-    for item in extract_todos(data):
-        if isinstance(item, dict):
-            text = todo_text(item)
-            if text:
-                todos.append({
-                    "priority": normalize_priority(item.get("priority")),
-                    "platforms": normalize_platforms(item.get("platforms")),
-                    "text": text,
-                })
-        elif str(item).strip():
-            todos.append({"priority": "P1", "platforms": [ALL_PLATFORMS], "text": str(item).strip()})
-    data["checklist"] = todos
+    for todo_id, source in index.items():
+        rating = ratings.get(todo_id)
+        rating = rating if isinstance(rating, dict) else {}
+        todos.append({
+            "priority": normalize_priority(rating.get("priority")),
+            "platforms": normalize_platforms(rating.get("platforms")),
+            "text": source["text"],
+            "commit": source["commit"],
+            "pr_number": source.get("pr_number"),
+            "author": source.get("author", ""),
+        })
+    # A tester's `candidate` issue is a to-do no commit review ever wrote, so it is the one
+    # kind of item the model still supplies the words for.
+    for item in extract_extra_items(data):
+        text = todo_text(item) if isinstance(item, dict) else str(item).strip()
+        if not text:
+            continue
+        priority = item.get("priority") if isinstance(item, dict) else ""
+        platforms = item.get("platforms") if isinstance(item, dict) else None
+        todos.append({
+            "priority": normalize_priority(priority),
+            "platforms": normalize_platforms(platforms),
+            "text": text,
+            "commit": "",
+            "pr_number": None,
+            "author": "",
+        })
+    # Sorted by priority and otherwise left in commit order, so the file's diff moves only
+    # when a priority does.
+    data["checklist"] = sorted(todos, key=priority_rank)
     data["breaking_changes"] = normalize_breaking_changes(
         data.get("breaking_changes")
         or ((data.get("evidence") or {}) if isinstance(data.get("evidence"), dict) else {}).get("breaking_changes_list")
     )
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    if any(todo["priority"] == "P0" for todo in todos):
+    # The checklist holds everything now, including work that is explicitly not this
+    # release's problem, so the verdict reads the priorities rather than the length.
+    priorities = {todo["priority"] for todo in todos}
+    if "P0" in priorities:
         data["verdict"] = "Blocked"
-    elif todos:
+    elif "P1" in priorities:
         data["verdict"] = "Needs Attention"
     else:
         data["verdict"] = "Ready"
+    data.pop("ratings", None)
+    data.pop("extra_items", None)
     return data
 
 
@@ -241,23 +349,54 @@ NO_BREAKING = re.compile(
 )
 
 
-def review_errors(data, issues):
+def review_errors(data, issues, index=None, ratings=None, prior=None):
     """Structural checks that protect the maintainer-facing panels — nothing more.
 
-    The verdict and priorities are guaranteed by `normalize_review`, so what is left is the
-    prose a human reads and the two contradictions that would mislead them: an empty to-do
-    list under a reason that describes blocking work, and an empty breaking-change list under
-    prose that describes breaking changes.
+    The checklist's contents are guaranteed by `normalize_review`, so what is left is the
+    judgement only the model can supply — a priority for every to-do — plus the prose a human
+    reads and the contradictions that would mislead them.
     """
     errors = []
+    index = index or {}
+    ratings = ratings if ratings is not None else {}
     todos = data.get("checklist") or []
+    # Rating every to-do is the whole job. An unrated one is not an item the model decided to
+    # leave out — it is a decision it did not make, and P1 is where the default parks it.
+    unrated = [todo_id for todo_id in index if todo_id not in ratings]
+    if unrated:
+        shown = ", ".join(unrated[:12]) + (f", and {len(unrated) - 12} more" if len(unrated) > 12 else "")
+        errors.append(
+            f"{len(unrated)} of the {len(index)} to-do(s) in the digest have no rating: {shown}. "
+            "Return one entry in `ratings` for every id — rating them is the job, and choosing "
+            "which ones to leave out is not."
+        )
+    unknown = [todo_id for todo_id in ratings if todo_id not in index]
+    if unknown:
+        errors.append(
+            f"`ratings` names {', '.join(sorted(unknown)[:12])}, which is not a to-do id in the "
+            "digest. Use the `id` exactly as the digest spells it, and put anything that is not "
+            "one of these to-dos in `extra_items`."
+        )
     reason = str(data.get("verdict_reason", "")).strip()
     if not reason:
         errors.append("verdict_reason is required: one or two sentences answering 'can we ship?'.")
-    if not todos and prose.asserts(reason, FALSE_GREEN, NOT_BLOCKING):
+    # Word-for-word the last one, over a list that has moved. Prose that outlives the list it
+    # describes is how a review ends up announcing five verifications above ten of them.
+    prior = prior or {}
+    prior_gating = {todo["text"] for todo in prior.get("checklist", [])
+                    if todo.get("priority") in ("P0", "P1")}
+    gating = {todo["text"] for todo in todos if todo["priority"] in ("P0", "P1")}
+    if reason and reason == str(prior.get("verdict_reason", "")).strip() and gating != prior_gating:
         errors.append(
-            "checklist is empty but verdict_reason still describes work a tester has to do — "
-            "put each such item on the checklist so the verdict reflects it."
+            "verdict_reason is word-for-word the previous review's, but what this release needs "
+            "before shipping has changed. Answer 'can we ship?' from the priorities you just "
+            "assigned."
+        )
+    if data.get("verdict") == "Ready" and prose.asserts(reason, FALSE_GREEN, NOT_BLOCKING):
+        errors.append(
+            "Nothing is rated P0 or P1, so the verdict is Ready, but verdict_reason still "
+            "describes work that has to happen before shipping — rate that work P0 or P1, or "
+            "stop claiming it in the prose."
         )
     evidence = data.get("evidence") or {}
     for key in EVIDENCE_KEYS:
@@ -293,6 +432,11 @@ def review_errors(data, issues):
     return errors
 
 
+def rating_targets(index):
+    """The to-do ids, in commit order, as the prompt asks for them back."""
+    return "\n".join(f"- {todo_id}: {source['text']}" for todo_id, source in index.items())
+
+
 def issues_block(issues):
     if not issues:
         return f"No open `{CANDIDATE_LABEL}` issues were filed against this bucket.\n"
@@ -314,19 +458,24 @@ def prior_review_block(ctx, bucket):
     if not data:
         return ""
     prior = {
-        "verdict": data.get("verdict", ""),
-        "verdict_reason": data.get("verdict_reason", ""),
-        "checklist": data.get("checklist", []),
+        "priorities_last_time": {
+            f"{todo.get('commit', '')[:7]}: {todo['text'][:90]}": todo.get("priority", "")
+            for todo in data.get("checklist", []) if todo.get("commit")
+        },
+        "extra_items": [todo for todo in data.get("checklist", []) if not todo.get("commit")],
         "breaking_changes": data.get("breaking_changes", []),
     }
     return (
-        "The review this bucket already has. Use it as the continuity baseline: do not write a "
-        "second wording of the same item, keep unresolved items stable when they are still valid, "
-        "and add only genuinely new work.\n" + json.dumps(prior, indent=2) + "\n\n"
+        "The priorities this bucket was given last time. Use them as the continuity baseline: "
+        "keep a priority where it was unless something in the digest changed it, and do not "
+        "write a second wording of an extra item that is already here. The last verdict and its "
+        "prose are deliberately not shown — write `verdict_reason` fresh from the priorities you "
+        "are assigning now.\n"
+        + json.dumps(prior, indent=2) + "\n\n"
     )
 
 
-def review_prompt(ctx, bucket, rows, missing, issues, path, feedback):
+def review_prompt(ctx, bucket, rows, missing, issues, index, path, feedback):
     platforms = "\n".join(f"- {platform}" for platform in PLATFORMS)
     coverage = ""
     if missing:
@@ -355,8 +504,7 @@ Write the machine-readable JSON result to: {path}
 
 {platforms}
 
-Every checklist item names the platforms it applies to in `platforms`, or `["all"]`. Do not
-write an item for a platform this release did not touch.
+Every rating names the platforms its to-do applies to in `platforms`, or `["all"]`.
 
 ## Per-commit digest of the stored commit reviews
 
@@ -365,13 +513,20 @@ do not count the entries yourself.
 {coverage}
 {json.dumps(rows, indent=2)}
 
-Final reminders: the checklist is the artifact, and its reader is a tester working through a
-release candidate. An item earns its place only if somebody would regret shipping without
-checking it AND users would notice the consequence; omit everything else entirely (there is no
-P2). Each item is one actionable sentence — action, user-visible stake, how to tell whether it
-worked — marked P0 or P1, naming the platforms it applies to, and ending with the source PR(s)
-and handle(s) from the digest: `(#1234, @author)`. Merge related concerns into one item. The
-verdict is computed from the checklist, so you cannot contradict it. `verdict_reason` and the
+## Rate every one of these {len(index)} to-do(s)
+
+Return `ratings` with one entry per id below — P0, P1 or P2 — and the platforms it applies to.
+Every one of them is on the checklist whichever way you rate it; the priority is how a tester
+knows what to do first and what is not this release's problem. Do not retype the text: the
+maintainer reads the words the commit review already wrote, and the caller carries them over
+for you.
+
+{rating_targets(index)}
+
+Final reminders: rating is the job, and filtering is not — an id you leave out of `ratings` is
+not an item you removed, it is a judgement you failed to make, and it lands in P1 by default.
+Put a tester's `candidate` issue in `extra_items`, because no commit review wrote it. The
+verdict is computed from your priorities, so you cannot contradict it. `verdict_reason` and the
 evidence are read by somebody who has never seen this digest: name the feature or behavior,
 and let `verdict_reason` be just your one-or-two-sentence answer to "can we ship?".
 
@@ -385,21 +540,23 @@ def build_review(ctx, bucket, force=False):
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_json(key) or {}
     shas = bucket.commits()
-    rows, missing = digest(ctx, shas)
+    rows, missing, index = digest(ctx, shas)
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     issues = candidate_issues(ctx, bucket)
+    prior = ctx.store.read_json(key) or {}
     started = time.monotonic()
 
     def prompt(paths, feedback):
-        return review_prompt(ctx, bucket, rows, missing, issues, paths["review"], feedback)
+        return review_prompt(ctx, bucket, rows, missing, issues, index, paths["review"], feedback)
 
     def validate(contents):
         data = extract_json_object(contents["review"])
         if data is None:
             return None, ["The artifact file must contain a valid JSON object."]
-        data = normalize_review(data)
-        return data, review_errors(data, issues)
+        ratings = extract_ratings(data)
+        data = normalize_review(data, index)
+        return data, review_errors(data, issues, index, ratings, prior)
 
     data = generate("release-review", {"review": ".json"}, prompt, validate,
                     checkout=str(bucket.checkout.path))
@@ -685,7 +842,7 @@ def build_notes(ctx, bucket, force=False):
     if store.is_frozen(ctx.store, bucket.name, filename) and not force:
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_text(key)
-    rows, _ = digest(ctx, bucket.commits())
+    rows, _, _ = digest(ctx, bucket.commits())
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)
@@ -731,7 +888,7 @@ def build_announcement(ctx, bucket, force=False):
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_text(key)
     shas = bucket.hotfix_commits() if bucket.is_hotfix else bucket.commits()
-    rows, _ = digest(ctx, shas)
+    rows, _, _ = digest(ctx, shas)
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)

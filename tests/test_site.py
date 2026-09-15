@@ -93,13 +93,30 @@ class LoadFromFiles(TempDirCase):
 
     def test_blockers_lead_the_to_do_list_and_are_counted(self):
         review = self.state.read_json(store.review_key("v2026.38"))
+        review["checklist"].append({"priority": "P2", "text": "Tidy the imports."})
         review["checklist"].append({"priority": "P0", "text": "Fix the installer."})
         self.state.write_json(store.review_key("v2026.38"), review)
         data = site.load(self.state)
         self.assertEqual(data["counts"]["blockers"], 1)
         self.assertEqual(
-            [t["priority"] for t in data["releases"][0]["todo_items"]], ["P0", "P1"]
+            [t["priority"] for t in data["releases"][0]["todo_items"]], ["P0", "P1", "P2"]
         )
+
+    def test_a_checklist_item_carries_the_commit_it_came_from(self):
+        """Which is what makes it the same checkbox as the commit review's own to-do: the
+        page keys the box on the commit, not on the list it is being read in."""
+        review = self.state.read_json(store.review_key("v2026.38"))
+        review["checklist"][0].update(
+            {"commit": "a" * 40, "pr_number": 3456, "author": "@someone"})
+        self.state.write_json(store.review_key("v2026.38"), review)
+        item = site.load(self.state)["releases"][0]["todo_items"][0]
+        self.assertEqual(item["commit"], "a" * 40)
+        self.assertEqual(item["pr_number"], 3456)
+        self.assertEqual(item["author"], "@someone")
+
+    def test_a_commit_to_do_names_no_commit_of_its_own(self):
+        # It is already filed under one; the field exists so a release item can point back.
+        self.assertEqual(self.data["commit_reviews"][0]["todo_items"][0]["commit"], "")
 
     def test_an_unreadable_file_is_skipped_rather_than_crashing_the_page(self):
         self.state.write_text("commits/broken.json", "{ this is not json")
