@@ -114,10 +114,13 @@ def commit_rows(state):
 def release_rows(state, commits):
     """One row per bucket, carrying everything that bucket ships with.
 
-    The verdict, the notes and the Discord post are three views of one release, so they are
-    one row with three fields rather than three lists to line up by name. A bucket with
+    The checklist, the notes and the Discord post are three views of one release, so they
+    are one row with three fields rather than three lists to line up by name. A bucket with
     nothing but commits filed under it is still a release — it is the one on `main`, before
-    anybody has built it — and it appears here with an empty verdict rather than not at all.
+    anybody has built it — and it appears here with an empty checklist rather than not at all.
+
+    No release carries a verdict. Whether one is ready to ship is the release admin's call,
+    and the page's job is to give them the checklist to make it from.
     """
     rows = []
     for name in bucket_names(state, commits):
@@ -129,8 +132,6 @@ def release_rows(state, commits):
             "range_start": review.get("range_start", ""),
             "last_stable_tag": review.get("last_stable_tag", ""),
             "head_sha": review.get("head_sha", ""),
-            "verdict": review.get("verdict", ""),
-            "verdict_reason": review.get("verdict_reason", ""),
             "reviewed_at": review.get("reviewed_at", ""),
             "generation_seconds": review.get("generation_seconds", 0),
             "reviewed": bool(review),

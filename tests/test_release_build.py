@@ -18,7 +18,6 @@ from tests.helpers import TempDirCase, commit_file, git, init_repo
 NOTES = "## Headline\n\n- One.\n- Two.\n- Three.\n\n## Breaking Changes\n"
 POST = "## Lemonade v2026.39\n\n@everyone three good things landed.\n"
 REVIEW = {
-    "verdict_reason": "Nothing blocks the release.",
     "checklist": [],
     "breaking_changes": [],
     "evidence": {key: "none observed" for key in release.EVIDENCE_KEYS},
@@ -79,7 +78,7 @@ class BuildingABucket(TempDirCase):
     def test_the_review_carries_the_facts_the_dashboard_renders_from(self):
         self.build_all()
         review = self.state.read_json(store.review_key("v2026.39"))
-        self.assertEqual(review["verdict"], "Ready")
+        self.assertNotIn("verdict", review)
         self.assertEqual(review["branch"], "main")
         self.assertEqual(review["range_start"], "v11.9.0")
         self.assertEqual(review["head_sha"], self.second)

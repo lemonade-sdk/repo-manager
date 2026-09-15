@@ -1,6 +1,7 @@
 """Job 2: the three artifacts a release ships with, and the rules that protect them.
 
-`review.json` is the maintainer's verdict and the tester's plan. `notes.md` is what the
+`review.json` is the tester's plan. Whether the release is ready is the release admin's
+call, made from that plan; nothing here makes it for them. `notes.md` is what the
 lemonade release action puts on the release page. `announcement.md` is the Discord post.
 All three are regenerated in place on every candidate — except where a human has edited
 one, which freezes it: the release admin's words win over the model's, always.
@@ -150,7 +151,7 @@ def candidate_issues(ctx, bucket):
 PRIORITIES = ("P0", "P1", "P2")
 
 P0_WORDS = ("P0", "BLOCKING", "BLOCKER", "BLOCKED", "HIGH", "CRITICAL")
-P2_WORDS = ("P2", "P3", "LOW", "LATER", "DEFER", "DEFERRED", "BACKLOG", "NICE-TO-HAVE")
+P2_WORDS = ("P2", "P3", "LOW", "MINOR", "LOWEST")
 
 
 def normalize_priority(value):
@@ -249,7 +250,7 @@ def normalize_breaking_changes(value):
 
 
 def normalize_review(data, index=None):
-    """Assemble the checklist here, from the index, and derive the verdict from it.
+    """Assemble the checklist here, from the index.
 
     The model rates; this builds. Every to-do a commit review wrote is on the checklist with
     the words that commit review used, whatever the model sent back — an item cannot be
@@ -298,15 +299,12 @@ def normalize_review(data, index=None):
         or ((data.get("evidence") or {}) if isinstance(data.get("evidence"), dict) else {}).get("breaking_changes_list")
     )
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    # The checklist holds everything now, including work that is explicitly not this
-    # release's problem, so the verdict reads the priorities rather than the length.
-    priorities = {todo["priority"] for todo in todos}
-    if "P0" in priorities:
-        data["verdict"] = "Blocked"
-    elif "P1" in priorities:
-        data["verdict"] = "Needs Attention"
-    else:
-        data["verdict"] = "Ready"
+    # No verdict is computed, and none is stored. Whether a release ships is the release
+    # admin's decision, made from the checklist and from the testing they have actually seen
+    # done — and a stored one-word answer, frozen at the moment the model ran, could only ever
+    # be out of date the first time somebody worked an item.
+    data.pop("verdict", None)
+    data.pop("verdict_reason", None)
     data.pop("ratings", None)
     data.pop("extra_items", None)
     return data
@@ -336,25 +334,19 @@ def normalize_platforms(value):
     return ordered or [ALL_PLATFORMS]
 
 
-FALSE_GREEN = re.compile(
-    r"\bP[01]\b|\bblock(?:s|er|ers|ing)?\b|before (?:shipping|release|releasing|tagging)",
-    re.IGNORECASE,
-)
-# "Nothing blocks the release" and "no P0s remain" are what a Ready review says. Read the
-# guard a sentence at a time so a negated clause cannot fire it.
-NOT_BLOCKING = re.compile(r"\b(no|not|nothing|none|zero|never|without)\b", re.IGNORECASE)
 HAS_BREAKING = re.compile(r"breaking change", re.IGNORECASE)
 NO_BREAKING = re.compile(
     r"\b(no|none|zero|without|not any|aren['’]?t any|no user-facing)\b", re.IGNORECASE
 )
 
 
-def review_errors(data, issues, index=None, ratings=None, prior=None):
+def review_errors(data, issues, index=None, ratings=None):
     """Structural checks that protect the maintainer-facing panels — nothing more.
 
     The checklist's contents are guaranteed by `normalize_review`, so what is left is the
-    judgement only the model can supply — a priority for every to-do — plus the prose a human
-    reads and the contradictions that would mislead them.
+    judgement only the model can supply — a priority for every to-do — and the one
+    contradiction that would mislead a reader: an empty breaking-change list under prose
+    that describes breaking changes.
     """
     errors = []
     index = index or {}
@@ -377,27 +369,6 @@ def review_errors(data, issues, index=None, ratings=None, prior=None):
             "digest. Use the `id` exactly as the digest spells it, and put anything that is not "
             "one of these to-dos in `extra_items`."
         )
-    reason = str(data.get("verdict_reason", "")).strip()
-    if not reason:
-        errors.append("verdict_reason is required: one or two sentences answering 'can we ship?'.")
-    # Word-for-word the last one, over a list that has moved. Prose that outlives the list it
-    # describes is how a review ends up announcing five verifications above ten of them.
-    prior = prior or {}
-    prior_gating = {todo["text"] for todo in prior.get("checklist", [])
-                    if todo.get("priority") in ("P0", "P1")}
-    gating = {todo["text"] for todo in todos if todo["priority"] in ("P0", "P1")}
-    if reason and reason == str(prior.get("verdict_reason", "")).strip() and gating != prior_gating:
-        errors.append(
-            "verdict_reason is word-for-word the previous review's, but what this release needs "
-            "before shipping has changed. Answer 'can we ship?' from the priorities you just "
-            "assigned."
-        )
-    if data.get("verdict") == "Ready" and prose.asserts(reason, FALSE_GREEN, NOT_BLOCKING):
-        errors.append(
-            "Nothing is rated P0 or P1, so the verdict is Ready, but verdict_reason still "
-            "describes work that has to happen before shipping — rate that work P0 or P1, or "
-            "stop claiming it in the prose."
-        )
     evidence = data.get("evidence") or {}
     for key in EVIDENCE_KEYS:
         if not str(evidence.get(key, "")).strip():
@@ -406,10 +377,10 @@ def review_errors(data, issues, index=None, ratings=None, prior=None):
                 "(or 'none observed' when that is the honest answer)."
             )
     breaking = data.get("breaking_changes")
-    claims = f"{evidence.get('breaking_changes', '')} {reason}"
+    claims = str(evidence.get("breaking_changes", ""))
     if isinstance(breaking, list) and not breaking and prose.asserts(claims, HAS_BREAKING, NO_BREAKING):
         errors.append(
-            "breaking_changes is empty but the evidence or verdict_reason describes breaking "
+            "breaking_changes is empty but evidence.breaking_changes describes breaking "
             "changes — enumerate every user-facing breaking change in the list, one entry each with "
             "its migration, since the notes and the announcement are reconciled against it."
         )
@@ -468,9 +439,7 @@ def prior_review_block(ctx, bucket):
     return (
         "The priorities this bucket was given last time. Use them as the continuity baseline: "
         "keep a priority where it was unless something in the digest changed it, and do not "
-        "write a second wording of an extra item that is already here. The last verdict and its "
-        "prose are deliberately not shown — write `verdict_reason` fresh from the priorities you "
-        "are assigning now.\n"
+        "write a second wording of an extra item that is already here.\n"
         + json.dumps(prior, indent=2) + "\n\n"
     )
 
@@ -525,10 +494,9 @@ for you.
 
 Final reminders: rating is the job, and filtering is not — an id you leave out of `ratings` is
 not an item you removed, it is a judgement you failed to make, and it lands in P1 by default.
-Put a tester's `candidate` issue in `extra_items`, because no commit review wrote it. The
-verdict is computed from your priorities, so you cannot contradict it. `verdict_reason` and the
-evidence are read by somebody who has never seen this digest: name the feature or behavior,
-and let `verdict_reason` be just your one-or-two-sentence answer to "can we ship?".
+Put a tester's `candidate` issue in `extra_items`, because no commit review wrote it. Do not
+write a verdict; whether this release ships is the release admin's call, not yours. The
+evidence is read by somebody who has never seen this digest, so name the feature or behavior.
 
 {feedback}"""
 
@@ -544,7 +512,6 @@ def build_review(ctx, bucket, force=False):
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     issues = candidate_issues(ctx, bucket)
-    prior = ctx.store.read_json(key) or {}
     started = time.monotonic()
 
     def prompt(paths, feedback):
@@ -556,7 +523,7 @@ def build_review(ctx, bucket, force=False):
             return None, ["The artifact file must contain a valid JSON object."]
         ratings = extract_ratings(data)
         data = normalize_review(data, index)
-        return data, review_errors(data, issues, index, ratings, prior)
+        return data, review_errors(data, issues, index, ratings)
 
     data = generate("release-review", {"review": ".json"}, prompt, validate,
                     checkout=str(bucket.checkout.path))
@@ -575,7 +542,10 @@ def build_review(ctx, bucket, force=False):
         "generation_seconds": round(time.monotonic() - started, 1),
     })
     write_bucket_file(ctx, bucket.name, filename, store.dumps(data))
-    print(f"{bucket.name} verdict: {data['verdict']} — {data.get('verdict_reason', '')}", flush=True)
+    counts = ", ".join(
+        f"{sum(1 for t in data['checklist'] if t['priority'] == p)} {p}" for p in PRIORITIES
+    )
+    print(f"{bucket.name} checklist: {len(data['checklist'])} item(s) — {counts}", flush=True)
     return data
 
 

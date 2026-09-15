@@ -54,23 +54,26 @@ The list is every bucket the directory knows about, newest first — including t
 that has only been swept, which shows its commit count and `not built`. Four sub-tabs read the
 selected release four ways:
 
-**Review** — the verdict and the one-or-two sentences answering "can we ship?", then what
-this release does to users, then the checklist. Breaking changes come first because they are
-the context the checklist is read in; a tester who has to scroll past twenty to-dos to reach
-them has already decided what to try.
+**Review** — what this release does to users, then the checklist. Breaking changes come first
+because they are the context the checklist is read in; a tester who has to scroll past twenty
+to-dos to reach them has already decided what to try. There is no verdict anywhere on the page:
+whether the release ships is the release admin's call, and the checklist is what they make it
+from.
 
-The checklist is every maintainer to-do in the range, under P0, P1 and P2 headings. The
-priority is the subsection an item sits in, not a word repeated down the margin twenty times —
-the heading says it once, and the eye can find where the work that stops the release ends. Each
-item carries the platforms it applies to and the PR and handle to chase. Then the evidence, and,
-when a human has edited one of the bucket's files, which one and that `--force` overwrites it.
+The checklist is every maintainer to-do in the range, under P0, P1 and P2 headings, and all of
+it is work to do before the release ships — the priority is the order to work in, not whether an
+item counts. It is the subsection an item sits in rather than a word repeated down the margin
+twenty times: the heading says it once, and the eye can find where the work that stops the
+release ends. Each item carries the platforms it applies to and the PR and handle to chase. Then
+the evidence, and, when a human has edited one of the bucket's files, which one and that
+`--force` overwrites it.
 
 **Release notes** and **Announcement** — the website highlights and the Discord post, as
 markdown, with a Copy button. They are shown verbatim because they are copied verbatim.
 
 **Stats** — what this release is made of, as one table: what is left under each priority,
 commits reviewed and how many in range still are not, how many of the commits are yours,
-unique authors and reviewers, the verdict tally and the span of days. Every figure is about
+unique authors and reviewers, the commit-verdict tally and the span of days. Every figure is about
 the selected release, because the release is the unit of work.
 
 ## The Commits tab

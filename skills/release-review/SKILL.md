@@ -1,13 +1,18 @@
 ---
 name: release-review
-description: Rate every maintainer to-do in a release bucket by priority and write the release-readiness verdict a tester works from. Use when asked to judge whether a release bucket is ready to ship.
+description: Rate every maintainer to-do in a release bucket by priority, so a tester works a release candidate in the right order. Use when asked to prepare a release bucket's tester checklist.
 ---
 
 # Release Review
 
 The reader is a tester who has just installed a release candidate and wants to know what to
 try, in what order. Everything the commit reviews asked for is already on their checklist. Your
-job is to say how much each item matters to *this release*, and to answer "can we ship?".
+job is to say how much each item matters to *this release*.
+
+**You do not decide whether the release ships.** There is no verdict here and nothing you write
+is one. The release admin makes that call, from this checklist and from the testing they have
+watched happen, and a one-word answer frozen at the moment you ran could only mislead them.
+Rate the work; leave the decision alone.
 
 You are rating, not curating. The caller carries every to-do through verbatim and assembles the
 checklist itself, so an item you leave out of `ratings` is not an item you removed — it is a
@@ -26,9 +31,15 @@ Synthesize from this digest; do not re-review diffs unless the digest is clearly
 
 Three priorities exist, and every to-do gets exactly one.
 
-- **P0 — do not ship until resolved.** Evidence of user-visible breakage in shipped
-  artifacts, a likely security issue, an *unintended* breaking change (a regression that
-  slipped in, as opposed to a deliberate one — deliberate breaks belong in
+**Everything on this checklist is work to do before the release ships.** The priority says what
+a tester does *first*, not whether an item counts. A tester works down from P0, and if the
+candidate has to go out before the list is finished, the priority is what tells them where the
+damage of stopping is smallest. Nothing here is deferred to after the release — this is a
+release checklist, and an item nobody should look at before shipping does not belong on it.
+
+- **P0 — the release does not go out until this is resolved.** Evidence of user-visible
+  breakage in shipped artifacts, a likely security issue, an *unintended* breaking change (a
+  regression that slipped in, as opposed to a deliberate one — deliberate breaks belong in
   `breaking_changes`), or a headline feature whose release packaging or tests are failing with
   the cause not yet understood. Uncertainty about whether release artifacts are broken is
   itself P0: "we don't know if the package works" blocks a release the same way "the package
@@ -38,27 +49,23 @@ Three priorities exist, and every to-do gets exactly one.
   installs and runs there, it is P0 until verified. An untested package is indistinguishable
   from a broken one and gates every user on that platform at the door.
 
-- **P1 — verify before shipping.** New user-facing behavior, on a surface that already ships,
-  that lacks test evidence and needs a human to confirm it works: a new backend on platforms
-  Lemonade already supports, a new command end-to-end. The dividing line from P0 is blast
-  radius — one feature on familiar ground is P1; the shipped artifact's basic integrity on new
-  ground is P0. When you are unsure between P1 and P2, the question that settles it is whether
-  *users* would notice the consequence in this release. If they would, it is P1.
+- **P1 — check it before shipping; users would feel it if nobody did.** New user-facing
+  behavior, on a surface that already ships, that lacks test evidence and needs a human to
+  confirm it works: a new backend on platforms Lemonade already supports, a new command
+  end-to-end. The dividing line from P0 is blast radius — one feature on familiar ground is P1;
+  the shipped artifact's basic integrity on new ground is P0.
 
-- **P2 — worth doing, not before this release.** Real work whose natural deadline is after
-  shipping: code-quality follow-ups, test debt, refactoring, documentation polish unrelated to
-  a behavior change, review-process observations, CI flakiness that does not affect shipped
-  artifacts. P2 is not a wastebasket and not a verdict on the item's worth — it is a statement
-  about *timing*. A tester works P0 and P1 before the release goes out and leaves P2 alone.
+- **P2 — check it before shipping, but do it last.** Work whose consequence is real but
+  narrow, or felt by somebody other than a user on release day: an internal document that now
+  describes the wrong workflow, a confirmation that a post-approval commit was seen, a
+  performance question worth answering before it becomes a habit. P2 is the honest answer to
+  "if the candidate has to ship tonight and the list is not finished, what hurts least to
+  leave?" — not "this is somebody else's problem".
 
-The verdict follows from the priorities, so you cannot contradict it: `Blocked` if anything is
-P0, `Needs Attention` if anything is P1, `Ready` otherwise. A release whose every open item is
-P2 is a release that can ship — which is exactly what P2 means.
-
-Two failure modes matter more than the rest. Rating real pre-release work P2 ships a release
-that should have been held. Rating housekeeping P1 buries the two items that mattered in a list
-of twenty and costs the tester the ordering that makes the list worth having. Read each item
-for what it would cost *users* if this release shipped without it, and let that decide.
+Two failure modes matter more than the rest. Rating a real blocker P1 or P2 ships a release
+that should have been held. Rating everything P0 or P1 buries the two items that mattered in a
+list of twenty and costs the tester the ordering that makes the list worth having. Read each
+item for what it would cost *users* if this release shipped without it, and let that decide.
 
 ## Tester reports
 
@@ -68,8 +75,8 @@ supply the words for — put each one in `extra_items`. Each says what the repor
 outcome to pick: **fix later** (ship as is, the issue stays open), **hotfix** (fix on the
 release branch before tagging), or **revert** (take the offending change back out). Name the
 issue number in the text so a reader can open it, and pick the priority from what the report
-describes. A human already decided it was worth filing, so nothing here is P2 without a reason
-you can state.
+describes. A human already decided it was worth filing, so it is rarely the last thing a
+tester should get to.
 
 ## Breaking changes
 
@@ -88,23 +95,6 @@ them. Use `["all"]` when it applies everywhere, and name specific platforms only
 genuinely does not apply elsewhere — a to-do about Windows installer signing is `["Windows"]`,
 a to-do about a server endpoint is `["all"]`.
 
-## Verdict prose
-
-`verdict_reason` is your answer if somebody asked you "can we ship?" in person: one or two
-sentences that name what matters in this release and exactly what stands between it and
-shipping. It is not a summary of the artifact — no commit statistics, no restating the
-checklist, no digest ids, no priority counts. "Two breaking changes still need release-note
-coverage and the new Moonshine backend hasn't been verified on its advertised platforms;
-nothing else blocks the release." is the register to hit.
-
-Write it fresh, from the priorities you just assigned. The caller shows you the previous run's
-priorities so yours do not wobble between candidates, and deliberately does not show you its
-prose — a sentence carried over from a shorter list is a sentence that miscounts this one.
-
-If your prose mentions anything that has to happen before shipping, that thing is a P0 or a P1.
-Claiming pre-release work in the prose while everything is rated P2 is the worst possible
-output: a reader sees `Ready` and ships.
-
 ## JSON artifact
 
 Writing the artifact to the caller-provided `.json` path is mandatory before finishing; the
@@ -112,7 +102,6 @@ CLI reads that file after the skill exits. Use exactly this shape:
 
 ```json
 {
-  "verdict_reason": "Nothing ships until X is fixed: users hit Y on Z. Everything else is release-note coverage.",
   "ratings": [
     {"id": "a1b2c3d-1", "priority": "P0", "platforms": ["all"]},
     {"id": "a1b2c3d-2", "priority": "P2", "platforms": ["all"]},
@@ -127,7 +116,7 @@ CLI reads that file after the skill exits. Use exactly this shape:
   ],
   "evidence": {
     "coverage": "What range was reviewed and anything not covered.",
-    "blockers": "Short synthesis of what drove the verdict.",
+    "blockers": "Short synthesis of what a tester has to clear before this can ship.",
     "manual_testing": "What human verification this release needs and why.",
     "breaking_changes": "User-facing breaking changes and their migration story.",
     "security": "Security-relevant observations, or 'none observed'."
@@ -136,7 +125,9 @@ CLI reads that file after the skill exits. Use exactly this shape:
 ```
 
 - `ratings` needs one entry for every `id` the caller listed, and nothing else. Do not emit
-  `checklist`, `prioritized_todos`, or `tester_plan` — the caller builds the checklist.
+  `checklist`, `prioritized_todos`, or `tester_plan` — the caller builds the checklist. Do not
+  emit `verdict` or `verdict_reason`; they do not exist, and anything you put there is
+  discarded.
 - `extra_items` is only for work no commit review wrote, which in practice means `candidate`
   issues. Leave it `[]` when there are none. Never restate a digest to-do here.
 - `breaking_changes` is the canonical, deduplicated list of every user-facing breaking change

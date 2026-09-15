@@ -15,8 +15,7 @@ def seed(state):
         "evidence": {"tests": "Unit tests only."},
     })
     state.write_json(store.review_key("v2026.38"), {
-        "bucket": "v2026.38", "branch": "release-v2026.38", "verdict": "Needs Attention",
-        "verdict_reason": "Moonshine is unverified on macOS.", "range_start": "v2026.37.1",
+        "bucket": "v2026.38", "branch": "release-v2026.38", "range_start": "v2026.37.1",
         "head_sha": "b" * 40,
         "checklist": [{"priority": "P1", "platforms": ["macOS"],
                        "text": "Run Moonshine on macOS (#3456, @someone)."}],
@@ -60,11 +59,11 @@ class LoadFromFiles(TempDirCase):
     def test_the_repo_is_read_back_from_a_stored_review(self):
         self.assertEqual(self.data["config"]["repo"], "lemonade-sdk/lemonade")
 
-    def test_a_bucket_carries_its_verdict_plan_and_artifacts(self):
-        """One release, one row: the verdict, the checklist and both artifacts together."""
+    def test_a_bucket_carries_its_plan_and_artifacts(self):
+        """One release, one row: the checklist and both artifacts together."""
         bucket = self.data["releases"][0]
         self.assertEqual(bucket["bucket"], "v2026.38")
-        self.assertEqual(bucket["verdict"], "Needs Attention")
+        self.assertNotIn("verdict", bucket)
         self.assertEqual(bucket["todo_items"][0]["platforms"], ["macOS"])
         self.assertEqual(bucket["commits"], 1)
         self.assertIn("## Headline", bucket["notes_markdown"])
@@ -82,7 +81,7 @@ class LoadFromFiles(TempDirCase):
         upcoming = data["releases"][0]
         self.assertEqual(upcoming["bucket"], "v2026.39")
         self.assertFalse(upcoming["reviewed"])
-        self.assertEqual(upcoming["verdict"], "")
+        self.assertEqual(upcoming["todo_items"], [])
         self.assertEqual(upcoming["commits"], 1)
         self.assertEqual(data["counts"]["releases"], 2)
         self.assertEqual(data["counts"]["release_reviews"], 1)

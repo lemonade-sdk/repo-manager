@@ -245,9 +245,9 @@
     }
 
     /* --- sub-tabs ---------------------------------------------------------------------
-       A release ships four things — a verdict, notes, a Discord post, and a record of what
-       went into it. They are one release read four ways, so they share a pane and take
-       turns in it rather than each claiming a tab of their own. */
+       A release ships four things — a tester's checklist, notes, a Discord post, and a
+       record of what went into it. They are one release read four ways, so they share a pane
+       and take turns in it rather than each claiming a tab of their own. */
     .subtabs {
       display: flex;
       gap: 2px;
@@ -729,9 +729,6 @@
     .todo-group.p0 {
       color: var(--danger);
     }
-    .todo-group.p2 {
-      color: var(--muted);
-    }
     .todo-group .count {
       font-weight: 500;
       color: var(--muted);
@@ -895,10 +892,9 @@
             <table>
               <thead>
                 <tr>
-                  <th style="width: 132px;">Release</th>
-                  <th style="width: 150px;">Verdict</th>
-                  <th style="width: 92px;">Checklist</th>
-                  <th style="width: 84px;">Commits</th>
+                  <th style="width: 150px;">Release</th>
+                  <th style="width: 104px;">Checklist</th>
+                  <th style="width: 92px;">Commits</th>
                 </tr>
               </thead>
               <tbody id="release-rows"></tbody>
@@ -1338,11 +1334,6 @@
     }
 
     const PRIORITY_ORDER = ["P0", "P1", "P2"];
-    const PRIORITY_LABELS = {
-      "P0": "P0 — do not ship until resolved",
-      "P1": "P1 — verify before shipping",
-      "P2": "P2 — after this release"
-    };
 
     function todoCount(items, scope) {
       const total = (items || []).length;
@@ -1400,7 +1391,7 @@
       }
       return groups.map(([priority, rows]) => {
         const open = rows.filter((item) => !todoItemDone(item, scope)).length;
-        const label = PRIORITY_LABELS[priority] || priority || "Unrated";
+        const label = priority || "Unrated";
         return `<div class="todo-group ${esc((priority || "").toLowerCase())}">${esc(label)}
             <span class="count">${open} of ${rows.length} open</span></div>
           <div class="todo-list">${
@@ -1730,8 +1721,8 @@
         return `
         <tr data-index="${index}" class="${index === state.selectedRelease ? "selected" : ""}">
           <td class="release-cell">${esc(row.bucket)}${row.is_hotfix ? ` <span class="badge hotfix">hotfix</span>` : ""}</td>
-          <td>${row.reviewed ? badge(row.verdict) : `<span class="muted" title="No release review has been built for this bucket yet">not built</span>`}</td>
-          <td data-todo-scope="${esc(scope)}">${todoCount(row.todo_items, scope)}</td>
+          <td data-todo-scope="${esc(scope)}">${row.reviewed ? todoCount(row.todo_items, scope)
+            : `<span class="muted" title="No release review has been built for this bucket yet">not built</span>`}</td>
           <td>${row.commits}</td>
         </tr>`;
       }).join("");
@@ -1759,7 +1750,7 @@
       const row = currentRelease();
       if (!row) {
         copy.classList.add("hidden");
-        $("release-detail").innerHTML = `<div class="empty">Nothing is filed under a release yet. Run <code>repo-manager commit sweep --branch main</code> to review the range, then <code>repo-manager release build --branch main</code> to write this bucket's verdict, notes and announcement.</div>`;
+        $("release-detail").innerHTML = `<div class="empty">Nothing is filed under a release yet. Run <code>repo-manager commit sweep --branch main</code> to review the range, then <code>repo-manager release build --branch main</code> to write this bucket's checklist, notes and announcement.</div>`;
         return;
       }
       // Offered only when there is something to copy: a button that silently puts an
@@ -1802,7 +1793,6 @@
         field("Head", shortSha(row.head_sha)),
         field("Audited", row.reviewed_at),
         generatedInField(row),
-        section("Verdict", `<p>${badge(row.verdict)} ${esc(row.verdict_reason || "")}</p>`),
         // Above the checklist: what this release does to users is the context the checklist
         // is read in, and a tester who scrolls past twenty to-dos to reach it has already
         // decided what to try.
@@ -1875,7 +1865,7 @@
       return `<table class="stats-table"><tbody>
         ${statGroup("Left to do")}
         ${byPriority.map(([priority, open, total]) =>
-            statRow(PRIORITY_LABELS[priority] || priority, open, total)).join("")}
+            statRow(priority, open, total)).join("")}
         ${statRow("Checklist total", openTodos(checklist, releaseScope), checklist.length)}
         ${statRow("Commit to-dos open", openCommitTodos, commitTodos)}
         ${statGroup("Commits")}

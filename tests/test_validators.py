@@ -75,8 +75,7 @@ def todo_index(*texts):
 
 def rated(*priorities, **overrides):
     """A model answer that rates the index built from the same number of texts."""
-    data = {"verdict_reason": "Nothing blocks the release.",
-            "ratings": [{"id": f"c0mmit{i}-1", "priority": p} for i, p in enumerate(priorities)]}
+    data = {"ratings": [{"id": f"c0mmit{i}-1", "priority": p} for i, p in enumerate(priorities)]}
     data.update(overrides)
     return data
 
@@ -89,14 +88,12 @@ def normalized(answer, index):
     """
     ratings = release.extract_ratings(answer)
     data = release.normalize_review(answer, index)
-    data.setdefault("verdict_reason", "Nothing blocks the release.")
     data["evidence"] = {key: "none observed" for key in release.EVIDENCE_KEYS}
     return data, ratings
 
 
 def review(**overrides):
     data = {
-        "verdict_reason": "Nothing blocks the release.",
         "checklist": [],
         "breaking_changes": [],
         "evidence": {key: "none observed" for key in release.EVIDENCE_KEYS},
@@ -109,15 +106,16 @@ class ReleaseReviewValidation(unittest.TestCase):
     def test_a_complete_review_passes(self):
         self.assertEqual(release.review_errors(review(), []), [])
 
-    def test_the_verdict_is_computed_from_the_priorities_not_read_from_the_model(self):
+    def test_no_verdict_is_stored_however_hard_the_model_tries(self):
+        """Whether a release ships is the release admin's call. A stored one-word answer is
+        frozen at the moment the model ran, so it is wrong the first time somebody works an
+        item — and a reader who sees it ships on it."""
         index = todo_index("Fix the installer.")
-        data = release.normalize_review({"verdict": "Ready", **rated("P0")}, index)
-        self.assertEqual(data["verdict"], "Blocked")
-        data = release.normalize_review({"verdict": "Blocked", **rated("P1")}, index)
-        self.assertEqual(data["verdict"], "Needs Attention")
-        # Everything deferred is a release that can ship, which is what P2 means.
-        self.assertEqual(release.normalize_review(rated("P2"), index)["verdict"], "Ready")
-        self.assertEqual(release.normalize_review(rated(), {})["verdict"], "Ready")
+        data = release.normalize_review(
+            {"verdict": "Ready", "verdict_reason": "Nothing blocks the release.", **rated("P0")},
+            index)
+        self.assertNotIn("verdict", data)
+        self.assertNotIn("verdict_reason", data)
 
     def test_every_to_do_reaches_the_checklist_whatever_the_model_sent_back(self):
         # The model rates; the caller assembles. An item it forgot is still on the list, in
@@ -156,7 +154,7 @@ class ReleaseReviewValidation(unittest.TestCase):
             {"extra_items": [{"priority": "P0", "text": "Tester report #4120: Snap fails."}]}, {})
         self.assertEqual(data["checklist"][0]["text"], "Tester report #4120: Snap fails.")
         self.assertEqual(data["checklist"][0]["commit"], "")
-        self.assertEqual(data["verdict"], "Blocked")
+        self.assertEqual(data["checklist"][0]["priority"], "P0")
 
     def test_a_misnamed_ratings_list_is_still_found(self):
         # Pi files the same answer under two or three names; a misnamed one must never
@@ -164,44 +162,19 @@ class ReleaseReviewValidation(unittest.TestCase):
         index = todo_index("Fix it.")
         data = release.normalize_review(
             {"priorities": [{"id": "c0mmit0-1", "priority": "P0"}]}, index)
-        self.assertEqual(data["verdict"], "Blocked")
+        self.assertEqual(data["checklist"][0]["priority"], "P0")
 
     def test_a_bare_mapping_of_id_to_priority_is_read_too(self):
         index = todo_index("Fix it.")
         data = release.normalize_review({"ratings": {"c0mmit0-1": "P0"}}, index)
-        self.assertEqual(data["verdict"], "Blocked")
+        self.assertEqual(data["checklist"][0]["priority"], "P0")
 
-    def test_a_ready_verdict_under_blocking_prose_is_caught(self):
-        index = todo_index("Tidy the imports.")
-        data, ratings = normalized(
-            rated("P2", verdict_reason="One P0 remains: the Fedora package is untested."), index)
-        self.assertEqual(data["verdict"], "Ready")
-        errors = release.review_errors(data, [], index, ratings)
-        self.assertTrue(any("describes work that has to happen" in e for e in errors), errors)
-
-    def test_prose_carried_over_a_changed_list_is_caught(self):
-        # The failure this actually caught: a review with ten P1s went out still saying
-        # "Five manual verifications before shipping", copied from the run before it.
-        index = todo_index("Fix the installer.", "Check the docs endpoint.")
-        data, ratings = normalized(
-            rated("P1", "P1", verdict_reason="Five manual verifications before shipping."), index)
-        prior = {"verdict_reason": "Five manual verifications before shipping.",
-                 "checklist": [{"priority": "P1", "text": "Fix the installer."}]}
-        errors = release.review_errors(data, [], index, ratings, prior)
-        self.assertTrue(any("word-for-word" in e for e in errors), errors)
-
-    def test_prose_kept_over_an_unchanged_list_is_fine(self):
-        index = todo_index("Fix the installer.")
-        data, ratings = normalized(
-            rated("P1", verdict_reason="One verification before shipping."), index)
-        prior = {"verdict_reason": "One verification before shipping.",
-                 "checklist": [{"priority": "P1", "text": "Fix the installer."}]}
-        self.assertEqual(release.review_errors(data, [], index, ratings, prior), [])
-
-    def test_an_all_P2_release_with_honest_prose_passes(self):
-        index = todo_index("Tidy the imports.")
-        data, ratings = normalized(
-            rated("P2", verdict_reason="Nothing here needs a tester before shipping."), index)
+    def test_a_list_of_only_P2s_is_still_a_list_of_work(self):
+        # Nothing on a release checklist is somebody else's problem: a P2 is the last thing
+        # a tester gets to before shipping, not the first thing after.
+        index = todo_index("Update the internal CI document.")
+        data, ratings = normalized(rated("P2"), index)
+        self.assertEqual([t["priority"] for t in data["checklist"]], ["P2"])
         self.assertEqual(release.review_errors(data, [], index, ratings), [])
 
     def test_an_empty_breaking_list_under_breaking_prose_is_caught(self):
@@ -210,19 +183,6 @@ class ReleaseReviewValidation(unittest.TestCase):
                       "breaking_changes": "The --foo flag was removed, a breaking change."}
         ), [])
         self.assertTrue(any("breaking_changes is empty" in e for e in errors))
-
-    def test_a_ready_verdict_may_say_nothing_blocks_the_release(self):
-        self.assertEqual(release.review_errors(
-            review(verdict_reason="Nothing blocks the release; no P0s remain.",
-                   verdict="Ready"), []), [])
-
-    def test_a_negation_only_covers_its_own_clause(self):
-        errors = release.review_errors(review(
-            verdict_reason="Nothing else blocks the release, though somebody should "
-                           "confirm the Fedora package before shipping.",
-            verdict="Ready",
-        ), [])
-        self.assertTrue(any("describes work that has to happen" in e for e in errors), errors)
 
     def test_saying_there_are_no_breaking_changes_is_not_a_contradiction(self):
         errors = release.review_errors(review(

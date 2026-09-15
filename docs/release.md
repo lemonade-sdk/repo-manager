@@ -24,7 +24,10 @@ skill.
 
 ## review.json
 
-The maintainer's verdict and the tester's plan.
+The tester's plan. It carries no verdict: whether the release is ready is the release
+admin's call, made from this checklist and from the testing they have watched happen. A stored
+one-word answer, frozen at the moment the model ran, would be wrong the first time somebody
+worked an item and would invite a reader to ship on it.
 
 - `checklist` holds **every** maintainer to-do in the range, in the words the commit review
   wrote, and the skill never touches those words. The digest hands the model an `id` per
@@ -35,14 +38,12 @@ The maintainer's verdict and the tester's plan.
   Each item carries the `commit` it came from, plus `pr_number` and `author` as fields rather
   than text appended to the sentence — which is what lets the dashboard treat the release
   checklist item and the commit's to-do as one to-do, with one checkbox.
-- `priority` is the whole judgement the model contributes: **P0** do not ship until resolved,
-  **P1** verify before shipping, **P2** real work whose deadline is after this release. P2 is
-  a statement about timing, not worth; it is where the code-quality follow-ups and test debt
-  that used to be discarded now live, visible and out of the tester's way.
-- `verdict` is computed from those priorities, never read from the model: `Blocked` with any
-  P0, `Needs Attention` with any P1, `Ready` otherwise. A release whose every open item is P2
-  can ship, which is exactly what P2 means. The two can never disagree, because there is only
-  one of them.
+- `priority` is the whole judgement the model contributes, and every item carrying one is work
+  to do *before* the release ships: **P0** the release does not go out until it is resolved,
+  **P1** check it before shipping because users would feel it, **P2** check it before shipping
+  but do it last. The priority is the order a tester works in, and what tells them where the
+  damage is smallest if a candidate has to go out before the list is finished. Nothing on a
+  release checklist is deferred to after the release.
 - `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.
