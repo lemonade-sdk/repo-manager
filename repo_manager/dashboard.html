@@ -705,6 +705,16 @@
       accent-color: var(--accent);
       cursor: pointer;
     }
+    .todo-item code {
+      background: rgba(31, 119, 180, 0.08);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .todo-item.done code {
+      background: transparent;
+    }
     .todo-item.done > span {
       color: var(--muted);
       text-decoration: line-through;
@@ -1385,9 +1395,12 @@
       const source = number
         ? ` <span class="todo-source">(${number}${item.author ? `, ${esc(item.author)}` : ""})</span>`
         : "";
+      // A to-do now names the command to run, so the backticks around it are rendered rather
+      // than shown. mdInline escapes before it substitutes, and the checkbox is keyed on the
+      // raw text, so neither safety nor identity depends on what is drawn here.
       return `<label class="todo-item ${done ? "done" : ""}">
         <input type="checkbox" class="todo-check" data-index="${index}" ${done ? "checked" : ""}>
-        <span>${esc(item.text)}${source}${
+        <span>${mdInline(item.text)}${source}${
           where.length ? ` <span class="platforms">${where.map(esc).join(", ")}</span>` : ""}</span>
       </label>`;
     }
