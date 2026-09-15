@@ -177,7 +177,9 @@ const verdictClass = (v) => "v-" + String(v || "").replace(/\s+/g, "");
 const pill = (v) => v ? `<span class="pill ${verdictClass(v)}">${esc(v)}</span>` : "";
 const day = (iso) => (iso || "").slice(0, 10);
 const shortSha = (sha) => String(sha || "").slice(0, 7);
-const repoUrl = () => `https://github.com/${DATA.repo || "lemonade-sdk/lemonade"}`;
+const repoUrl = () => DATA.repo ? `https://github.com/${DATA.repo}` : "";
+// Only link when the files told us which repository they came from.
+const link = (path, text) => repoUrl() ? `<a href="${repoUrl()}${path}">${text}</a>` : text;
 
 function matches(text) {
   return !QUERY || String(text).toLowerCase().includes(QUERY);
@@ -230,8 +232,7 @@ function releasesView() {
       `<tr><td>${esc(p.platform)}</td><td>${esc(p.changed)}</td><td>${esc(p.exercise)}</td></tr>`).join("");
     const evidence = Object.entries(r.evidence || {}).map(([k, v]) =>
       `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v)}</dd>`).join("");
-    const issues = (r.candidate_issues || []).map((n) =>
-      `<a href="${repoUrl()}/issues/${n}">#${n}</a>`).join(", ");
+    const issues = (r.candidate_issues || []).map((n) => link(`/issues/${n}`, `#${n}`)).join(", ");
     return `<article class="card">
       <header>
         <h2>${esc(r.bucket)}</h2>
@@ -277,14 +278,14 @@ function commitsView() {
       ${shouts ? `<h3>Shout outs</h3><ul class="todos">${shouts}</ul>` : ""}
       ${evidence ? `<h3>Evidence</h3><dl class="evidence">${evidence}</dl>` : ""}
       <p class="meta">
-        <a href="${repoUrl()}/commit/${esc(c.sha)}">${esc(shortSha(c.sha))}</a>
+        ${link(`/commit/${esc(c.sha)}`, esc(shortSha(c.sha)))}
         ${c.cherry_picked_from ? `&middot; cherry-picked from ${esc(shortSha(c.cherry_picked_from))}` : ""}
         ${c.reviewed_at ? `&middot; reviewed ${esc(day(c.reviewed_at))}` : ""}
       </p></td></tr>` : "";
     return `<tr data-open="c${esc(c.sha)}">
       <td class="nowrap dim">${esc(day(c.committed_at))}</td>
       <td class="nowrap mono">${esc(shortSha(c.sha))}</td>
-      <td class="nowrap">${c.pr_number ? `<a href="${repoUrl()}/pull/${c.pr_number}">#${c.pr_number}</a>` : ""}</td>
+      <td class="nowrap">${c.pr_number ? link(`/pull/${c.pr_number}`, `#${c.pr_number}`) : ""}</td>
       <td class="nowrap hide-narrow">${esc(c.author)}</td>
       <td class="nowrap">${pill(c.verdict)}</td>
       <td>${esc(c.summary || c.subject)}</td></tr>${detail}`;
@@ -319,7 +320,7 @@ function prsView() {
         <span class="result"></span></div>`}
       </td></tr>` : "";
     return `<tr data-open="p${p.number}">
-      <td class="nowrap"><a href="${esc(p.url)}">#${p.number}</a></td>
+      <td class="nowrap">${p.url ? `<a href="${esc(p.url)}">#${p.number}</a>` : `#${p.number}`}</td>
       <td>${esc(p.title)}</td>
       <td class="nowrap hide-narrow">${esc(p.author)}</td>
       <td class="nowrap"><code>${esc(p.label)}</code></td>
