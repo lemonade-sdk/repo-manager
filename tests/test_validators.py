@@ -93,6 +93,38 @@ class AGradeAndAListMustAgree(unittest.TestCase):
         )), [])
 
 
+class EvidenceThatAsksForATodo(unittest.TestCase):
+    """The review saying, in its own evidence, that nobody exercised the thing — over an
+    empty list. Three of forty-one reviews did exactly this."""
+
+    def test_a_confession_with_no_to_do_is_caught(self):
+        errors = commits.validation_errors(commit_review(
+            verdict="Clean", maintainer_todos=[],
+            evidence={**{k: "none observed" for k in commits.EVIDENCE_KEYS},
+                      "manual_release_testing":
+                          "The new auto_evict keys are user-facing via the config CLI. No "
+                          "evidence of a human exercising the behavior end-to-end."},
+        ))
+        self.assertTrue(any("is the to-do" in e or "to-do list is empty" in e for e in errors), errors)
+
+    def test_saying_none_is_needed_is_not_a_confession(self):
+        # "No manual release testing is needed" is the honest answer for a test-only commit.
+        self.assertEqual(commits.validation_errors(commit_review(
+            verdict="Clean", maintainer_todos=[],
+            evidence={**{k: "none observed" for k in commits.EVIDENCE_KEYS},
+                      "manual_release_testing":
+                          "This commit touches only test code. No manual release testing is needed."},
+        )), [])
+
+    def test_a_confession_with_a_to_do_is_fine(self):
+        self.assertEqual(commits.validation_errors(commit_review(
+            verdict="Needs Attention",
+            maintainer_todos=[{"text": "Enable auto_evict and confirm eviction under pressure."}],
+            evidence={**{k: "none observed" for k in commits.EVIDENCE_KEYS},
+                      "manual_release_testing": "No evidence of a human exercising it end-to-end."},
+        )), [])
+
+
 class TodosAreWrittenForATester(unittest.TestCase):
     """A to-do is copied verbatim onto the checklist of somebody who has never seen the code.
     These are the two failures readable off the sentence itself; the rest is the skill's job."""
@@ -129,6 +161,23 @@ class TodosAreWrittenForATester(unittest.TestCase):
     def test_an_english_word_spelled_in_hex_is_not_a_sha(self):
         # "defaced" is seven characters of [a-f]; a real SHA has digits in it.
         self.assertEqual(self.flagged("Check the defaced banner is gone on startup."), [])
+
+    def test_an_item_that_changes_the_repo_is_caught(self):
+        # Seen in the wild: "Add --bind 127.0.0.1 to the commands in examples/README.md". That
+        # is a patch for a maintainer, handed to a tester who cannot edit this project.
+        self.assertTrue(self.flagged(
+            "Add --bind 127.0.0.1 to the http.server commands in examples/README.md, then "
+            "confirm the examples serve only on localhost."))
+
+    def test_changing_a_setting_to_run_a_test_is_not(self):
+        # The distinction is what is being changed: the product's source, or the box you are
+        # testing on. Both of these are setup for a check.
+        for text in (
+            "Set default_model_source=modelscope in the server config, then run lemonade pull "
+            "qwen3-0.6b-FLM and confirm it downloads from ModelScope.",
+            "Add a model with lemonade pull qwen3-0.6b and confirm it appears in the list.",
+        ):
+            self.assertEqual(self.flagged(text), [], text)
 
     def test_an_item_with_no_pass_or_fail_is_caught(self):
         for text in (

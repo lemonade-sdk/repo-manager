@@ -135,6 +135,12 @@ artifact or package, and documented behavior.
 **Passing CI is not a human exercising it** unless the test drives the same path a user would.
 A feature with thorough unit tests and no end-to-end run still needs one.
 
+Two things that look like exemptions and are not. Behavior that only shows up under a setting
+is still user-reachable — the to-do turns the setting on first. A newly published tag, image or
+package is an artifact a user installs, whatever produced it. If you find yourself writing that
+a change is user-visible and nobody exercised it, and then grading it `Clean` with an empty
+list, the sentence you just wrote is the to-do.
+
 The exception is work that ships nothing this release — build-system support for an artifact or
 platform not yet published or advertised. Note the residual risk in evidence; write no to-do.
 

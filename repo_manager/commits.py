@@ -53,6 +53,26 @@ CODE_ALTITUDE = (
     (re.compile(r"(?<![\w/])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![\w/])"), "a commit SHA"),
 )
 
+# A to-do is something to check, not something to change. An item that tells the reader to
+# edit a file in the repository is a fix for a maintainer wearing a tester's clothes, and the
+# tester it reaches has no business editing anything. Only flagged together: "Add a model and
+# confirm it loads" is a test, "Add --bind to examples/README.md" is a patch.
+EDIT_VERB = re.compile(r"^\s*(?:add|remove|delete|rename|move|replace|update|fix|refactor"
+                       r"|revert|bump|drop)\b", re.IGNORECASE)
+REPO_FILE = re.compile(r"\b[\w.-]+\.(?:md|txt|json|ya?ml|toml|cfg|ini|sh|py|h|cpp|c|ts|js)\b",
+                       re.IGNORECASE)
+
+# The review confessing, in its own evidence, that nobody has exercised the thing — while
+# leaving the to-do list empty. Written as the confession rather than run through the negation
+# filter, because here the negative *is* the finding.
+UNEXERCISED = re.compile(
+    r"no evidence (?:of|that)\s+(?:a\s+)?(?:human|anyone|someone|maintainer|tester)"
+    r"[^.]{0,60}(?:exercis|test|verif|ran\b|run\b)"
+    r"|(?:has|have) not been (?:manually )?(?:exercised|tested|verified)"
+    r"|never been (?:manually )?(?:exercised|tested|verified)",
+    re.IGNORECASE,
+)
+
 # Openers with no pass and no fail. "Verify that X" is a task; "verify whether X" is a
 # question, and the tester has nothing to report back either way.
 NO_OUTCOME = re.compile(
@@ -105,6 +125,15 @@ def validation_errors(data):
             "why the behavior is not in the release surface."
         )
     evidence = data.get("evidence")
+    if isinstance(evidence, dict) and not todos:
+        confession = UNEXERCISED.search(str(evidence.get("manual_release_testing", "")))
+        if confession:
+            errors.append(
+                f'evidence.manual_release_testing says "{confession.group(0)[:70]}" and the to-do '
+                "list is empty. That sentence is the reason to write one: say what a tester "
+                "should do to the release candidate and what they should see. If the behavior "
+                "is not in the release surface, say that instead."
+            )
     if not isinstance(evidence, dict):
         errors.append("evidence is required: an object with one or two sentences per key.")
     else:
@@ -145,6 +174,13 @@ def todo_errors(todos):
                     "move it into evidence and drop the to-do."
                 )
                 break
+        if EDIT_VERB.match(text) and REPO_FILE.search(text):
+            errors.append(
+                f"maintainer_todos[{index}] tells the reader to change a file in the repository. "
+                "A to-do is something to check, not something to fix — the tester it reaches "
+                "cannot edit this project. Write the check that would catch the problem, or put "
+                "the fix in evidence for a maintainer."
+            )
         if NO_OUTCOME.match(text):
             errors.append(
                 f"maintainer_todos[{index}] opens with \"{text.split()[0]}\", so it has no pass "

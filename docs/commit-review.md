@@ -98,6 +98,14 @@ the list of problems and its own previous attempt:
   direction, though: `Needs Attention` with an empty list is a normal review of a test-only
   commit whose late change nobody re-reviewed — a maintainer should know, a tester has
   nothing to do.
+- **A to-do is something to check, not something to fix.** An item telling the reader to edit
+  a file in the repository is a maintainer's patch wearing a tester's clothes. Changing a
+  setting to set a test up is not the same thing, so both signals are required before it is
+  rejected: an editing verb *and* a repository file.
+- **Evidence that asks for a to-do gets one.** A review whose `manual_release_testing` says
+  nobody has exercised the change, over an empty list, is rejected — that sentence is the
+  reason to write the item. Saying no manual testing is needed is the honest answer for a
+  test-only commit and passes.
 - **Every to-do is one a tester could carry out.** Two failures are readable off the sentence
   itself and are rejected: naming something only the source explains (a function call, a
   source file, a build file, a commit SHA), and opening with a verb that has no pass and no
