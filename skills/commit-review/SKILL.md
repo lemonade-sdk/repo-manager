@@ -231,9 +231,19 @@ Treat problematic post-approval commits as review-quality failures. Use `Blocker
 
 If the commit introduces significant shipped or documented behavior that should be manually tested before release, the verdict cannot be `Clean`; use `Needs Attention` with a maintainer to-do unless the missing manual testing creates serious release risk, in which case use `Blocker`. If the behavior is not in the release surface, manual testing may be mentioned as residual risk without changing a `Clean` verdict.
 
+The verdict and the to-do list answer two different questions, and they move independently.
+The verdict is about **a maintainer's attention**: is there something here somebody who owns
+this project should know about? The to-do list is about **a tester's work**: is there something
+somebody has to exercise on the release candidate? A test-only commit with a late unreviewed
+change needs the first and produces none of the second, and that is a `Needs Attention` with an
+empty list — not a contradiction, and not a reason to invent an errand to justify the grade.
+
+The one direction that is fixed: a to-do means the verdict is not `Clean`. Work somebody has to
+do before shipping is, by definition, attention.
+
 Keep the verdict, one-sentence explanation, maintainer to-do list, and evidence internally consistent:
 
-- If somebody has to exercise this release by hand before it ships, the verdict cannot be `Clean`; write that exercise as a to-do. An internal concern recorded only in evidence does not by itself raise the verdict — plenty of real findings are notes to a maintainer rather than work anybody has to do first.
+- If somebody has to exercise this release by hand before it ships, the verdict cannot be `Clean`, and that exercise is a to-do rather than a sentence in evidence.
 - If the verdict is `Clean`, do not include language like "should verify before release", "maintainer should check", or "warrants manual verification" unless you explicitly conclude it is not part of the release surface and does not require maintainer action.
 - If you are unsure whether the behavior is in the release surface, decide that here, on the evidence you have — it is your judgement, not the tester's errand. When it is in, write the test as a to-do. When it is out, say so in evidence and leave the list alone. What you must not do is hand the uncertainty over as an item, because "check whether this matters" is not something anybody can carry out.
 - Attribute findings carefully. Do not credit a shout out or major catch to a reviewer unless the evidence clearly supports that attribution.
