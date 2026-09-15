@@ -222,6 +222,9 @@ def normalize_platforms(value):
         if hit not in matched:
             matched.append(hit)
     ordered = [p for p in PLATFORMS if p in matched] + [p for p in matched if p not in PLATFORMS]
+    # Naming every platform is the same claim as "all", written seven times.
+    if set(ordered) >= set(PLATFORMS):
+        return [ALL_PLATFORMS]
     return ordered or [ALL_PLATFORMS]
 
 

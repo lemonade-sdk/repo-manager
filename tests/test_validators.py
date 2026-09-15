@@ -311,3 +311,15 @@ class BotsAreNotContributors(unittest.TestCase):
         digest = release.announcement_digest(rows)
         self.assertEqual(digest[0]["author"], "@popey")
         self.assertEqual(digest[0]["credits"], ["@bitgamma"])
+
+
+class PlatformShorthand(unittest.TestCase):
+    def test_naming_every_platform_collapses_to_all(self):
+        data = release.normalize_review({"checklist": [
+            {"priority": "P1", "text": "Check the version.", "platforms": list(release.PLATFORMS)}]})
+        self.assertEqual(data["checklist"][0]["platforms"], ["all"])
+
+    def test_naming_most_of_them_does_not(self):
+        data = release.normalize_review({"checklist": [
+            {"priority": "P1", "text": "Check the version.", "platforms": list(release.PLATFORMS[:-1])}]})
+        self.assertEqual(data["checklist"][0]["platforms"], list(release.PLATFORMS[:-1]))
