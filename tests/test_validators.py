@@ -271,3 +271,42 @@ class StoredShape(unittest.TestCase):
 
     def test_no_to_dos_is_an_empty_list_not_a_missing_key(self):
         self.assertEqual(commits.normalize_todos(None), [])
+
+
+class TheClosingLink(unittest.TestCase):
+    """Banning the wrong link without requiring a right one is how the post ended up with
+    none: told only that `releases/tag/v2026.39` was wrong, the model dropped the link and
+    closed with "check out the full release notes on GitHub" pointing at nothing."""
+
+    POST = "## Lemonade v2026.39\n\n@everyone here we go.\n\n"
+
+    def errors(self, tail):
+        return release.announcement_errors(
+            self.POST + tail, [], hotfix=False, bucket="v2026.39", repo="lemonade-sdk/lemonade")
+
+    def test_a_post_with_no_link_at_all_is_rejected(self):
+        self.assertTrue(any("no link" in e for e in self.errors("Full notes on GitHub!\n")))
+
+    def test_the_releases_page_satisfies_it(self):
+        self.assertEqual(self.errors("https://github.com/lemonade-sdk/lemonade/releases\n"), [])
+
+    def test_the_bucket_link_is_still_rejected_even_though_it_is_a_link(self):
+        errors = self.errors("https://github.com/lemonade-sdk/lemonade/releases/tag/v2026.39\n")
+        self.assertTrue(any("will never exist" in e for e in errors))
+        self.assertFalse(any("no link" in e for e in errors))
+
+
+class BotsAreNotContributors(unittest.TestCase):
+    def test_a_bot_author_is_not_offered_to_the_announcement(self):
+        rows = [{"author": "@github-actions[bot]", "summary": "Bump the pins.",
+                 "shout_outs": ["@dependabot"], "evidence": {}}]
+        digest = release.announcement_digest(rows)
+        self.assertEqual(digest[0]["author"], "")
+        self.assertEqual(digest[0]["credits"], [])
+
+    def test_a_person_is_still_offered(self):
+        rows = [{"author": "@popey", "summary": "Fix the filter.",
+                 "shout_outs": ["@bitgamma"], "evidence": {}}]
+        digest = release.announcement_digest(rows)
+        self.assertEqual(digest[0]["author"], "@popey")
+        self.assertEqual(digest[0]["credits"], ["@bitgamma"])

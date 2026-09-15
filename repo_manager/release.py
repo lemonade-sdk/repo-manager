@@ -522,11 +522,27 @@ def bucket_as_tag_errors(markdown, bucket, where):
     return []
 
 
-def announcement_errors(markdown, canonical, hotfix, bucket=""):
+def closing_link_errors(markdown, repo):
+    """The post has to leave the reader somewhere to go.
+
+    Paired with the rule above on purpose: told only that one URL is wrong, the model dropped
+    the link altogether and closed with "check out the full release notes on GitHub" pointing
+    at nothing.
+    """
+    if re.search(r"https?://\S+", markdown or ""):
+        return []
+    return [
+        "The closing line has no link. Send the reader to the releases page: "
+        f"https://github.com/{repo}/releases"
+    ]
+
+
+def announcement_errors(markdown, canonical, hotfix, bucket="", repo=""):
     text = (markdown or "").strip()
     if not text:
         return ["announcement.md is empty."]
     errors = bucket_as_tag_errors(text, bucket, "The announcement") if bucket else []
+    errors += closing_link_errors(text, repo) if repo else []
     lines = [line for line in text.splitlines() if line.strip()]
     if len(lines) > MAX_ANNOUNCEMENT_LINES:
         errors.append(
@@ -640,13 +656,22 @@ def prior_announcements_block(ctx, bucket, limit=3):
     )
 
 
+BOT_HANDLE = re.compile(r"\[bot\]$|^@(github-actions|dependabot|renovate)\b", re.IGNORECASE)
+
+
+def human(handle):
+    """A bot is not somebody to thank. It authors dependency bumps, and crediting it puts a
+    Discord ping on an account nobody reads."""
+    return "" if BOT_HANDLE.search(str(handle or "")) else handle
+
+
 def announcement_digest(rows):
     """What the announcement is allowed to draw on: outcomes and the people behind them."""
     return [
         {
-            "author": row["author"],
+            "author": human(row["author"]),
             "summary": row["summary"],
-            "credits": row["shout_outs"],
+            "credits": [c for c in (human(c) for c in row["shout_outs"]) if c],
             "docs": " ".join(str(row["evidence"].get("documentation", "")).split())[:200],
         }
         for row in rows
@@ -749,7 +774,7 @@ fixes be subsumed by the outcome they enabled.
 
     def validate(contents):
         text = contents["announcement"]
-        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name)
+        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo)
 
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,
                     checkout=str(bucket.checkout.path))
