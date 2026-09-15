@@ -81,6 +81,28 @@ def validation_errors(data):
     return errors
 
 
+def normalize_todos(value):
+    """One shape for `maintainer_todos`, whatever the model emitted.
+
+    Pi writes a to-do as an object about four times in five and as a bare string the rest of
+    the time. Every reader here copes with both, but the files are the store: somebody running
+    `jq` over them should not have to.
+    """
+    items = []
+    for item in value if isinstance(value, list) else []:
+        if isinstance(item, dict):
+            text = next(
+                (str(item[key]).strip() for key in ("text", "todo", "task", "action", "description")
+                 if str(item.get(key, "")).strip()),
+                "",
+            )
+            if text:
+                items.append({**item, "text": text})
+        elif item is not None and str(item).strip():
+            items.append({"text": str(item).strip()})
+    return items
+
+
 def origin_commit(checkout, sha):
     """The commit a review should attribute: the original when this one is a cherry-pick."""
     source = checkout.cherry_pick_source(sha)
@@ -152,6 +174,7 @@ def review(ctx, sha, bucket, branch="main", range_start="", force=False):
         "committed_at": meta.get("committed_at", ""),
         "subject": meta.get("subject", ""),
         "verdict": normalize_verdict(data.get("verdict")),
+        "maintainer_todos": normalize_todos(data.get("maintainer_todos")),
         "reviewed_at": ctx.now_iso(),
         "generation_seconds": round(time.monotonic() - started, 1),
     })

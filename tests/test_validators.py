@@ -222,3 +222,29 @@ class ArtifactReconciliation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoredShape(unittest.TestCase):
+    """The files are the store, so what lands in them has one shape per field."""
+
+    def test_a_bare_string_to_do_becomes_an_object(self):
+        self.assertEqual(
+            commits.normalize_todos(["Run the installer on Fedora."]),
+            [{"text": "Run the installer on Fedora."}],
+        )
+
+    def test_an_object_to_do_keeps_its_other_fields(self):
+        self.assertEqual(
+            commits.normalize_todos([{"text": "Check X.", "priority": "P1"}]),
+            [{"text": "Check X.", "priority": "P1"}],
+        )
+
+    def test_a_to_do_filed_under_another_key_is_found(self):
+        self.assertEqual(commits.normalize_todos([{"action": "Check X."}]),
+                         [{"action": "Check X.", "text": "Check X."}])
+
+    def test_empty_and_unusable_entries_are_dropped(self):
+        self.assertEqual(commits.normalize_todos(["", {"text": "   "}, {}, None]), [])
+
+    def test_no_to_dos_is_an_empty_list_not_a_missing_key(self):
+        self.assertEqual(commits.normalize_todos(None), [])
