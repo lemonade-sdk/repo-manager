@@ -84,6 +84,12 @@ the list of problems and its own previous attempt:
   maintainer has to verify something is rejected. That is the worst output the skill can
   produce: the reader sees the grade and ships. Negated claims are read as what they are, so
   "no maintainer action needed" passes.
+- **A `Clean` grade carries no to-dos.** Work somebody has to do before this ships is
+  attention by definition, so a list under `Clean` reaches the reader as a grade saying
+  nothing is needed above a list of things that are. The two move independently in the other
+  direction, though: `Needs Attention` with an empty list is a normal review of a test-only
+  commit whose late change nobody re-reviewed — a maintainer should know, a tester has
+  nothing to do.
 - **Every to-do is one a tester could carry out.** Two failures are readable off the sentence
   itself and are rejected: naming something only the source explains (a function call, a
   source file, a build file, a commit SHA), and opening with a verb that has no pass and no

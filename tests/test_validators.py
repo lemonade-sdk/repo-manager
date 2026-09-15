@@ -55,13 +55,42 @@ class CommitReviewValidation(unittest.TestCase):
             verdict_reason="No maintainer action needed; nothing needs manual verification."
         )), [])
 
-    def test_a_clean_verdict_with_a_to_do_is_allowed_to_mention_verification(self):
-        # The contradiction is an empty list, not the word: with a to-do the reader is told.
-        errors = commits.validation_errors(commit_review(
+    def test_a_verdict_that_names_verification_carries_the_to_do_and_the_grade(self):
+        # A reason that says somebody must verify something, with the to-do that says how, is
+        # a complete review — at Needs Attention. Saying it over `Clean` is the false green
+        # this guard exists for, whether or not a list sits under it.
+        content = dict(
             verdict_reason="A maintainer should verify the installer on Fedora.",
             maintainer_todos=[{"text": "Install the Fedora package and start the server."}],
+        )
+        self.assertEqual(commits.validation_errors(
+            commit_review(verdict="Needs Attention", **content)), [])
+        self.assertTrue(commits.validation_errors(commit_review(verdict="Clean", **content)))
+
+
+class AGradeAndAListMustAgree(unittest.TestCase):
+    def test_clean_cannot_carry_a_to_do(self):
+        # Seen in the wild: two perfectly good tester instructions under a grade that says
+        # nothing is needed. The reader believes the grade.
+        errors = commits.validation_errors(commit_review(
+            verdict="Clean",
+            maintainer_todos=[{"text": "Run lemonade-server --version and confirm 2026.39.1."}],
         ))
-        self.assertEqual(errors, [])
+        self.assertTrue(any("Clean but there is 1 to-do" in e for e in errors), errors)
+
+    def test_needs_attention_may_carry_none(self):
+        # The two move independently: a test-only commit with a late unreviewed change needs
+        # a maintainer and gives a tester nothing to do.
+        self.assertEqual(commits.validation_errors(commit_review(
+            verdict="Needs Attention", maintainer_todos=[],
+            verdict_reason="A post-approval commit changed test behavior without re-review.",
+        )), [])
+
+    def test_clean_with_an_empty_list_is_the_ordinary_case(self):
+        self.assertEqual(commits.validation_errors(commit_review(
+            verdict="Clean", maintainer_todos=[],
+            verdict_reason="Focused refactor with tests and no user-visible change.",
+        )), [])
 
 
 class TodosAreWrittenForATester(unittest.TestCase):

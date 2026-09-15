@@ -88,6 +88,16 @@ def validation_errors(data):
     if not isinstance(todos, list):
         errors.append("maintainer_todos must be a list, empty when there is nothing to do.")
         todos = []
+    # Work somebody has to do before shipping is, by definition, attention. The skill says so
+    # and then writes `Clean` over a list of two anyway, which reaches a reader as a grade that
+    # says nothing is needed above a list of things that are.
+    if verdict == "Clean" and todos:
+        errors.append(
+            f"verdict is Clean but there {'is 1 to-do' if len(todos) == 1 else f'are {len(todos)} to-dos'} "
+            "below it. A to-do is work somebody has to do before this ships, so the verdict is "
+            "Needs Attention at least — or, if nobody actually has to do these, they are notes "
+            "for evidence and the list should be empty."
+        )
     if verdict == "Clean" and not todos and prose.asserts(reason, FALSE_GREEN, NOT_REALLY):
         errors.append(
             "verdict is Clean but verdict_reason still says a maintainer has to verify something — "
