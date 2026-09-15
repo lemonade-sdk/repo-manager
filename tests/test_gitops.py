@@ -72,3 +72,83 @@ class ReadingCommits(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhatTheRangeActuallyShips(TempDirCase):
+    """The shape that bit us on v11.9.0 → v2026.39.
+
+    lemonade fixed a bug on the release branch and on main independently, tagged the release
+    branch, then merged the tag into main so `git describe` works. Main therefore holds both
+    copies of one patch, and the tag excludes only its own — so a plain `tag..main` range hands
+    the reviewer a change users already have, plus a merge that ships nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.repo = init_repo(self.tmp / "repo")
+        commit_file(self.repo, "b.txt", "broken\n", "first")
+        git(self.repo, "branch", "release")
+        # The fix, on the release branch, tagged.
+        git(self.repo, "checkout", "-q", "release")
+        self.tagged = commit_file(self.repo, "b.txt", "fixed\n", "fix the thing (#3386) (#3477)")
+        git(self.repo, "tag", "v1.0.0")
+        # Main moved on, so when the same fix is written again there it has a different parent
+        # and a different SHA — which is exactly why git cannot tell the two copies apart by
+        # ancestry, and exactly what made this worth catching.
+        git(self.repo, "checkout", "-q", "main")
+        commit_file(self.repo, "a.txt", "meanwhile\n", "unrelated work on main")
+        self.twin = commit_file(self.repo, "b.txt", "fixed\n", "fix the thing (#3386) (#3477)")
+        # Linking the tag into main's history, which is what defeats --cherry-pick.
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "chore: link v1.0.0 into main history", "v1.0.0")
+        self.merge = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.real = commit_file(self.repo, "c.txt", "new\n", "a genuinely new change")
+        self.checkout = gitops.Checkout(self.repo)
+
+    def test_the_setup_really_is_the_one_that_bit_us(self):
+        self.assertNotEqual(self.tagged, self.twin)
+        # The tag is reachable from main, so the symmetric difference has no left side and
+        # `--cherry-pick` has nothing to match the duplicate against.
+        self.assertEqual(
+            git(self.repo, "merge-base", "--is-ancestor", self.tagged, "main", check=False).returncode, 0
+        )
+        plain = git(self.repo, "rev-list", "v1.0.0..main").stdout.split()
+        self.assertIn(self.twin, plain)
+        self.assertIn(self.merge, plain)
+
+    def test_a_patch_that_already_shipped_is_not_reviewed_again(self):
+        self.assertNotIn(self.twin, self.checkout.commits("v1.0.0", "main"))
+
+    def test_a_merge_that_ships_nothing_is_not_reviewed(self):
+        self.assertNotIn(self.merge, self.checkout.commits("v1.0.0", "main"))
+
+    def test_the_genuinely_new_commit_survives(self):
+        shipped = self.checkout.commits("v1.0.0", "main")
+        self.assertIn(self.real, shipped)
+        self.assertNotIn(self.twin, shipped)
+        self.assertNotIn(self.merge, shipped)
+
+    def test_a_merge_that_kept_a_conflict_resolution_is_reviewed(self):
+        # A merge whose tree differs from its first parent decided something, so it stays.
+        git(self.repo, "checkout", "-q", "-b", "topic", self.real)
+        commit_file(self.repo, "c.txt", "theirs\n", "topic edit")
+        git(self.repo, "checkout", "-q", "main")
+        commit_file(self.repo, "c.txt", "ours\n", "main edit")
+        git(self.repo, "merge", "-q", "--no-ff", "topic", check=False)
+        (self.repo / "c.txt").write_text("resolved\n")
+        git(self.repo, "add", "c.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        resolved = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertFalse(self.checkout.is_empty_merge(resolved))
+        self.assertIn(resolved, self.checkout.commits("v1.0.0", "main"))
+
+    def test_the_same_message_with_a_different_patch_is_still_reviewed(self):
+        # Only the diff decides. A commit that reuses a shipped subject but changes something
+        # else is new work.
+        again = commit_file(self.repo, "b.txt", "fixed differently\n", "fix the thing (#3386) (#3477)")
+        self.assertIn(again, self.checkout.commits("v1.0.0", "main"))
+
+    def test_patch_ids_pair_a_sha_with_the_hash_of_its_diff(self):
+        ids = self.checkout.patch_ids("v1.0.0..main")
+        self.assertIn(self.twin, ids)
+        tagged = self.checkout.patch_ids("--max-count", "5", "v1.0.0")
+        self.assertEqual(ids[self.twin], tagged[self.tagged])

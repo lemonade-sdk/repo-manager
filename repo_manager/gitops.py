@@ -55,10 +55,72 @@ class Checkout:
         listed = self.out("tag", "--list", "v*").splitlines()
         return buckets.sort_tags(tag.strip() for tag in listed if tag.strip())
 
+    # How far back to look for a patch this range start already delivered. A duplicate is
+    # always near the tag in time — it is the same fix landing on both the release branch and
+    # main — so a couple of hundred commits is generous and keeps the walk cheap.
+    SHIPPED_WINDOW = 200
+
     def commits(self, start, end):
-        """Commits in `start..end`, oldest first. An empty start means every commit up to end."""
+        """Commits in `start..end`, oldest first — the ones this range actually ships.
+
+        Two kinds of commit are in that range without shipping anything, and both would be
+        reviewed, digested, and written up as new work:
+
+        A **merge that carries no change of its own.** lemonade squash-merges, so a real merge
+        commit is an integration artifact; the one that links a release tag back into main has
+        an empty diff against both its parents. A merge that *does* differ from its first
+        parent kept a conflict resolution, so it stays.
+
+        A **patch that already shipped under another SHA.** A fix applied to the release branch
+        and to main lands as two commits with one patch-id. Git sees no ancestry between them,
+        so the tag does not exclude main's copy — and `--cherry-pick` cannot help once the tag
+        has been merged into main, because then the symmetric difference has no left side to
+        match against. Comparing patch-ids is what catches it.
+        """
         rev = f"{start}..{end}" if start else end
-        return [line.strip() for line in self.out("rev-list", "--reverse", rev).splitlines() if line.strip()]
+        shas = [line.strip() for line in self.out("rev-list", "--reverse", rev).splitlines() if line.strip()]
+        shas = [sha for sha in shas if not self.is_empty_merge(sha)]
+        if not start or not shas:
+            return shas
+        shipped = set(self.patch_ids("--max-count", str(self.SHIPPED_WINDOW), start).values())
+        if not shipped:
+            return shas
+        mine = self.patch_ids(rev)
+        duplicates = {sha for sha, patch in mine.items() if patch in shipped}
+        for sha in shas:
+            if sha in duplicates:
+                print(
+                    f"Skipping {sha[:7]}: its patch already shipped in {start} under another SHA.",
+                    flush=True,
+                )
+        return [sha for sha in shas if sha not in duplicates]
+
+    def is_empty_merge(self, sha):
+        """A merge whose tree matches its first parent contributed nothing to review."""
+        parents = self.out("rev-list", "--parents", "-n", "1", sha, check=False).split()
+        if len(parents) < 3:
+            return False
+        return not self.out("diff", "--name-only", f"{sha}^1", sha, check=False).strip()
+
+    def patch_ids(self, *rev_args):
+        """{sha: patch-id} for the non-merge commits named by these rev-list arguments.
+
+        A patch-id is a hash of the diff, so the same change written on two branches has one
+        id whatever its SHA or its commit message says.
+        """
+        log = self.git("log", "--no-merges", "-p", "--format=commit %H", *rev_args, check=False)
+        if log.returncode != 0 or not log.stdout:
+            return {}
+        result = subprocess.run(
+            ["git", "patch-id", "--stable"], input=log.stdout, text=True,
+            capture_output=True, check=False,
+        )
+        ids = {}
+        for line in (result.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                ids[parts[1]] = parts[0]
+        return ids
 
     def commit_meta(self, sha):
         raw = self.out("show", "-s", "--format=%H%x00%cI%x00%an%x00%s%x00%B", sha)
