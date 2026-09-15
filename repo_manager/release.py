@@ -14,9 +14,10 @@ from repo_manager import buckets, github, gitops, prose, store
 from repo_manager.pi import extract_json_object, generate
 
 
-# The platforms a release is hand-tested on. The tester plan carries one entry per platform
-# so a tester can pick up the row for the machine in front of them and know what to try.
+# The platforms a release is hand-tested on. Every checklist item names the ones it applies
+# to, so a tester picking up a Fedora box reads only the items that concern them.
 PLATFORMS = ("Windows", "Ubuntu PPA", "Snap", "Docker", "macOS", "Fedora", "Debian")
+ALL_PLATFORMS = "all"
 
 CANDIDATE_LABEL = "candidate"
 MAX_ANNOUNCEMENT_LINES = 45
@@ -136,11 +137,11 @@ def normalize_priority(value):
 # `open_todos` and under `todos`. Recognize the list by what its key name implies rather than
 # chasing an ever-growing allowlist — the verdict is derived from that list, so a
 # misnamed-but-present list must never collapse into a false "Ready".
-TODO_KEY_HINTS = ("todo", "action", "risk", "recommend", "blocker", "attention")
+TODO_KEY_HINTS = ("checklist", "todo", "action", "risk", "recommend", "blocker", "attention")
 
 
 def extract_todos(data):
-    documented = data.get("prioritized_todos")
+    documented = data.get("checklist") or data.get("prioritized_todos")
     if isinstance(documented, list) and documented:
         return documented
     for key, value in data.items():
@@ -181,16 +182,19 @@ def normalize_review(data):
         if isinstance(item, dict):
             text = todo_text(item)
             if text:
-                todos.append({"priority": normalize_priority(item.get("priority")), "text": text})
+                todos.append({
+                    "priority": normalize_priority(item.get("priority")),
+                    "platforms": normalize_platforms(item.get("platforms")),
+                    "text": text,
+                })
         elif str(item).strip():
-            todos.append({"priority": "P1", "text": str(item).strip()})
-    data["prioritized_todos"] = todos
+            todos.append({"priority": "P1", "platforms": [ALL_PLATFORMS], "text": str(item).strip()})
+    data["checklist"] = todos
     data["breaking_changes"] = normalize_breaking_changes(
         data.get("breaking_changes")
         or ((data.get("evidence") or {}) if isinstance(data.get("evidence"), dict) else {}).get("breaking_changes_list")
     )
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
-    data["tester_plan"] = normalize_tester_plan(data.get("tester_plan"))
     if any(todo["priority"] == "P0" for todo in todos):
         data["verdict"] = "Blocked"
     elif todos:
@@ -200,27 +204,25 @@ def normalize_review(data):
     return data
 
 
-def normalize_tester_plan(value):
-    """One entry per platform, in the canonical order, whatever shape Pi used."""
-    by_platform = {}
-    entries = value if isinstance(value, list) else []
-    if isinstance(value, dict):
-        entries = [{"platform": key, **item} if isinstance(item, dict) else {"platform": key, "exercise": str(item)}
-                   for key, item in value.items()]
-    for entry in entries:
-        if not isinstance(entry, dict):
+def normalize_platforms(value):
+    """The platforms an item applies to, in the caller's order, spelled the caller's way.
+
+    An item that names nothing applies everywhere: a tester should never have to guess whether
+    silence means "all of them" or "we forgot".
+    """
+    names = value if isinstance(value, list) else ([value] if isinstance(value, str) else [])
+    matched = []
+    for name in names:
+        text = str(name or "").strip()
+        if not text:
             continue
-        name = str(entry.get("platform") or entry.get("name") or "").strip()
-        match = next((p for p in PLATFORMS if p.lower() == name.lower()), name)
-        if match:
-            by_platform[match] = {
-                "platform": match,
-                "changed": str(entry.get("changed") or entry.get("what_changed") or "").strip(),
-                "exercise": str(entry.get("exercise") or entry.get("test") or entry.get("what_to_test") or "").strip(),
-            }
-    return [by_platform[p] for p in PLATFORMS if p in by_platform] + [
-        entry for name, entry in by_platform.items() if name not in PLATFORMS
-    ]
+        if text.lower() == ALL_PLATFORMS:
+            return [ALL_PLATFORMS]
+        hit = next((p for p in PLATFORMS if p.lower() == text.lower()), text)
+        if hit not in matched:
+            matched.append(hit)
+    ordered = [p for p in PLATFORMS if p in matched] + [p for p in matched if p not in PLATFORMS]
+    return ordered or [ALL_PLATFORMS]
 
 
 FALSE_GREEN = re.compile(
@@ -245,14 +247,14 @@ def review_errors(data, issues):
     prose that describes breaking changes.
     """
     errors = []
-    todos = data.get("prioritized_todos") or []
+    todos = data.get("checklist") or []
     reason = str(data.get("verdict_reason", "")).strip()
     if not reason:
         errors.append("verdict_reason is required: one or two sentences answering 'can we ship?'.")
     if not todos and prose.asserts(reason, FALSE_GREEN, NOT_BLOCKING):
         errors.append(
-            "prioritized_todos is empty but verdict_reason still describes blocking or to-verify "
-            "work — put each such item in prioritized_todos so the verdict reflects it."
+            "checklist is empty but verdict_reason still describes work a tester has to do — "
+            "put each such item on the checklist so the verdict reflects it."
         )
     evidence = data.get("evidence") or {}
     for key in EVIDENCE_KEYS:
@@ -269,21 +271,20 @@ def review_errors(data, issues):
             "changes — enumerate every user-facing breaking change in the list, one entry each with "
             "its migration, since the notes and the announcement are reconciled against it."
         )
-    plan = {entry["platform"] for entry in data.get("tester_plan") or []}
-    for platform in PLATFORMS:
-        if platform not in plan:
-            errors.append(f"tester_plan is missing {platform}; every platform needs an entry.")
-    for entry in data.get("tester_plan") or []:
-        if not entry.get("changed"):
-            errors.append(f"tester_plan[{entry['platform']}].changed is required (say 'nothing in this bucket' when true).")
-        if not entry.get("exercise"):
-            errors.append(f"tester_plan[{entry['platform']}].exercise is required: what a tester should try.")
+    known = {p.lower() for p in PLATFORMS} | {ALL_PLATFORMS}
+    for index, todo in enumerate(todos):
+        unknown = [p for p in todo.get("platforms", []) if p.lower() not in known]
+        if unknown:
+            errors.append(
+                f"checklist[{index}].platforms names {', '.join(unknown)}, which is not a platform "
+                f"this project tests on. Use one or more of {', '.join(PLATFORMS)}, or \"all\"."
+            )
     listed = " ".join(todo["text"] for todo in todos)
     for issue in issues:
         if f"#{issue['number']}" not in listed:
             errors.append(
-                f"Open {CANDIDATE_LABEL} issue #{issue['number']} ({issue.get('title', '')}) is not in "
-                "prioritized_todos — every tester report needs a to-do naming the outcome to choose "
+                f"Open {CANDIDATE_LABEL} issue #{issue['number']} ({issue.get('title', '')}) is not on "
+                "the checklist — every tester report needs an item naming the outcome to choose "
                 "(fix later, hotfix, or revert)."
             )
     return errors
@@ -312,7 +313,7 @@ def prior_review_block(ctx, bucket):
     prior = {
         "verdict": data.get("verdict", ""),
         "verdict_reason": data.get("verdict_reason", ""),
-        "prioritized_todos": data.get("prioritized_todos", []),
+        "checklist": data.get("checklist", []),
         "breaking_changes": data.get("breaking_changes", []),
     }
     return (
@@ -347,15 +348,12 @@ Head SHA: {bucket.head}
 Write the machine-readable JSON result to: {path}
 
 {prior_review_block(ctx, bucket)}{issues_block(issues)}
-## Tester plan
-
-`tester_plan` carries one entry per platform below, in this order. For each, say what
-changed in this bucket that touches it (`changed`, or "nothing in this bucket" when nothing
-did) and what a human should exercise on it (`exercise`). Draw both from the commit reviews'
-`manual_release_testing` and `documentation` evidence — a platform nothing touched still
-gets the smoke check that proves the build works there.
+## Platforms this project is tested on
 
 {platforms}
+
+Every checklist item names the platforms it applies to in `platforms`, or `["all"]`. Do not
+write an item for a platform this release did not touch.
 
 ## Per-commit digest of the stored commit reviews
 
@@ -364,15 +362,15 @@ do not count the entries yourself.
 {coverage}
 {json.dumps(rows, indent=2)}
 
-Final reminders: a to-do earns its place only if the maintainer would regret shipping
-without it AND users would notice the consequence; omit everything else entirely (there is
-no P2). Each to-do is one actionable sentence — action, user-visible stake, how to check —
-marked P0 or P1, and ends with an attribution tag naming who to ask and the source PR(s),
-pulled from the digest `pr_number`/`author` fields: `(#1234, @author)`. Merge related
-concerns into shared to-dos. The verdict is computed from your to-do list, so you cannot
-contradict it. `verdict_reason`, the to-dos, and the evidence are for a human who has never
-seen this digest: name the feature or behavior, and let `verdict_reason` be just your
-one-or-two-sentence answer to "can we ship?".
+Final reminders: the checklist is the artifact, and its reader is a tester working through a
+release candidate. An item earns its place only if somebody would regret shipping without
+checking it AND users would notice the consequence; omit everything else entirely (there is no
+P2). Each item is one actionable sentence — action, user-visible stake, how to tell whether it
+worked — marked P0 or P1, naming the platforms it applies to, and ending with the source PR(s)
+and handle(s) from the digest: `(#1234, @author)`. Merge related concerns into one item. The
+verdict is computed from the checklist, so you cannot contradict it. `verdict_reason` and the
+evidence are read by somebody who has never seen this digest: name the feature or behavior,
+and let `verdict_reason` be just your one-or-two-sentence answer to "can we ship?".
 
 {feedback}"""
 

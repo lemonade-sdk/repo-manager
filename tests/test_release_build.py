@@ -19,10 +19,8 @@ NOTES = "## Headline\n\n- One.\n- Two.\n- Three.\n\n## Breaking Changes\n"
 POST = "## Lemonade v2026.39\n\n@everyone three good things landed.\n"
 REVIEW = {
     "verdict_reason": "Nothing blocks the release.",
-    "prioritized_todos": [],
+    "checklist": [],
     "breaking_changes": [],
-    "tester_plan": [{"platform": p, "changed": "nothing in this bucket", "exercise": "Smoke test."}
-                    for p in release.PLATFORMS],
     "evidence": {key: "none observed" for key in release.EVIDENCE_KEYS},
 }
 
@@ -85,7 +83,6 @@ class BuildingABucket(TempDirCase):
         self.assertEqual(review["branch"], "main")
         self.assertEqual(review["range_start"], "v11.9.0")
         self.assertEqual(review["head_sha"], self.second)
-        self.assertEqual(len(review["tester_plan"]), len(release.PLATFORMS))
         self.assertEqual(review["commits_reviewed"], 1)
 
     def test_every_write_records_its_hash(self):

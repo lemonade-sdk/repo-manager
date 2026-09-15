@@ -29,15 +29,15 @@ The maintainer's verdict and the tester's plan.
 - `verdict` is computed from the to-do list, never read from the model: `Blocked` with any
   P0, `Needs Attention` with any P1, `Ready` when the list is empty. The two can never
   disagree, because there is only one of them.
-- `prioritized_todos` is the whole worksheet. A to-do earns its place only if the maintainer
-  would regret shipping without it *and* users would notice. Each one ends with the PR and
-  handle to chase: `(#3456, @someone)`.
+- `checklist` is the whole artifact, and its reader is a tester working through a candidate.
+  An item earns its place only if somebody would regret shipping without checking it *and*
+  users would notice. Each names the platforms it applies to, so a tester on Fedora reads only
+  what concerns them, and ends with the PR and handle to chase: `(#3456, @someone)`.
 - `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.
-- `tester_plan` carries one entry per platform (Windows, Ubuntu PPA, Snap, Docker, macOS,
-  Fedora, Debian), each saying what changed there and what a human should exercise. A
-  platform nothing touched still gets its smoke check.
+  Nothing is written for a platform the release did not touch: a tester already smoke-tests
+  the build they installed, and filler rows are what make a checklist unreadable.
 
 **Tester reports.** Open issues in the tracked repo carrying the `candidate` label, filed
 since the bucket's branch was cut, are folded into the prompt. Every one of them must appear

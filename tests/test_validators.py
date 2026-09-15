@@ -67,12 +67,8 @@ class CommitReviewValidation(unittest.TestCase):
 def review(**overrides):
     data = {
         "verdict_reason": "Nothing blocks the release.",
-        "prioritized_todos": [],
+        "checklist": [],
         "breaking_changes": [],
-        "tester_plan": [
-            {"platform": name, "changed": "nothing in this bucket", "exercise": "Smoke test."}
-            for name in release.PLATFORMS
-        ],
         "evidence": {key: "none observed" for key in release.EVIDENCE_KEYS},
     }
     data.update(overrides)
@@ -84,26 +80,27 @@ class ReleaseReviewValidation(unittest.TestCase):
         self.assertEqual(release.review_errors(review(), []), [])
 
     def test_the_verdict_is_computed_from_the_list_not_read_from_the_model(self):
-        data = release.normalize_review({"verdict": "Ready", "prioritized_todos": [
+        data = release.normalize_review({"verdict": "Ready", "checklist": [
             {"priority": "P0", "text": "Fix the installer."}]})
         self.assertEqual(data["verdict"], "Blocked")
-        data = release.normalize_review({"verdict": "Blocked", "prioritized_todos": [
+        data = release.normalize_review({"verdict": "Blocked", "checklist": [
             {"priority": "P1", "text": "Check the installer."}]})
         self.assertEqual(data["verdict"], "Needs Attention")
-        self.assertEqual(release.normalize_review({"prioritized_todos": []})["verdict"], "Ready")
+        self.assertEqual(release.normalize_review({"checklist": []})["verdict"], "Ready")
 
     def test_a_misnamed_to_do_list_is_still_found(self):
         # Pi has filed the same list under `open_todos` and under `todos`; a misnamed list must
         # never collapse into a false "Ready".
         data = release.normalize_review({"open_todos": [{"priority": "P0", "text": "Fix it."}]})
         self.assertEqual(data["verdict"], "Blocked")
-        self.assertEqual(data["prioritized_todos"], [{"priority": "P0", "text": "Fix it."}])
+        self.assertEqual(data["checklist"],
+                         [{"priority": "P0", "platforms": ["all"], "text": "Fix it."}])
 
     def test_an_empty_list_under_blocking_prose_is_caught(self):
         errors = release.review_errors(
             review(verdict_reason="One P0 remains: the Fedora package is untested."), []
         )
-        self.assertTrue(any("prioritized_todos is empty" in e for e in errors))
+        self.assertTrue(any("checklist is empty" in e for e in errors))
 
     def test_an_empty_breaking_list_under_breaking_prose_is_caught(self):
         errors = release.review_errors(review(
@@ -118,10 +115,10 @@ class ReleaseReviewValidation(unittest.TestCase):
 
     def test_a_negation_only_covers_its_own_clause(self):
         errors = release.review_errors(review(
-            verdict_reason="Nothing else blocks the release, though a maintainer should "
+            verdict_reason="Nothing else blocks the release, though somebody should "
                            "confirm the Fedora package before shipping."
         ), [])
-        self.assertTrue(any("prioritized_todos is empty" in e for e in errors))
+        self.assertTrue(any("checklist is empty" in e for e in errors))
 
     def test_saying_there_are_no_breaking_changes_is_not_a_contradiction(self):
         errors = release.review_errors(review(
@@ -130,30 +127,34 @@ class ReleaseReviewValidation(unittest.TestCase):
         ), [])
         self.assertEqual(errors, [])
 
-    def test_every_platform_needs_a_tester_plan_entry(self):
-        plan = [{"platform": "Windows", "changed": "x", "exercise": "y"}]
-        errors = release.review_errors(review(tester_plan=plan), [])
-        self.assertEqual(len(errors), len(release.PLATFORMS) - 1)
+    def test_an_item_that_names_no_platform_applies_everywhere(self):
+        # A tester should never have to guess whether silence means "all of them" or "we
+        # forgot", so the absent case is spelled out rather than left empty.
+        data = release.normalize_review({"checklist": [{"priority": "P1", "text": "Check X."}]})
+        self.assertEqual(data["checklist"][0]["platforms"], ["all"])
 
-    def test_a_tester_plan_entry_needs_both_halves(self):
-        plan = [{"platform": name, "changed": "x", "exercise": "y"} for name in release.PLATFORMS]
-        plan[0]["exercise"] = ""
-        errors = release.review_errors(review(tester_plan=plan), [])
-        self.assertTrue(any("exercise is required" in e for e in errors))
+    def test_platforms_are_spelled_and_ordered_the_caller_way(self):
+        data = release.normalize_review({"checklist": [
+            {"priority": "P1", "text": "Check X.", "platforms": ["fedora", "WINDOWS"]}]})
+        self.assertEqual(data["checklist"][0]["platforms"], ["Windows", "Fedora"])
 
-    def test_the_tester_plan_is_reordered_into_the_canonical_order(self):
-        plan = release.normalize_tester_plan([
-            {"platform": "docker", "changed": "a", "exercise": "b"},
-            {"platform": "Windows", "changed": "c", "exercise": "d"},
-        ])
-        self.assertEqual([entry["platform"] for entry in plan], ["Windows", "Docker"])
+    def test_all_beats_a_list_of_names(self):
+        data = release.normalize_review({"checklist": [
+            {"priority": "P1", "text": "Check X.", "platforms": ["Windows", "all"]}]})
+        self.assertEqual(data["checklist"][0]["platforms"], ["all"])
 
-    def test_every_tester_report_must_reach_the_to_do_list(self):
+    def test_a_platform_this_project_does_not_test_on_is_caught(self):
+        errors = release.review_errors(review(checklist=[
+            {"priority": "P1", "platforms": ["Solaris"], "text": "Check X."}]), [])
+        self.assertTrue(any("not a platform" in e for e in errors), errors)
+
+    def test_every_tester_report_must_reach_the_checklist(self):
         issues = [{"number": 3600, "title": "Snap fails to start"}]
         errors = release.review_errors(review(), issues)
         self.assertTrue(any("#3600" in e for e in errors))
-        passed = release.review_errors(review(prioritized_todos=[
-            {"priority": "P0", "text": "Decide whether to hotfix or revert the snap change (#3600)."}
+        passed = release.review_errors(review(checklist=[
+            {"priority": "P0", "platforms": ["Snap"],
+             "text": "Decide whether to hotfix or revert the snap change (#3600)."}
         ]), issues)
         self.assertEqual(passed, [])
 

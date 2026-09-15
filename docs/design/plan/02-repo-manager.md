@@ -24,7 +24,9 @@ releases/<bucket>/generated.json
 
 `commits/<sha>.json` must contain at least `sha`, `committed_at` (ISO 8601), `pr_number`, `author`, `summary`, `verdict`, and `bucket`, so the dashboard renders from files alone with no git checkout.
 
-`review.json` must contain at least `verdict` (`Ready`, `Needs Attention`, or `Blocked`), `branch`, `range_start`, `head_sha`, `prioritized_todos`, `breaking_changes`, and `tester_plan`.
+`review.json` must contain at least `verdict` (`Ready`, `Needs Attention`, or `Blocked`), `branch`, `range_start`, `head_sha`, `checklist`, and `breaking_changes`.
+
+`checklist` replaces the separate `prioritized_todos` and `tester_plan` of the first draft. There is one reader — a tester working through a release candidate — so there is one prioritized list, and each item names the platforms it applies to (`["all"]` when it applies everywhere). Two lists produced the same work written twice: "verify Fedora, Debian, snap and containers handle the new version format" as a to-do, and four per-platform rows each saying "run `lemonade --version`".
 
 `generated.json` maps each generated filename in the bucket to the SHA-256 of the content repo-manager last wrote. A file whose current content does not match is human-edited and frozen.
 
@@ -81,13 +83,13 @@ Exit code is nonzero if any artifact could not be produced. Step 4 relies on thi
 - Generate `review.json`, `notes.md`, `announcement.md` with the existing skills and validators. Keep the existing retry-with-feedback loop; drop the `.pending` files (retries stay in memory).
 - Human edits are authoritative. After writing any file in a bucket, record its SHA-256 in `generated.json`. Before writing, compare: a file whose content does not match its recorded hash is frozen. `release build` prints which files are frozen and skips them; `--force` writes them anyway and re-records the hash.
 - Fold open lemonade issues with the `candidate` label, opened after the bucket's branch was cut, into the review prompt. Each becomes a to-do with the RFC's outcome to choose (fix later, hotfix, revert).
-- Add a tester plan to `review.json`: for each platform (Windows, Ubuntu PPA, Snap, Docker, macOS, Fedora, Debian), what changed in this bucket and what to exercise, drawn from the commit reviews' manual-release-testing evidence.
+- Tag each `checklist` item with the platforms it applies to, from (Windows, Ubuntu PPA, Snap, Docker, macOS, Fedora, Debian) or `all`, drawn from the commit reviews' manual-release-testing evidence. No item for a platform the release did not touch: a tester already smoke-tests the build they installed, and filler rows are what make a checklist unreadable.
 - Add a hotfix variant of the announcement: when the bucket already has a stable tag, the post opens with `@release` and covers only the commits since that tag.
 - Delete `sync`, `cmd_sync_release_review_issue`, the issue markers, and the checkbox parsing.
 
 ### D. Dashboard and UI
 
-- `site render` produces the static site from files only; it must not need `--checkout` or the network. Same content as today's published dashboard plus one row per live bucket with verdict, open blockers, and the tester plan. PR triages are included now.
+- `site render` produces the static site from files only; it must not need `--checkout` or the network. Same content as today's published dashboard plus one row per live bucket with verdict, open blockers, and the checklist. PR triages are included now.
 - `site serve` reads the directory. Build an in-memory index at startup if needed. To-do check-off and read state are removed; the release admin edits files instead.
 
 ### E. Releases and pinning

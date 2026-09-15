@@ -39,9 +39,9 @@ tab — label, scope, body-matches-diff, docs and tests, attention, and the comm
 
 ## The Release Review tab
 
-The bucket's verdict and the one-or-two sentences answering "can we ship?", then the P0/P1
-to-dos with blockers first, the canonical breaking changes, the per-platform tester plan, and
-the evidence. When a human has edited one of the bucket's files, the tab says which and that
+The bucket's verdict and the one-or-two sentences answering "can we ship?", then the
+checklist a tester works through — blockers first, each item tagged with the platforms it
+applies to — the canonical breaking changes, and the evidence. When a human has edited one of the bucket's files, the tab says which and that
 `--force` is what overwrites it.
 
 ## What is no longer here

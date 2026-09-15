@@ -18,9 +18,9 @@ def seed(state):
         "bucket": "v2026.38", "branch": "release-v2026.38", "verdict": "Needs Attention",
         "verdict_reason": "Moonshine is unverified on macOS.", "range_start": "v2026.37.1",
         "head_sha": "b" * 40,
-        "prioritized_todos": [{"priority": "P1", "text": "Run Moonshine on macOS (#3456, @someone)."}],
+        "checklist": [{"priority": "P1", "platforms": ["macOS"],
+                       "text": "Run Moonshine on macOS (#3456, @someone)."}],
         "breaking_changes": [], "candidate_issues": [],
-        "tester_plan": [{"platform": "macOS", "changed": "Moonshine", "exercise": "Transcribe a clip."}],
         "evidence": {"coverage": "All 1 commit reviewed."},
     })
     state.write_text(store.notes_key("v2026.38"), "## Headline\n\n- Moonshine.\n\n## Breaking Changes\n")
@@ -64,7 +64,7 @@ class LoadFromFiles(TempDirCase):
         bucket = self.data["release_reviews"][0]
         self.assertEqual(bucket["tag_start"], "v2026.38")
         self.assertEqual(bucket["verdict"], "Needs Attention")
-        self.assertEqual(bucket["tester_plan"][0]["platform"], "macOS")
+        self.assertEqual(bucket["todo_items"][0]["platforms"], ["macOS"])
         self.assertEqual(bucket["commits"], 1)
         self.assertIn("## Headline", self.data["release_announcements"][0]["release_highlights_markdown"])
 
@@ -74,7 +74,7 @@ class LoadFromFiles(TempDirCase):
 
     def test_blockers_lead_the_to_do_list_and_are_counted(self):
         review = self.state.read_json(store.review_key("v2026.38"))
-        review["prioritized_todos"].append({"priority": "P0", "text": "Fix the installer."})
+        review["checklist"].append({"priority": "P0", "text": "Fix the installer."})
         self.state.write_json(store.review_key("v2026.38"), review)
         data = site.load(self.state)
         self.assertEqual(data["counts"]["blockers"], 1)

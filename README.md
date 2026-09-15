@@ -14,7 +14,7 @@ One directory — the **state directory** — holds everything:
 ```text
 commits/<sha>.json            one merged commit, reviewed
 prs/<number>.json             one pull request, triaged
-releases/<bucket>/review.json         the release verdict, to-dos, and tester plan
+releases/<bucket>/review.json         the release verdict and the tester checklist
 releases/<bucket>/notes.md            the release page's Headline and Breaking Changes
 releases/<bucket>/announcement.md     the Discord post
 releases/<bucket>/candidates/<N>.md   what changed since the previous candidate
@@ -120,7 +120,8 @@ that: a candidate with no release notes never publishes.
 - `pr-cover` — tier 2: for each surface, what covers it under `spec-driven-dev.md`.
 - `pr-quality` — tier 3: documentation and testing gaps. The `rfc:` label, the scope, and the
   reviewers are then derived in Python from all three.
-- `release-review` — the release verdict, the P0/P1 maintainer to-dos, and the tester plan.
+- `release-review` — the release verdict and the prioritized checklist a tester works through
+  on a release candidate, each item tagged with the platforms it applies to.
 - `release-notes` — the website release highlights, which also shape the release's stories.
 - `release-announcement` — the Discord post, in the maintainer's voice.
 

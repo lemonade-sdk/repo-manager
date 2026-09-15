@@ -656,6 +656,11 @@
       display: grid;
       gap: 8px;
     }
+    .platforms {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
     .plan-table {
       width: 100%;
       border-collapse: collapse;
@@ -1064,17 +1069,6 @@
         `<div class="todo-item"><span>${esc(item)}</span></div>`).join("")}</div>`;
     }
 
-    // One row per platform, which is how a tester reads it: find the machine in front of
-    // you, and the row says what moved and what to try.
-    function testerPlan(entries) {
-      if (!entries || !entries.length) return `<p class="muted">No tester plan recorded.</p>`;
-      return `<table class="plan-table"><thead><tr>
-          <th style="width: 120px;">Platform</th><th>What changed</th><th>What to try</th>
-        </tr></thead><tbody>${entries.map((entry) => `
-          <tr><td>${esc(entry.platform)}</td><td>${esc(entry.changed)}</td><td>${esc(entry.exercise)}</td></tr>
-        `).join("")}</tbody></table>`;
-    }
-
     function evidenceList(evidence) {
       const entries = Object.entries(evidence || {}).filter(([, value]) => value);
       if (!entries.length) return `<p class="muted">No evidence recorded.</p>`;
@@ -1098,12 +1092,14 @@
     // A to-do is read, not checked off. Nothing the dashboard owns is state any more: the
     // release admin resolves an item by editing the artifact the item came from.
     function todoList(items) {
-      if (!items || !items.length) return `<p class="muted">None.</p>`;
-      return `<div class="todo-list">${items.map((item) => `
-        <div class="todo-item">
-          <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}</span>
-        </div>
-      `).join("")}</div>`;
+      if (!items || !items.length) return `<p class="muted">Nothing to check.</p>`;
+      return `<div class="todo-list">${items.map((item) => {
+        const where = (item.platforms || []).filter((p) => String(p).toLowerCase() !== "all");
+        return `<div class="todo-item">
+          <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}${
+            where.length ? ` <span class="platforms">${where.map(esc).join(", ")}</span>` : ""}</span>
+        </div>`;
+      }).join("")}</div>`;
     }
 
     // --- Freshness ------------------------------------------------------------------
@@ -1908,9 +1904,8 @@
         field("Audited", row.reviewed_at),
         generatedInField(row),
         section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(details.verdict_reason || row.verdict_reason || "")}</p>`),
-        section("Prioritized To-Do", todoList(row.todo_items)),
+        section("Checklist", todoList(row.todo_items)),
         section("Breaking Changes", breakingList(row.breaking_changes)),
-        section("Tester Plan", testerPlan(row.tester_plan)),
         row.frozen && row.frozen.length
           ? section("Edited by hand", `<p class="muted">repo-manager will not overwrite ${esc(row.frozen.join(", "))}. Pass <code>--force</code> to regenerate.</p>`)
           : "",

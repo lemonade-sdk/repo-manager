@@ -39,16 +39,17 @@ def blockers_first(todos):
 
 
 def todo_items(items):
-    """The to-do list as the page renders it. There is no completion state any more: an item
-    is resolved by editing the artifact it came from, not by ticking it here."""
+    """The checklist as the page renders it. There is no completion state: an item is resolved
+    by editing the artifact it came from, not by ticking it here."""
     rows = []
     for item in items or []:
         if isinstance(item, dict):
             text = next((str(item[k]).strip() for k in ("text", "todo", "task", "action", "description")
                          if str(item.get(k, "")).strip()), json.dumps(item, sort_keys=True))
-            rows.append({"text": text, "priority": item.get("priority", "")})
+            rows.append({"text": text, "priority": item.get("priority", ""),
+                         "platforms": item.get("platforms") or []})
         elif str(item).strip():
-            rows.append({"text": str(item).strip(), "priority": ""})
+            rows.append({"text": str(item).strip(), "priority": "", "platforms": []})
     return rows
 
 
@@ -115,9 +116,8 @@ def release_rows(state, commits):
                 "verdict_reason": review.get("verdict_reason", ""),
                 "reviewed_at": review.get("reviewed_at", ""),
                 "generation_seconds": review.get("generation_seconds", 0),
-                "todo_items": todo_items(blockers_first(review.get("prioritized_todos") or [])),
+                "todo_items": todo_items(blockers_first(review.get("checklist") or [])),
                 "breaking_changes": review.get("breaking_changes") or [],
-                "tester_plan": review.get("tester_plan") or [],
                 "candidate_issues": review.get("candidate_issues") or [],
                 "is_hotfix": bool(review.get("is_hotfix")),
                 "commits": sum(1 for row in commits if row["tag_start"] == name),
