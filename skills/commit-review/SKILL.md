@@ -6,12 +6,8 @@ description: Analyze a GitHub commit and judge whether it was good for the proje
 # Commit Review
 
 Review one commit in the context of its GitHub repository and associated PR. Produce a verdict
-and its evidence for a maintainer, and a to-do list for a tester. Not a line-by-line code review.
-
-Those two readers are different people and want different things, and the to-do list is the one
-that leaves this repository: every item you write there is copied, word for word, onto the
-checklist a tester works through on a release candidate. Write it for them. The section "To-dos"
-below is not a style note; it is who the list is for.
+and evidence for a maintainer, and a to-do list for a tester. Not a line-by-line code review.
+Those are two readers; see "To-dos" for the second, whose list is the part that leaves here.
 
 If the caller provides an output file path, write the artifact before finishing:
 
@@ -131,23 +127,25 @@ Judge the commit against these criteria.
 
 ### Manual Release Testing
 
-Flag significant shipped or documented behavior that should be tested by hand before the next release, especially:
+If this commit adds or changes something a user can reach, and nothing shows a human exercised
+it, write a to-do. User-reachable covers all of: an API endpoint, a CLI command or flag, any GUI
+change at all, a config option or default, a newly supported model or backend, an installed
+artifact or package, and documented behavior.
 
-- New CLI commands or user-visible CLI features.
-- Any GUI app change whatsoever.
+**Passing CI is not a human exercising it** unless the test drives the same path a user would.
+A feature with thorough unit tests and no end-to-end run still needs one.
 
-Do not treat every new platform/build-system capability as release-blocking manual-test work. First decide whether the behavior is part of the upcoming release surface: shipped artifacts, documented supported platforms, user-visible behavior, install paths users can exercise in the release, or release promises in docs. If the change only prepares build-system support for artifacts or platforms that are not actually shipped or advertised in the release, note the residual risk in evidence but do not require maintainer action solely for manual testing.
+The exception is work that ships nothing this release — build-system support for an artifact or
+platform not yet published or advertised. Note the residual risk in evidence; write no to-do.
 
 ### API Compatibility
 
 Flag any API breaking change whatsoever, including schema, protocol, config, CLI contract, exported API, documented behavior, persistence format, or integration behavior.
 
-Describe it the way the person who upgrades meets it: what used to work, what happens now, and
-what they have to change. The release notes and the Discord announcement are both built from
-this, so an entry written in terms of internal machinery — which module moved, which build
-variable was renamed, which function now returns something else — reaches users as a sentence
-they cannot act on. Record the internals in the same field afterwards if they matter, but lead
-with the upgrade.
+Lead with what the person upgrading meets: what used to work, what happens now, what they must
+change. The release notes and the Discord post are built from this, so an entry about which
+module moved or which build variable was renamed reaches users as a sentence they cannot act
+on. Internals come after, if they matter.
 
 ### Security And Malice
 
@@ -161,61 +159,30 @@ Look for any concern whatsoever that the commit is malicious or introduces a sec
 
 ## To-dos
 
-A to-do is read by a tester, not by you and not by the maintainer who merged this. Picture them:
-the release candidate is installed on their machine, they have never seen this repository, they
-do not know what this PR changed, and they are not going to read the diff. Every item you write
-has to survive that reader, and that gives you three rules.
+Your to-dos are copied verbatim onto a tester's release checklist. That reader has the
+candidate installed, has never seen this code, and will not read the diff.
 
-**Name what they can touch.** The command, the flag, the endpoint, the setting, the model, the
-installer, the page, the button — the thing as a user meets it. Never a function, method, class,
-file, header, module, variable, or commit SHA. Those can only be found by opening the source,
-which this reader will not do, and naming one tells them nothing about what to type. If the
-change has no user-visible surface you can name, that is a strong sign you are not looking at a
-to-do; see below.
+**Name what they can touch** — the command, flag, endpoint, setting, page. Never a function,
+file, module or SHA: they cannot find those and cannot type them.
 
-**Say what to do and what should happen.** Every to-do is an instruction with an observable
-outcome: do this, and you should see that. An item that opens with "Consider", "Investigate",
-"Look into", "Evaluate", "Assess", or "Verify/Decide/Determine whether" is a thought you had,
-not a task anyone can finish — it has no pass and no fail, so the tester has nothing to report
-back. If you cannot say what the right answer looks like, there is no to-do here.
+**Say what to do and what should happen.** "Do this, expect that." An item opening with
+Consider, Investigate, Evaluate, Assess, or Verify/Decide whether has no pass and no fail, so
+the tester has nothing to report back.
 
-**Assume they have the release and nothing else.** No "the change", no "this PR", no "as
-@someone noted in review", no SHA, no pointing at the diff or the discussion. An item that only
-makes sense while looking at the PR is an item the tester cannot begin.
-
-The test, applied to every item before you keep it: *could somebody who has never seen this
-repository carry this out with only the release candidate installed, and know whether it
-passed?* Three ways the same item usually goes wrong, and what each looks like fixed:
+**Assume they have only the release.** No "the change", no "this PR", no reviewer's name, no SHA.
 
 | Instead of | Write |
 |---|---|
-| Verify whether `parse_config()` is called per request and consider caching the compiled pattern. | Start the server with a large config file and confirm the first request answers in about the same time as later ones. |
-| Confirm the new `--flag` handling in the CLI entry point behaves as the reviewer expected. | Run `tool build --flag value` and confirm the output names the value you passed. |
-| Check that the post-approval commit did not change behavior. | Run the documented quickstart end to end and confirm each step produces the output the guide shows. |
+| Verify whether `parse_config()` is called per request and consider caching. | Start the server with a large config and confirm the first request is as fast as later ones. |
+| Confirm the new `--flag` behaves as the reviewer expected. | Run `tool build --flag value` and confirm the output names the value you passed. |
+| Check the post-approval commit did not change behavior. | Run the documented quickstart and confirm each step gives the output the guide shows. |
 
-### What to do with everything else
+Findings that fail this test are still real — a possible hot path, an unreviewed late commit,
+test debt. Put them in `evidence`, where the maintainer reads them.
 
-Plenty of what a review turns up is real and is not a to-do: a function that might be a hot
-path, a refactor worth revisiting, a reviewer who may not have seen a late commit, test debt, a
-question about internal structure, a decision somebody should make. That is not a reason to
-discard it, and it is not a reason to dress it up as a tester instruction. **Put it in
-`evidence`**, under whichever key it belongs to, where the maintainer reads it. Leave the to-do
-list to work a tester can actually do.
-
-This matters more than it sounds. A list that mixes the two costs the tester the ability to
-trust any of it: once two items in a row turn out to be unperformable, the rest stops being read.
-
-**The escape is for concerns with no user-visible surface, not for work that is awkward to
-phrase.** If this commit changes something a user can see — a command, a flag, an endpoint, a
-setting, an install path, a page — and nothing in the evidence shows somebody exercised it,
-that is a to-do, and your job is to find the words for it. Naming the surface is the work.
-Moving it to evidence because the first sentence you tried came out in terms of the code is
-the failure this section exists to prevent, and it is worse than the shape it replaced: an
-unperformable item at least tells the tester something exists. Silence tells them nothing.
-
-Write the to-do when either is true: the release ships behavior nobody has exercised by hand,
-or somebody upgrading could be surprised. Write nothing only when the commit genuinely leaves
-no one anything to do, which is a real and common answer for an internal refactor with tests.
+That escape is for concerns with **no user-visible surface**, not for work that is awkward to
+phrase. If this commit changes something a user can see and nothing shows anyone exercised it,
+that is a to-do, and finding the words is the job.
 
 ## Verdict
 
@@ -231,21 +198,16 @@ Treat problematic post-approval commits as review-quality failures. Use `Blocker
 
 If the commit introduces significant shipped or documented behavior that should be manually tested before release, the verdict cannot be `Clean`; use `Needs Attention` with a maintainer to-do unless the missing manual testing creates serious release risk, in which case use `Blocker`. If the behavior is not in the release surface, manual testing may be mentioned as residual risk without changing a `Clean` verdict.
 
-The verdict and the to-do list answer two different questions, and they move independently.
-The verdict is about **a maintainer's attention**: is there something here somebody who owns
-this project should know about? The to-do list is about **a tester's work**: is there something
-somebody has to exercise on the release candidate? A test-only commit with a late unreviewed
-change needs the first and produces none of the second, and that is a `Needs Attention` with an
-empty list — not a contradiction, and not a reason to invent an errand to justify the grade.
-
-The one direction that is fixed: a to-do means the verdict is not `Clean`. Work somebody has to
-do before shipping is, by definition, attention.
+The verdict is a maintainer's attention; the to-do list is a tester's work. They move
+independently: a test-only commit with an unreviewed late change is `Needs Attention` with an
+empty list, which is not a contradiction and not a reason to invent an errand. One direction is
+fixed — a to-do means the verdict is not `Clean`, because work before shipping is attention.
 
 Keep the verdict, one-sentence explanation, maintainer to-do list, and evidence internally consistent:
 
 - If somebody has to exercise this release by hand before it ships, the verdict cannot be `Clean`, and that exercise is a to-do rather than a sentence in evidence.
 - If the verdict is `Clean`, do not include language like "should verify before release", "maintainer should check", or "warrants manual verification" unless you explicitly conclude it is not part of the release surface and does not require maintainer action.
-- If you are unsure whether the behavior is in the release surface, decide that here, on the evidence you have — it is your judgement, not the tester's errand. When it is in, write the test as a to-do. When it is out, say so in evidence and leave the list alone. What you must not do is hand the uncertainty over as an item, because "check whether this matters" is not something anybody can carry out.
+- If you are unsure whether the behavior is in the release surface, decide here, on the evidence you have. In: write the test as a to-do. Out: say so in evidence. Never hand the uncertainty over as an item — "check whether this matters" is not something anybody can carry out.
 - Attribute findings carefully. Do not credit a shout out or major catch to a reviewer unless the evidence clearly supports that attribution.
 
 ## Output Format

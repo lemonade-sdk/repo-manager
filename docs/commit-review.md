@@ -46,6 +46,14 @@ The same altitude applies to `evidence.api_compatibility`, because the release's
 changes — and from there the release page and the Discord post — are built out of it. Lead
 with what the person upgrading notices, not with which module moved.
 
+**What earns a to-do** is anything a user can reach that nobody has exercised by hand: an API
+endpoint, a CLI command or flag, any GUI change, a config option or default, a newly supported
+model or backend, an installed artifact, documented behavior. Passing CI is not a human
+exercising it unless the test drives the path a user would — a feature with thorough unit
+tests and no end-to-end run still needs one. The old trigger named only CLI features and GUI
+changes, which is how a release shipped a new `/images/edit` endpoint, a new backend model and
+new config defaults without a single tester item between them.
+
 ## What the file contains
 
 The `commit-review` skill produces the judgment; repo-manager fills in the facts it should

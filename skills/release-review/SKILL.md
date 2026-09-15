@@ -71,19 +71,14 @@ item for what it would cost *users* if this release shipped without it, and let 
 
 Open `candidate` issues are tester feedback on a build of this bucket: a human installed a
 candidate and something went wrong. No commit review wrote these, so they are the one thing you
-supply the words for — put each one in `extra_items`. Write each as the work a tester can do:
-reproduce it. Say what to install or run, what the reporter saw, and what to look for. Name the
-issue number so a reader can open it, and pick the priority from what the report describes.
+supply the words for — put each one in `extra_items`, written as the reproduction a tester can
+run: what to install or run, what the reporter saw, what to look for. Name the issue number and
+pick the priority from what the report describes.
 
-Do not write the decision as the item. Whether a report is fixed later, hotfixed or reverted is
-the release admin's call, and they make it from what the tester finds — an item that says
-"decide whether to revert" gives the tester nothing to do and the admin nothing new to decide
-with.
-
-Write it for the same reader every other item on this checklist is written for: somebody with
-the candidate installed who has never seen the code. Name what they can touch, say what to do
-and what they should see, and do not point at a function, a source file or a commit SHA — the
-caller rejects those, the same way it does for a commit review's to-dos. A human already decided it was worth filing, so it is rarely the last thing a
+Not the decision. Fix later, hotfix or revert is the release admin's call, made from what the
+tester finds; "decide whether to revert" gives the tester nothing to do. These answer to the
+same reader as a commit review's to-dos, and the caller rejects a function, source file or SHA
+here too. A human already decided it was worth filing, so it is rarely the last thing a
 tester should get to.
 
 ## Breaking changes
@@ -141,19 +136,13 @@ CLI reads that file after the skill exits. Use exactly this shape:
 - `breaking_changes` is the canonical, deduplicated list of every user-facing breaking change
   shipping in this release — one entry per distinct change, each a single sentence naming the
   change and its migration ("Removed X; use Y instead."). **Write each entry as the person who
-  upgrades meets it**, because the release page and the Discord post are both built from this
-  list and publish whatever is in it, word for word, to people who have never seen this
-  repository. Say what used to work, what happens now, and what they have to change. Leave out
-  how it was done: a module that moved, a build variable that was renamed, a function whose
-  return type changed, a script that was rewritten. Those explain the break to a maintainer and
-  belong in `evidence.breaking_changes`; in this list they reach a user as a sentence they
-  cannot act on.
-
-  The test for an entry is whether somebody running Lemonade, who will never read this diff,
-  can tell from it whether they are affected and what to do. "Versions are now dated, like
-  2026.39.1 instead of 11.9.0; pin the new format if you pin versions." passes it. "CMake
-  version extraction moved to a Python-based git state derivation system" does not — it is
-  true, and it tells that person nothing. This list is the source of truth: the
+  upgrades meets it**: what used to work, what happens now, what they must change. The release
+  page and the Discord post publish this list word for word to people who have never seen this
+  repository, so how it was done — a module that moved, a build variable renamed — belongs in
+  `evidence.breaking_changes`, not here. The test: can somebody running Lemonade tell from the
+  entry whether they are affected and what to do? "Versions are now dated, like 2026.39.1
+  instead of 11.9.0; pin the new format if you pin versions." passes. "CMake version extraction
+  moved to a Python-based git state derivation system" is true and tells them nothing. This list is the source of truth: the
   release-notes and release-announcement steps read it and must surface every entry, so it must
   be complete and must not merge two real breaking changes into one entry or list a
   non-breaking change. Use `[]` when there are none. It must agree with
