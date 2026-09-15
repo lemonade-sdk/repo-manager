@@ -142,7 +142,9 @@ CLI reads that file after the skill exits. Use exactly this shape:
   `evidence.breaking_changes`, not here. The test: can somebody running Lemonade tell from the
   entry whether they are affected and what to do? "Versions are now dated, like 2026.39.1
   instead of 11.9.0; pin the new format if you pin versions." passes. "CMake version extraction
-  moved to a Python-based git state derivation system" is true and tells them nothing. This list is the source of truth: the
+  moved to a Python-based git state derivation system" is true and tells them nothing. Watch
+  the parentheses in particular: a sentence that states the impact and then brackets the file
+  or symbol it happened in has written for both readers and served neither. Cut the bracket. This list is the source of truth: the
   release-notes and release-announcement steps read it and must surface every entry, so it must
   be complete and must not merge two real breaking changes into one entry or list a
   non-breaking change. Use `[]` when there are none. It must agree with
