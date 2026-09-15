@@ -67,9 +67,9 @@ repo-manager pi setup
 ## Commands
 
 Every command takes the same global options *after* the subcommand: `--state DIR` (default:
-the current directory), `--repo OWNER/REPO`, `--checkout DIR` (a clone of the tracked repo
-used for git and diff operations; one is kept under the cache directory when this is
-omitted), and `--no-push`.
+the current directory), `--repo OWNER/REPO` (default: `lemonade-sdk/lemonade`), `--checkout
+DIR` (a clone of the tracked repo used for git and diff operations; one is kept under the
+cache directory when this is omitted), and `--no-push`.
 
 **[Commit reviews](docs/commit-review.md)** — one merged commit, one file:
 

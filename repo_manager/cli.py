@@ -12,6 +12,7 @@ import argparse
 
 from repo_manager import __version__
 from repo_manager.commands import commit, pi, pr, release, site
+from repo_manager.context import DEFAULT_REPO
 
 
 def global_options():
@@ -22,7 +23,11 @@ def global_options():
         help="The state directory (default: the current directory). A clone of the state repo in "
              "production, any directory for a scratch run.",
     )
-    parser.add_argument("--repo", default="", help="Repository to act on, as OWNER/REPO.")
+    parser.add_argument(
+        "--repo", default="",
+        help=f"Repository to act on, as OWNER/REPO (default: {DEFAULT_REPO}; REPO_MANAGER_REPO "
+             "also overrides it).",
+    )
     parser.add_argument(
         "--checkout", default="",
         help="A clone of the tracked repo for git and diff operations. One is kept under the cache "

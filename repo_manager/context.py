@@ -1,5 +1,11 @@
 """What every command is handed: the state directory, the repo, and a clone to read git from."""
 
+# repo-manager is lemonade's tool. Every bundled skill reads lemonade's guides, the tester
+# plan names lemonade's platforms, and the announcement is ghostwritten in lemonade's voice —
+# so the repository it acts on is a default, not a question. `--repo` and REPO_MANAGER_REPO
+# still override it, which is what a scratch run against a fork needs.
+DEFAULT_REPO = "lemonade-sdk/lemonade"
+
 import os
 from datetime import datetime, timezone
 
@@ -10,7 +16,7 @@ from repo_manager.store import Store
 class Context:
     def __init__(self, args):
         self.args = args
-        self.repo = args.repo or os.environ.get("REPO_MANAGER_REPO", "")
+        self.repo = args.repo or os.environ.get("REPO_MANAGER_REPO") or DEFAULT_REPO
         self.store = Store(args.state, push=not args.no_push)
         self.checkout_path = args.checkout
         self.force = bool(getattr(args, "force", False))
@@ -18,10 +24,6 @@ class Context:
         self._tags = None
 
     def require_repo(self):
-        if not self.repo:
-            raise SystemExit(
-                "No repository given. Pass --repo OWNER/REPO or set REPO_MANAGER_REPO."
-            )
         return self.repo
 
     def checkout(self):

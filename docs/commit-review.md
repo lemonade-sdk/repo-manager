@@ -8,7 +8,7 @@ sweep is just "review what has no file yet".
 ## Reviewing
 
 ```bash
-repo-manager commit review 450bf6c --repo lemonade-sdk/lemonade --state ../lemonade-testing
+repo-manager commit review 450bf6c --state ../lemonade-testing
 ```
 
 This is job 1: a push to `main` runs it for the pushed SHA. The file is written unless one
