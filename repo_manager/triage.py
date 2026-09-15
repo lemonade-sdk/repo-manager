@@ -1,20 +1,20 @@
-"""PR triage under lemonade's spec-driven development policy.
+"""Job 3: PR triage under lemonade's spec-driven development policy.
 
 Every open PR gets an `rfc:` label, and this module produces the five facts a maintainer
-needs to apply it: the label, what covers the change (a fix, a charter, or an approved
-RFC), whether the body tells the truth about the diff, whether docs and tests are in
-order, and who should review. Three Pi runs read the diff and the project's guides; the
-labels themselves are derived here, in code, from what those runs report, so the rule that
-turns a surface into a label is written once and can be read.
+needs to apply it: the label, what covers the change (a fix, a charter, or an approved RFC),
+whether the body tells the truth about the diff, whether docs and tests are in order, and who
+should review. Three Pi runs read the diff and the project's guides; the labels themselves
+are derived here, in code, from what those runs report, so the rule that turns a surface into
+a label is written once and can be read.
 
-Layout of a stored artifact (`.repo-manager/reviews/prs/pr-N.json`):
+Layout of a stored artifact (`prs/<number>.json`):
 
-    meta        what GitHub says about the PR (number, title, author, head, base, body)
+    meta        what GitHub said about the PR when it was triaged
     claim       what the PR body claims: the template checkbox, linked WG / RFC / issues
     facts       tier 1 — surfaces the diff changes, breaking changes, body mismatches, areas
     cover       tier 2 — per surface, what covers it: a charter item, an RFC section, or a
                 statement of intent already on the base branch
-    quality     tier 3 — docs and tests
+    quality     tier 3 — documentation and testing gaps
     reviewers   derived — code owner, group lead, RFC commenters, area maintainers, blame
     outputs     derived — the five lines of the comment
     explanation derived — the prose behind them, one paragraph per section
@@ -27,13 +27,18 @@ import subprocess
 import time
 from pathlib import Path
 
-from repo_manager import cli
+from repo_manager import github, pi, store
 
 TRIAGE_VERSION = "pr-triage-2026-09-10"
 COMMENT_MARKER = "<!-- repo-manager:pr-triage"
 
 LABELS = ("rfc:required", "rfc:not-required", "rfc:on-roadmap")
 SCOPES = ("fix", "working-group", "rfc", "exceeds-working-group", "exceeds-rfc", "no-charter", "needs-rfc")
+
+# The spec-driven development policy took effect on lemonade's main on 2026-09-10 (PR
+# #3521). A PR opened before it was written against a different contribution guide, so the
+# sweep leaves those to the humans by default; `--since all` sweeps everything.
+SWEEP_SINCE = "2026-09-10"
 
 # The surface vocabulary. Anything but `internal` is a change to scope, surface area, or
 # experience under spec-driven-dev.md, and needs cover.
@@ -75,7 +80,6 @@ CODE_OWNER_KEYWORDS = {
     "breaking": "breaking",
 }
 
-# "Fixes #123", "Closes: #123", "Fixes [#123](.../issues/123)", "Resolves https://.../issues/123".
 FIXES_PATTERN = re.compile(
     r"\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s*:?\s*(?:\[?#(\d+)\]?|\S*/issues/(\d+))", re.IGNORECASE
 )
@@ -89,7 +93,7 @@ CHECKBOX = re.compile(r"^\s*-\s*\[([ xX])\]\s*(.*)$")
 
 
 def gh_api(args, check=False):
-    return cli.gh_json(args, check=check)
+    return github.gh_json(args, check=check)
 
 
 def fetch_pr(repo, number):
@@ -97,7 +101,7 @@ def fetch_pr(repo, number):
         "number,title,state,isDraft,author,body,baseRefName,headRefName,headRefOid,url,"
         "labels,files,mergedAt,mergeCommit,additions,deletions"
     )
-    data = cli.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", fields])
+    data = github.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", fields])
     if not data:
         raise SystemExit(f"Could not fetch PR #{number} from {repo}.")
     return data
@@ -105,41 +109,42 @@ def fetch_pr(repo, number):
 
 def fetch_diff(repo, number, base_ref, replay_sha=""):
     if replay_sha:
-        result = cli.run(
-            ["gh", "api", "-H", "Accept: application/vnd.github.diff", f"repos/{repo}/compare/{base_ref}...{replay_sha}"],
+        result = github.run(
+            ["gh", "api", "-H", "Accept: application/vnd.github.diff",
+             f"repos/{repo}/compare/{base_ref}...{replay_sha}"],
             check=False,
         )
         files = gh_api([f"repos/{repo}/compare/{base_ref}...{replay_sha}", "--jq", ".files"]) or []
-        files = [{"path": f.get("filename"), "additions": f.get("additions"), "deletions": f.get("deletions")} for f in files]
+        files = [{"path": f.get("filename"), "additions": f.get("additions"), "deletions": f.get("deletions")}
+                 for f in files]
         return result.stdout or "", files
-    result = cli.run(["gh", "pr", "diff", str(number), "--repo", repo], check=False)
+    result = github.run(["gh", "pr", "diff", str(number), "--repo", repo], check=False)
     return result.stdout or "", None
 
 
-def fetch_file(workspace, repo, ref, path):
-    """A file at `ref`, cached under the workspace. Returns "" when it does not exist."""
-    cache = cli.project_docs_cache_dir(workspace) / cli.safe_repo_name(repo) / ref
-    cache.mkdir(parents=True, exist_ok=True)
-    file = cache / path.replace("/", "__")
+def doc_cache(repo, ref):
+    path = pi.cache_dir() / "project-docs" / repo.replace("/", "__") / ref
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def fetch_file(repo, ref, path):
+    """A file at `ref`, cached. Returns "" when it does not exist."""
+    file = doc_cache(repo, ref) / path.replace("/", "__")
     if file.exists():
         return file.read_text(encoding="utf-8", errors="replace")
-    result = cli.run(
-        ["gh", "api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{path}?ref={ref}"],
-        check=False,
-    )
-    text = result.stdout if result.returncode == 0 else ""
+    text = github.fetch_file(repo, ref, path)
     file.write_text(text, encoding="utf-8")
     return text
 
 
-def fetch_tree(workspace, repo, ref):
-    cache = cli.project_docs_cache_dir(workspace) / cli.safe_repo_name(repo) / ref
-    cache.mkdir(parents=True, exist_ok=True)
-    file = cache / "repo-tree.txt"
+def fetch_tree(repo, ref):
+    file = doc_cache(repo, ref) / "repo-tree.txt"
     if file.exists():
         return file.read_text(encoding="utf-8").splitlines()
-    result = cli.run(
-        ["gh", "api", f"repos/{repo}/git/trees/{ref}?recursive=1", "--jq", '.tree[] | select(.type == "blob") | .path'],
+    result = github.run(
+        ["gh", "api", f"repos/{repo}/git/trees/{ref}?recursive=1", "--jq",
+         '.tree[] | select(.type == "blob") | .path'],
         check=False,
     )
     paths = (result.stdout or "").splitlines()
@@ -147,23 +152,23 @@ def fetch_tree(workspace, repo, ref):
     return paths
 
 
-def refresh_base_cache(workspace, repo, ref):
+def refresh_base_cache(repo, ref):
     """Drop cached files for `ref` so a branch name never serves last week's guides."""
-    cache = cli.project_docs_cache_dir(workspace) / cli.safe_repo_name(repo) / ref
-    if cache.exists() and not re.fullmatch(r"[0-9a-f]{40}", ref):
+    cache = doc_cache(repo, ref)
+    if not re.fullmatch(r"[0-9a-f]{40}", ref):
         for file in cache.iterdir():
             if file.is_file():
                 file.unlink()
 
 
 def fetch_rfc(repo, number):
-    """An RFC by number: a discussion first, an issue second. Returns None when neither exists."""
+    """An RFC by number: a discussion first, an issue second. None when neither exists."""
     owner, name = repo.split("/", 1)
     query = (
         'query{repository(owner:"%s",name:"%s"){discussion(number:%d){title url body author{login} '
         "labels(first:20){nodes{name}} comments(first:100){nodes{author{login}}}}}}" % (owner, name, number)
     )
-    result = cli.run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
+    result = github.run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
     if result.returncode == 0 and result.stdout.strip():
         try:
             node = json.loads(result.stdout)["data"]["repository"]["discussion"]
@@ -178,10 +183,14 @@ def fetch_rfc(repo, number):
                 "author": (node.get("author") or {}).get("login", ""),
                 "body": node.get("body", ""),
                 "labels": [label["name"] for label in (node.get("labels") or {}).get("nodes", [])],
-                "commenters": sorted({(c.get("author") or {}).get("login", "") for c in (node.get("comments") or {}).get("nodes", [])} - {""}),
+                "commenters": sorted(
+                    {(c.get("author") or {}).get("login", "") for c in (node.get("comments") or {}).get("nodes", [])}
+                    - {""}
+                ),
             }
-    issue = cli.gh_cli_json(
-        ["issue", "view", str(number), "--repo", repo, "--json", "title,url,body,author,labels,comments"], check=False
+    issue = github.gh_cli_json(
+        ["issue", "view", str(number), "--repo", repo, "--json", "title,url,body,author,labels,comments"],
+        check=False,
     )
     if not issue:
         return None
@@ -198,7 +207,7 @@ def fetch_rfc(repo, number):
 
 
 def fetch_issue(repo, number):
-    issue = cli.gh_cli_json(
+    issue = github.gh_cli_json(
         ["issue", "view", str(number), "--repo", repo, "--json", "title,body,author,labels,state"], check=False
     )
     if not issue:
@@ -219,7 +228,7 @@ def fetch_issue(repo, number):
 def parse_code_owners(spec_text):
     """{handle: area text} from the Code Owners table in spec-driven-dev.md."""
     owners = {}
-    for line in spec_text.splitlines():
+    for line in (spec_text or "").splitlines():
         match = re.match(r"^\|\s*@([A-Za-z0-9-]+)\s*\|([^|]*)\|\s*$", line.strip())
         if match:
             owners[match.group(1)] = match.group(2).strip().replace("`", "")
@@ -236,39 +245,39 @@ def normalize_wg_name(name):
 def parse_working_groups(readme_text):
     """[{name, file, lead, goal, archived}] from the working-groups README tables."""
     groups, archived = [], False
-    for line in readme_text.splitlines():
+    for line in (readme_text or "").splitlines():
         if line.startswith("#") and "archived" in line.lower():
             archived = True
         match = WG_ROW.match(line.strip())
         if not match:
             continue
         linked, file, plain, lead, goal = match.groups()
-        name = (linked or plain or "").strip().replace("\u2011", "-").replace("\u2010", "-")
+        name = (linked or plain or "").strip().replace("‑", "-").replace("‐", "-")
         if not name or name.lower().startswith("working group"):
             continue
         groups.append({"name": name, "file": file or "", "lead": lead, "goal": goal.strip(), "archived": archived})
     return groups
 
 
-def load_guides(workspace, repo, ref):
+def load_guides(repo, ref):
     """Everything the tiers read from the base branch, fetched once per run."""
-    refresh_base_cache(workspace, repo, ref)
-    contribute = fetch_file(workspace, repo, ref, "docs/dev/contribute.md")
-    spec = fetch_file(workspace, repo, ref, "docs/dev/spec-driven-dev.md")
-    wg_readme = fetch_file(workspace, repo, ref, "docs/dev/working-groups/README.md")
+    refresh_base_cache(repo, ref)
+    contribute = fetch_file(repo, ref, "docs/dev/contribute.md")
+    spec = fetch_file(repo, ref, "docs/dev/spec-driven-dev.md")
+    wg_readme = fetch_file(repo, ref, "docs/dev/working-groups/README.md")
     groups = parse_working_groups(wg_readme)
     for group in groups:
-        group["charter"] = fetch_file(workspace, repo, ref, f"docs/dev/working-groups/{group['file']}") if group["file"] else ""
+        group["charter"] = fetch_file(repo, ref, f"docs/dev/working-groups/{group['file']}") if group["file"] else ""
     return {
         "ref": ref,
         "contribute": contribute,
-        "maintainers": cli.parse_maintainer_table(contribute),
+        "maintainers": github.parse_maintainer_table(contribute),
         "spec": spec,
         "code_owners": parse_code_owners(spec),
         "working_groups": groups,
-        "documentation": fetch_file(workspace, repo, ref, "docs/dev/documentation.md"),
-        "testing": fetch_file(workspace, repo, ref, "docs/dev/testing.md"),
-        "tree": fetch_tree(workspace, repo, ref),
+        "documentation": fetch_file(repo, ref, "docs/dev/documentation.md"),
+        "testing": fetch_file(repo, ref, "docs/dev/testing.md"),
+        "tree": fetch_tree(repo, ref),
     }
 
 
@@ -289,9 +298,10 @@ def find_group(guides, name):
         have = normalize_wg_name(group["name"])
         if have == wanted or wanted in have or have in wanted:
             return group
-    # "smart router" and "cloud hybrid" are the same group; match on the lead's areas is too
-    # loose, so a short alias table covers the names people actually write.
-    aliases = {"smart router": "cloud hybrid", "router": "cloud hybrid", "cloud": "cloud hybrid", "app": "gui app", "gui": "gui app"}
+    # "smart router" and "cloud hybrid" are the same group; matching on the lead's areas is
+    # too loose, so a short alias table covers the names people actually write.
+    aliases = {"smart router": "cloud hybrid", "router": "cloud hybrid", "cloud": "cloud hybrid",
+               "app": "gui app", "gui": "gui app"}
     for alias, target in aliases.items():
         if alias in wanted:
             return find_group(guides, target)
@@ -303,9 +313,8 @@ def find_group(guides, name):
 
 def section_text(body, heading):
     """The text under a `## heading` in the PR template, up to the next heading."""
-    lines = body.splitlines()
     out, active = [], False
-    for line in lines:
+    for line in (body or "").splitlines():
         if line.startswith("#"):
             active = heading.lower() in line.lower()
             continue
@@ -334,8 +343,9 @@ def parse_claim(body):
             claim["kind"] = "fix"
         elif "scope of wg" in lowered or "working group" in lowered:
             claim["kind"] = "working-group"
-            name = re.sub(r"<!--.*?-->", "", text.split(":", 1)[1] if ":" in text else "").strip()
-            claim["working_group"] = name
+            claim["working_group"] = re.sub(
+                r"<!--.*?-->", "", text.split(":", 1)[1] if ":" in text else ""
+            ).strip()
         elif "approved rfc" in lowered:
             claim["kind"] = "rfc"
             found = re.search(r"#\s*(\d+)", text)
@@ -378,7 +388,7 @@ JOB_PATTERN = re.compile(r"^\+  ([A-Za-z0-9_-]+):\s*$")
 def split_diff(diff_text):
     """{path: [lines]} for each file in a unified diff."""
     files, current = {}, None
-    for line in diff_text.splitlines():
+    for line in (diff_text or "").splitlines():
         if line.startswith("diff --git"):
             current = line.split(" b/", 1)[-1].strip() if " b/" in line else None
             if current:
@@ -393,19 +403,28 @@ def git_ref(ref):
 
 
 def git_grep_base(checkout, base_ref, term, pathspecs=()):
-    if not checkout or not Path(checkout, ".git").exists():
+    if not checkout:
         return []
-    cmd = ["git", "-C", str(checkout), "grep", "-n", "-F", "-e", term, git_ref(base_ref), "--", *pathspecs]
-    result = cli.run(cmd, check=False)
+    result = checkout.git("grep", "-n", "-F", "-e", term, git_ref(base_ref), "--", *pathspecs, check=False)
     return [line.split(":", 1)[-1] for line in (result.stdout or "").splitlines()[:5]]
+
+
+def files_on_base(checkout, base_ref, paths):
+    if not checkout:
+        return set(paths)
+    present = set()
+    for path in paths:
+        if checkout.git("cat-file", "-e", f"{git_ref(base_ref)}:{path}", check=False).returncode == 0:
+            present.add(path)
+    return present
 
 
 def surface_hints(diff_text, changed_paths, checkout, base_ref):
     """Leads for the facts tier: things in the diff that usually mean a surface changed.
 
-    Each is a fact about the text of the diff, not a judgment; the model confirms or
-    dismisses them. The point is that a route registration or an `add_option` cannot be
-    missed by a reader who skimmed, because it is listed here by line.
+    Each is a fact about the text of the diff, not a judgment; the model confirms or dismisses
+    them. The point is that a route registration or an `add_option` cannot be missed by a
+    reader who skimmed, because it is listed here by line.
     """
     leads = []
     files = split_diff(diff_text)
@@ -453,7 +472,7 @@ def surface_hints(diff_text, changed_paths, checkout, base_ref):
             leads.append(f"desktop app file changed: {path}")
         if path.startswith("docs/dev/working-groups/"):
             leads.append(f"working-group charter edited in this PR: {path}")
-        if path == "mkdocs.yml" or path == "docs/mkdocs.yml":
+        if path in ("mkdocs.yml", "docs/mkdocs.yml"):
             leads.append("docs navigation (mkdocs.yml) changed")
         if path.startswith("docs/") and path.endswith(".md") and path not in files_on_base(checkout, base_ref, [path]):
             leads.append(f"new documentation page: {path}")
@@ -471,56 +490,36 @@ def surface_hints(diff_text, changed_paths, checkout, base_ref):
     return unique[:60]
 
 
-def files_on_base(checkout, base_ref, paths):
-    if not checkout or not Path(checkout, ".git").exists():
-        return set(paths)
-    present = set()
-    for path in paths:
-        result = cli.run(["git", "-C", str(checkout), "cat-file", "-e", f"{git_ref(base_ref)}:{path}"], check=False)
-        if result.returncode == 0:
-            present.add(path)
-    return present
-
-
 # --- Context assembly -------------------------------------------------------------------
 
 
-def checkout_path(workspace):
-    return Path(workspace) / cli.CONFIG_DIR / "checkout"
-
-
-def ensure_checkout(workspace, repo, base_ref):
-    checkout = checkout_path(workspace)
-    if not Path(checkout, ".git").exists():
-        return None
-    cli.run(["git", "-C", str(checkout), "fetch", "--quiet", "origin", base_ref], check=False)
-    return checkout
-
-
-def gather_context(workspace, repo, number, replay_sha=""):
+def gather_context(ctx, number, replay_sha=""):
     """Everything the three tiers will read, fetched once."""
+    repo = ctx.repo
     meta = fetch_pr(repo, number)
-    base_ref = meta.get("baseRefName") or cli.load_config(workspace).get("branch") or "main"
+    base_ref = meta.get("baseRefName") or "main"
     head_sha = replay_sha or meta.get("headRefOid", "")
     diff, replay_files = fetch_diff(repo, number, base_ref, replay_sha)
     files = replay_files if replay_files is not None else [
-        {"path": f.get("path"), "additions": f.get("additions"), "deletions": f.get("deletions")} for f in meta.get("files") or []
+        {"path": f.get("path"), "additions": f.get("additions"), "deletions": f.get("deletions")}
+        for f in meta.get("files") or []
     ]
-    checkout = ensure_checkout(workspace, repo, base_ref)
-    # The guides are always read from the base branch: a PR is judged against today's
-    # policy. The *code* it is compared with is the base as the PR saw it — for a merged PR
-    # that is the merge commit's first parent, because today's main already contains the
-    # PR and would report its every route and key as "already there".
+    checkout = ctx.checkout()
+    checkout.git("fetch", "--quiet", "origin", base_ref, check=False)
+    # The guides are always read from the base branch: a PR is judged against today's policy.
+    # The *code* it is compared with is the base as the PR saw it — for a merged PR that is
+    # the merge commit's first parent, because today's main already contains the PR and would
+    # report its every route and key as "already there".
     code_ref = base_ref
     merge_sha = (meta.get("mergeCommit") or {}).get("oid", "")
-    if merge_sha and checkout:
-        cli.run(["git", "-C", str(checkout), "fetch", "--quiet", "origin", merge_sha], check=False)
-        parent = cli.run(["git", "-C", str(checkout), "rev-parse", f"{merge_sha}^1"], check=False)
+    if merge_sha:
+        checkout.git("fetch", "--quiet", "origin", merge_sha, check=False)
+        parent = checkout.git("rev-parse", f"{merge_sha}^1", check=False)
         if parent.returncode == 0 and parent.stdout.strip():
             code_ref = parent.stdout.strip()
-    guides = load_guides(workspace, repo, base_ref)
+    guides = load_guides(repo, base_ref)
     if code_ref != base_ref:
-        guides["tree"] = fetch_tree(workspace, repo, code_ref)
+        guides["tree"] = fetch_tree(repo, code_ref)
     claim = parse_claim(meta.get("body", ""))
     rfc = fetch_rfc(repo, claim["rfc"]) if claim["rfc"] else None
     issues = [issue for issue in (fetch_issue(repo, n) for n in claim["fixes"][:4]) if issue]
@@ -531,7 +530,7 @@ def gather_context(workspace, repo, number, replay_sha=""):
         "meta": {
             "number": number,
             "title": meta.get("title", ""),
-            "author": cli.pr_author_handle(meta),
+            "author": github.pr_author_handle(meta),
             "url": meta.get("url", ""),
             "state": meta.get("state", ""),
             "is_draft": bool(meta.get("isDraft")),
@@ -565,8 +564,8 @@ def diff_for_prompt(context):
     if len(diff) <= MAX_DIFF_CHARS:
         return diff
     return diff[:MAX_DIFF_CHARS] + (
-        f"\n\n[Diff truncated at {MAX_DIFF_CHARS} of {len(diff)} characters. The changed-file list above is "
-        "complete; fetch a file at the head SHA if you need the rest.]"
+        f"\n\n[Diff truncated at {MAX_DIFF_CHARS} of {len(diff)} characters. The changed-file list "
+        "above is complete; fetch a file at the head SHA if you need the rest.]"
     )
 
 
@@ -597,6 +596,10 @@ def pr_header(context):
     )
 
 
+def indent(text, prefix="    "):
+    return "\n".join(prefix + line for line in str(text).splitlines())
+
+
 def claim_block(context):
     claim = context["claim"]
     lines = [f"Template checkbox: {claim['kind']}"]
@@ -605,7 +608,9 @@ def claim_block(context):
     if claim["rfc"]:
         rfc = context["rfc"]
         if rfc:
-            lines.append(f"RFC linked: #{claim['rfc']} ({rfc['kind']}, labels: {', '.join(rfc['labels']) or 'none'}) — {rfc['title']}")
+            lines.append(
+                f"RFC linked: #{claim['rfc']} ({rfc['kind']}, labels: {', '.join(rfc['labels']) or 'none'}) — {rfc['title']}"
+            )
         else:
             lines.append(f"RFC linked: #{claim['rfc']} (could not be fetched)")
     if claim["fixes"]:
@@ -621,10 +626,6 @@ def claim_block(context):
     return "\n".join(lines)
 
 
-def indent(text, prefix="    "):
-    return "\n".join(prefix + line for line in str(text).splitlines())
-
-
 def issues_block(context):
     if not context["issues"]:
         return "No linked issues."
@@ -635,6 +636,54 @@ def issues_block(context):
             + indent((issue["body"] or "")[:3000])
         )
     return "\n\n".join(parts)
+
+
+def rfc_block(context):
+    rfc = context["rfc"]
+    if not rfc:
+        return ("No RFC is linked." if not context["claim"]["rfc"]
+                else f"RFC #{context['claim']['rfc']} is linked but could not be fetched.")
+    return (
+        f"### RFC #{rfc['number']} ({rfc['kind']}): {rfc['title']}\n"
+        f"Author: {rfc['author']}    Labels: {', '.join(rfc['labels']) or 'none'}\n"
+        f"Commenters: {', '.join(rfc['commenters']) or 'none'}\n\n" + indent(rfc["body"])
+    )
+
+
+def charters_block(context):
+    guides, group = context["guides"], context["group"]
+    groups = [group] if group else [g for g in guides["working_groups"] if not g.get("archived")]
+    parts = []
+    for g in groups:
+        head = f"### Working group: {g['name']} (lead @{g['lead']})\nGoal: {g['goal']}"
+        parts.append(head + ("\nCharter:\n" + indent(g["charter"]) if g.get("charter")
+                             else "\nNo charter file exists for this group yet."))
+    return "\n\n".join(parts)
+
+
+def surfaces_block(facts):
+    lines = []
+    for index, surface in enumerate(facts.get("surfaces", [])):
+        was = f"; was: {surface['was']}" if surface.get("was") else ""
+        lines.append(f"{index}. [{surface['kind']}] {surface['what']} ({surface.get('where', '')}{was})")
+    return "\n".join(lines) or "(none — the diff is internal only)"
+
+
+def breaking_block(facts):
+    lines = [f"- {c['what']} (migration: {c.get('migration', 'none')}; {c.get('where', '')})"
+             for c in facts.get("breaking_changes", [])]
+    return "\n".join(lines) or "- none"
+
+
+def guide_sections(text, headings):
+    """The sections of a guide whose heading contains one of `headings`, in order."""
+    out, keep = [], False
+    for line in (text or "").splitlines():
+        if line.startswith("#"):
+            keep = any(h.lower() in line.lower() for h in headings)
+        if keep:
+            out.append(line)
+    return "\n".join(out)
 
 
 # --- Prompts ----------------------------------------------------------------------------
@@ -696,49 +745,9 @@ Each is a fact about the diff text. Confirm or dismiss it; do not skip one.
 ## Changed files (+additions -deletions path)
 {files_block(context)}
 
-{fetch_instructions(context)}
-## Diff
+{fetch_instructions(context)}## Diff
 {diff_for_prompt(context)}
 """
-
-
-def surfaces_block(facts):
-    lines = []
-    for index, surface in enumerate(facts.get("surfaces", [])):
-        was = f"; was: {surface['was']}" if surface.get("was") else ""
-        lines.append(f"{index}. [{surface['kind']}] {surface['what']} ({surface.get('where', '')}{was})")
-    return "\n".join(lines) or "(none — the diff is internal only)"
-
-
-def breaking_block(facts):
-    lines = []
-    for change in facts.get("breaking_changes", []):
-        lines.append(f"- {change['what']} (migration: {change.get('migration', 'none')}; {change.get('where', '')})")
-    return "\n".join(lines) or "- none"
-
-
-def charters_block(context):
-    guides, group = context["guides"], context["group"]
-    groups = [group] if group else [g for g in guides["working_groups"] if not g.get("archived")]
-    parts = []
-    for g in groups:
-        head = f"### Working group: {g['name']} (lead @{g['lead']})\nGoal: {g['goal']}"
-        if g.get("charter"):
-            parts.append(head + "\nCharter:\n" + indent(g["charter"]))
-        else:
-            parts.append(head + "\nNo charter file exists for this group yet.")
-    return "\n\n".join(parts)
-
-
-def rfc_block(context):
-    rfc = context["rfc"]
-    if not rfc:
-        return "No RFC is linked." if not context["claim"]["rfc"] else f"RFC #{context['claim']['rfc']} is linked but could not be fetched."
-    return (
-        f"### RFC #{rfc['number']} ({rfc['kind']}): {rfc['title']}\n"
-        f"Author: {rfc['author']}    Labels: {', '.join(rfc['labels']) or 'none'}\n"
-        f"Commenters: {', '.join(rfc['commenters']) or 'none'}\n\n" + indent(rfc["body"])
-    )
 
 
 def cover_prompt(context, facts, out_path):
@@ -767,8 +776,7 @@ Write the JSON result to: {out_path}
 ## Documentation tree on the base branch (where a statement of intended behavior would live)
 {docs_tree}
 
-{fetch_instructions(context)}
-## PR body
+{fetch_instructions(context)}## PR body
 {indent(context['meta']['body'] or '(empty)')}
 
 ## Summary of the diff (from the facts pass)
@@ -776,24 +784,20 @@ Write the JSON result to: {out_path}
 """
 
 
-def guide_sections(text, headings):
-    """The sections of a guide whose heading contains one of `headings`, in order."""
-    out, keep = [], False
-    for line in text.splitlines():
-        if line.startswith("#"):
-            keep = any(h.lower() in line.lower() for h in headings)
-        if keep:
-            out.append(line)
-    return "\n".join(out)
-
-
 def quality_prompt(context, facts, out_path):
     guides = context["guides"]
     tree = guides["tree"]
-    docs_tree = "\n".join(p for p in tree if p.startswith("docs/") or p == "README.md" or p == "mkdocs.yml")
+    docs_tree = "\n".join(p for p in tree if p.startswith("docs/") or p in ("README.md", "mkdocs.yml"))
     test_tree = "\n".join(p for p in tree if re.match(r"^(test/|tests/|\.github/workflows/)", p))
-    documentation = guide_sections(guides["documentation"], ["completes the feature", "Required sections", "File and Directory", "What belongs"])
-    testing = guide_sections(guides["testing"], ["Principles", "Tests ship", "isn't in CI", "must be able to fail", "Extend existing", "mechanism, not the data", "Where Tests Go", "CI Expectations", "What Reviewers Reject"])
+    documentation = guide_sections(
+        guides["documentation"],
+        ["completes the feature", "Required sections", "File and Directory", "What belongs"],
+    )
+    testing = guide_sections(
+        guides["testing"],
+        ["Principles", "Tests ship", "isn't in CI", "must be able to fail", "Extend existing",
+         "mechanism, not the data", "Where Tests Go", "CI Expectations", "What Reviewers Reject"],
+    )
     return f"""{pr_header(context)}
 Write the JSON result to: {out_path}
 
@@ -815,8 +819,7 @@ Write the JSON result to: {out_path}
 ## Test and CI tree on the base branch
 {test_tree}
 
-{fetch_instructions(context)}
-## PR body
+{fetch_instructions(context)}## PR body
 {indent(context['meta']['body'] or '(empty)')}
 
 ## Diff
@@ -929,53 +932,43 @@ TIERS = {
 }
 
 
-def run_tier(workspace, context, tier, facts=None, max_attempts=3):
+def run_tier(context, tier, facts=None):
     skill, build = TIERS[tier]
-    number = context["number"]
-    pending_dir = cli.artifact_dir(workspace, context["repo"], "prs") / ".pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    feedback = ""
-    for attempt in range(1, max_attempts + 1):
-        out_path = pending_dir / f"pr-{number}.{tier}.{int(time.time() * 1000)}.json"
-        prompt = (build(context, out_path) if tier == "facts" else build(context, facts, out_path))
-        prompt += "\n" + OUTPUT_SHAPES[tier] + "\n" + feedback
-        try:
-            output = cli.run_pi(skill, prompt, workspace, base_ref=context["meta"]["base_ref"], model=cli.load_config(workspace).get("model", ""))
-        except SystemExit as exc:
-            if exc.code in (130, None) or attempt == max_attempts:
-                raise
-            print(f"Pi run failed (exit {exc.code}); retrying {tier}.", flush=True)
-            continue
-        if not out_path.exists():
-            cli.write_json_artifact_from_output(out_path, output)
-        candidate, raw = None, ""
-        if out_path.exists():
-            raw = out_path.read_text(encoding="utf-8")
-            candidate = cli.extract_json_object(raw)
-        errors = [] if candidate is not None else [f"No JSON object was written to {out_path}."]
-        if candidate is not None:
-            if tier == "facts":
-                errors = facts_errors(candidate, context["guides"])
-            elif tier == "cover":
-                errors = cover_errors(candidate, facts)
-            else:
-                errors = quality_errors(candidate)
-        if not errors:
-            if tier == "facts":
-                settle_known_keys(candidate, context)
-                settle_ci_infra(candidate, context)
-                settle_feature_ci(candidate, context)
-                settle_docs_structure(candidate, context)
-                annotate_known_names(candidate, context)
-                settle_default_breaks(candidate, context)
-                dedupe_breaks(candidate)
-            return candidate
-        error_list = "\n".join(f"- {e}" for e in errors)
-        print(f"\n{tier} attempt {attempt} failed validation:\n{error_list}\n", flush=True)
-        if attempt == max_attempts:
-            raise SystemExit(f"PR {tier} failed validation after {max_attempts} attempts:\n{error_list}")
-        feedback = "\n\n" + cli.build_release_review_feedback(error_list, raw)
-    raise SystemExit(f"PR {tier} produced no usable artifact.")
+
+    def prompt(paths, feedback):
+        out = paths["tier"]
+        body = build(context, out) if tier == "facts" else build(context, facts, out)
+        return body + "\n" + OUTPUT_SHAPES[tier] + "\n" + feedback
+
+    def validate(contents):
+        candidate = pi.extract_json_object(contents["tier"])
+        if candidate is None:
+            return None, ["The artifact file must contain a valid JSON object."]
+        if tier == "facts":
+            errors = facts_errors(candidate, context["guides"])
+        elif tier == "cover":
+            errors = cover_errors(candidate, facts)
+        else:
+            errors = quality_errors(candidate)
+        return candidate, errors
+
+    candidate = pi.generate(
+        skill, {"tier": ".json"}, prompt, validate,
+        checkout=str(context["checkout"].path), base_ref=context["meta"]["base_ref"],
+    )
+    if tier == "facts":
+        settle_known_keys(candidate, context)
+        settle_ci_infra(candidate, context)
+        settle_feature_ci(candidate, context)
+        settle_docs_structure(candidate, context)
+        annotate_known_names(candidate, context)
+        settle_default_breaks(candidate, context)
+        dedupe_breaks(candidate)
+    return candidate
+
+
+def surface_kinds_of(facts):
+    return {s.get("kind") for s in facts.get("surfaces", [])}
 
 
 def settle_ci_infra(facts, context):
@@ -996,8 +989,8 @@ IDENTIFIER = re.compile(r"`([A-Za-z_][A-Za-z0-9_.-]{3,})`|\b([a-z][a-z0-9]*_[a-z
 def annotate_known_names(facts, context):
     """For each surface, say which identifiers it names already exist in the base branch's
     source. The cover pass reads this: a field the server already stores and reads (from a
-    hand-edited file, from another path) is an existing contract, and honoring it on one
-    more path is a fix. Without the grep the model can only guess that."""
+    hand-edited file, from another path) is an existing contract, and honoring it on one more
+    path is a fix. Without the grep the model can only guess that."""
     checkout, ref = context["checkout"], context["meta"]["code_ref"]
     if not checkout:
         return
@@ -1017,9 +1010,9 @@ def annotate_known_names(facts, context):
 
 def settle_default_breaks(facts, context):
     """A changed default is a breaking change by the vocabulary's own definition: every
-    existing install picks it up without opting in. When the model listed the surface but
-    not the break, the break is added from the surface, disclosed only if the body's
-    Breaking Changes box was ticked."""
+    existing install picks it up without opting in. When the model listed the surface but not
+    the break, the break is added from the surface, disclosed only if the body's Breaking
+    Changes box was ticked."""
     breaks = facts.setdefault("breaking_changes", [])
 
     def words(text):
@@ -1028,7 +1021,6 @@ def settle_default_breaks(facts, context):
     for surface in facts.get("surfaces", []):
         if surface.get("kind") != "config-default":
             continue
-        # Already listed if a break names the same key, or says mostly the same words.
         mine = words(surface.get("what", ""))
         names = [a or b for a, b in IDENTIFIER.findall(surface.get("what", ""))]
         listed = any(
@@ -1063,22 +1055,23 @@ def settle_docs_structure(facts, context):
             surface["what"] += " (edits inside existing pages)"
 
 
-# Every surface a CI job could exist to build or exercise: everything but CI itself and
-# the kinds that are restructurings rather than things.
+# Every surface a CI job could exist to build or exercise: everything but CI itself and the
+# kinds that are restructurings rather than things.
 FEATURE_KINDS = set(SURFACE_KINDS) - {"internal", "ci-infra", "test-refactor", "refactor", "docs-structure"}
 
 
 def settle_feature_ci(facts, context):
     """CI jobs that build or test the feature this same PR adds belong to that feature. CI
-    stands as its own surface only when the PR adds a workflow file or touches shared
-    actions or helpers, or when CI is all the PR does."""
-    kinds = surface_kinds_of(facts)
-    if not (kinds & FEATURE_KINDS):
+    stands as its own surface only when the PR adds a workflow file or touches shared actions
+    or helpers, or when CI is all the PR does."""
+    if not (surface_kinds_of(facts) & FEATURE_KINDS):
         return
     paths = [f["path"] for f in context["files"]]
     shared = any(p.startswith(".github/actions/") or re.match(r"^tests?/utils/", p) for p in paths)
     workflows = [p for p in paths if p.startswith(".github/workflows/")]
-    new_workflow = any(p not in files_on_base(context["checkout"], context["meta"]["code_ref"], workflows) for p in workflows)
+    new_workflow = any(
+        p not in files_on_base(context["checkout"], context["meta"]["code_ref"], workflows) for p in workflows
+    )
     if shared or new_workflow:
         return
     for surface in facts.get("surfaces", []):
@@ -1124,7 +1117,7 @@ def settle_known_keys(facts, context):
 # --- Derivation -------------------------------------------------------------------------
 
 
-QUOTED = re.compile(r"[\"'\u2018\u2019\u201c\u201d]([^\"'\u2018\u2019\u201c\u201d]{12,})[\"'\u2018\u2019\u201c\u201d]")
+QUOTED = re.compile(r"[\"'‘’“”]([^\"'‘’“”]{12,})[\"'‘’“”]")
 
 
 def squash(text):
@@ -1133,12 +1126,13 @@ def squash(text):
 
 def settle_charter_quotes(cover, group):
     """A charter covers a surface only through a roadmap or scope *item*, which in every
-    charter is a bullet line. A quote drawn from a heading or a goal paragraph ("improve
-    test coverage while reducing delays") is the model reaching for the broadest sentence
+    charter is a bullet line. A quote drawn from a heading or a goal paragraph ("improve test
+    coverage while reducing delays") is the model reaching for the broadest sentence
     available; the surface stays uncovered and the note says why."""
     if not group or not group.get("charter"):
         return
-    bullets = [squash(line.lstrip("-*[] x")) for line in group["charter"].splitlines() if line.lstrip().startswith(("-", "*"))]
+    bullets = [squash(line.lstrip("-*[] x")) for line in group["charter"].splitlines()
+               if line.lstrip().startswith(("-", "*"))]
     for item in cover.get("surfaces", []):
         if not item.get("covered"):
             continue
@@ -1171,14 +1165,14 @@ def derive_scope(context, facts, cover):
     # the intent, and honoring it is a fix whatever the cover pass concluded.
     for i in external:
         if surfaces[i].get("was") in ("failing", "ignored"):
-            judged[i] = {"index": i, "covered": True, "by": f"fix: the base branch already {surfaces[i]['was']} this (existing contract)"}
+            judged[i] = {"index": i, "covered": True,
+                         "by": f"fix: the base branch already {surfaces[i]['was']} this (existing contract)"}
         # The converse: something that was not there before is new, and no doc describing a
         # neighboring feature makes it a fix. Only a charter or an RFC can cover it.
         elif surfaces[i].get("was") == "absent" and kind in ("fix", "none") and judged.get(i, {}).get("covered"):
-            judged[i] = {**judged[i], "covered": False, "by": judged[i]["by"] + " [a new surface is not a fix; only a charter or RFC covers it]"}
+            judged[i] = {**judged[i], "covered": False,
+                         "by": judged[i]["by"] + " [a new surface is not a fix; only a charter or RFC covers it]"}
     uncovered = [i for i in external if not judged.get(i, {}).get("covered")]
-    # A cover of kind X only counts for surfaces the model said were covered *by* X or by a
-    # fix; a charter cannot cover a surface the model attributed to an unlinked RFC.
     group = context["group"] or (find_group(context["guides"], name) if kind == "working-group" else None)
     rfc = context["rfc"]
     rfc_approved = bool(rfc and "rfc:on-roadmap" in rfc.get("labels", []))
@@ -1193,7 +1187,7 @@ def derive_scope(context, facts, cover):
             return "needs-rfc", name, uncovered or external, notes + [f"no working group named {name!r} exists in the table"]
         if not group.get("charter"):
             return "no-charter", group["name"], external, notes
-        if uncovered or (migrating):
+        if uncovered or migrating:
             return "exceeds-working-group", group["name"], uncovered or external, notes
         return "working-group", group["name"], [], notes
     if kind == "rfc":
@@ -1229,21 +1223,17 @@ def derive_body_match(context, facts, scope):
         if not change.get("disclosed"):
             reasons.append(f"undisclosed breaking change: {change['what']}")
     claim = context["claim"]["kind"]
-    # A fix claim is wrong only where it was load-bearing: a PR that a charter covers may
-    # also close an issue, and "Fixes #N" on it is a link, not a false claim.
+    # A fix claim is wrong only where it was load-bearing: a PR that a charter covers may also
+    # close an issue, and "Fixes #N" on it is a link, not a false claim.
     if claim == "fix" and scope in ("needs-rfc", "exceeds-working-group", "exceeds-rfc", "no-charter"):
         fixes = context["claim"].get("fixes") or []
         how = f"presents this as a fix ({', '.join(f'#{n}' for n in fixes)})" if fixes else "ticks 'fixes something'"
         reasons.append(f"the body {how} but the diff changes scope, surface area, or experience")
-    if claim == "working-group" and scope in ("needs-rfc",) and not context["group"]:
+    if claim == "working-group" and scope == "needs-rfc" and not context["group"]:
         reasons.append(f"the body names a working group ({context['claim']['working_group']}) that is not in the table")
     if claim == "rfc" and not context["rfc"]:
         reasons.append(f"the body links RFC #{context['claim']['rfc']}, which could not be found")
     return ("no" if reasons else "yes"), reasons
-
-
-def surface_kinds_of(facts):
-    return {s.get("kind") for s in facts.get("surfaces", [])}
 
 
 def code_owners_for(context, facts):
@@ -1255,17 +1245,16 @@ def code_owners_for(context, facts):
     return [(handle, area) for handle, area in owners.items() if any(word in area.lower() for word in wanted)]
 
 
-def blame_authors(workspace, context, facts=None):
-    """Who wrote the code this PR acts on, ranked. Two passes: the lines the hunks touch,
-    and the identifiers the surfaces name, grepped across the source tree. The second is
-    what finds the person who built the feature a PR extends (the sd-cpp image editing an
-    image-edit stub for another backend mirrors), whom the hunks alone never reach."""
-    script = cli.repo_root() / "scripts" / "pr-code-authors.sh"
+def blame_authors(context, facts=None):
+    """Who wrote the code this PR acts on, ranked. Two passes: the lines the hunks touch, and
+    the identifiers the surfaces name, grepped across the source tree. The second is what
+    finds the person who built the feature a PR extends, whom the hunks alone never reach."""
+    script = pi.scripts_dir() / "pr-code-authors.sh"
     if not script.exists() or not context["checkout"]:
         return []
     env = dict(os.environ)
-    env["REPO_MANAGER_CACHE_DIR"] = str(cli.project_docs_cache_dir(workspace))
-    env["REPO_MANAGER_CHECKOUT"] = str(context["checkout"])
+    env["REPO_MANAGER_CACHE_DIR"] = str(pi.cache_dir())
+    env["REPO_MANAGER_CHECKOUT"] = str(context["checkout"].path)
     env["REPO_MANAGER_BASE_REF"] = context["meta"]["base_ref"]
     terms, seen = [], set()
     for surface in (facts or {}).get("surfaces", []):
@@ -1274,9 +1263,9 @@ def blame_authors(workspace, context, facts=None):
             if name and name not in seen and len(terms) < 6:
                 seen.add(name)
                 terms.append(name)
-    # The identifiers the diff itself leans on: snake_case names repeated in added lines
-    # (`image_edits`, `resolve_auto_ctx_size`). The surfaces describe a change in words; the
-    # code names the function, and the function is what blame can find an author for.
+    # The identifiers the diff itself leans on: snake_case names repeated in added lines. The
+    # surfaces describe a change in words; the code names the function, and the function is
+    # what blame can find an author for.
     counts = {}
     for line in context["diff"].splitlines():
         if line.startswith("+") and not line.startswith("+++"):
@@ -1290,7 +1279,7 @@ def blame_authors(workspace, context, facts=None):
     for args in ([], terms) if terms else ([],):
         result = subprocess.run(
             ["bash", str(script), context["repo"], str(context["number"]), *args],
-            cwd=workspace, env=env, capture_output=True, text=True,
+            cwd=str(context["checkout"].path), env=env, capture_output=True, text=True, check=False,
         )
         for line in (result.stdout or "").splitlines():
             match = re.match(r"^- @([A-Za-z0-9-]+) — relevance (\d+)", line)
@@ -1299,7 +1288,7 @@ def blame_authors(workspace, context, facts=None):
     return sorted(scores.items(), key=lambda t: -t[1])
 
 
-def suggest_reviewers(workspace, context, facts, scope, scope_name):
+def suggest_reviewers(context, facts, scope, scope_name):
     """Two or three reviewers, never the author, each with the reason they are named.
 
     Order of evidence: the code owner the guide requires for this surface, the lead of the
@@ -1314,25 +1303,30 @@ def suggest_reviewers(workspace, context, facts, scope, scope_name):
         handle = str(handle).lstrip("@")
         if not handle or handle.lower() == author or handle.lower() in {c["handle"].lower() for c in candidates}:
             return
-        candidates.append({"handle": handle, "basis": basis, "detail": detail, "in_maintainer_table": handle.lower() in maintainers})
+        candidates.append({"handle": handle, "basis": basis, "detail": detail,
+                           "in_maintainer_table": handle.lower() in maintainers})
 
     for owner, area in code_owners_for(context, facts):
         add(owner, "code-owner", area)
-    group = context["group"] or (find_group(context["guides"], scope_name) if scope in ("working-group", "exceeds-working-group", "no-charter") else None)
+    group = context["group"] or (
+        find_group(context["guides"], scope_name)
+        if scope in ("working-group", "exceeds-working-group", "no-charter") else None
+    )
     if group:
         add(group["lead"], "wg-lead", group["name"])
     rfc = context["rfc"]
     if rfc:
         for login in rfc.get("commenters", []):
             if login.lower() in maintainers:
-                add(maintainers[login.lower()].get("handle", login), "rfc-reviewer", f"commented on RFC #{rfc['number']}")
+                add(maintainers[login.lower()].get("handle", login), "rfc-reviewer",
+                    f"commented on RFC #{rfc['number']}")
     areas = [str(a).lower() for a in facts.get("areas", [])]
     scored = []
     for login, entry in maintainers.items():
         owned = [a.lower() for a in entry.get("areas", [])]
-        # "smart router" and "smart router and orchestration" are the same area written by
-        # two maintainers, so a multi-word term that contains the other matches. A single
-        # word matches only itself: `cli` is not `new cli commands`.
+        # "smart router" and "smart router and orchestration" are the same area written by two
+        # maintainers, so a multi-word term that contains the other matches. A single word
+        # matches only itself: `cli` is not `new cli commands`.
         hit = sorted({
             o for a in areas for o in owned
             if a == o or (" " in a and a in o) or (" " in o and o in a and " " in a)
@@ -1340,16 +1334,15 @@ def suggest_reviewers(workspace, context, facts, scope, scope_name):
         if hit:
             scored.append((len(hit), login, hit))
     # Whoever wrote most of the code this PR touches comes before the area maintainers: the
-    # person who built the feature is the reviewer the maintainer would ask for first, and
-    # a subject-area term is a weaker match than a blame line.
-    blamed = blame_authors(workspace, context, facts)
+    # person who built the feature is the reviewer the maintainer would ask for first, and a
+    # subject-area term is a weaker match than a blame line.
+    blamed = blame_authors(context, facts)
     if blamed and blamed[0][1] >= 10:
         add(blamed[0][0], "code-author", f"wrote code this PR touches (blame relevance {blamed[0][1]})")
     for _, login, hit in sorted(scored, key=lambda t: (-t[0], t[1])):
         add(maintainers[login].get("handle", login), "area", ", ".join(hit))
     for login, relevance in blamed:
         add(login, "code-author", f"wrote code this PR touches (blame relevance {relevance})")
-    # The slate: the required people first, then fill to three from the strongest evidence.
     required = [c for c in candidates if c["basis"] in ("code-owner", "wg-lead")]
     rest = [c for c in candidates if c not in required]
     slate = (required + rest)[:3]
@@ -1362,71 +1355,24 @@ def suggest_reviewers(workspace, context, facts, scope, scope_name):
 
 def settle_rfc_disclosure(facts, cover, context):
     """A breaking change the linked RFC describes is disclosed: the RFC is part of the PR's
-    description once the body links it, and the body need not repeat it. A break is taken
-    as RFC-described when the cover pass matched an RFC-covered surface that says mostly
-    the same thing."""
+    description once the body links it, and the body need not repeat it."""
     rfc = context.get("rfc")
     if not rfc or cover.get("kind") != "rfc":
         return
+
     def words(text):
         return {w for w in re.findall(r"[a-z0-9_.]+", str(text).lower()) if len(w) > 3}
+
     surfaces = facts.get("surfaces", [])
-    covered = [surfaces[i["index"]] for i in cover.get("surfaces", []) if i.get("covered") and isinstance(i.get("index"), int) and i["index"] < len(surfaces)]
+    covered = [surfaces[i["index"]] for i in cover.get("surfaces", [])
+               if i.get("covered") and isinstance(i.get("index"), int) and i["index"] < len(surfaces)]
     for change in facts.get("breaking_changes", []):
         if change.get("disclosed"):
             continue
         mine = words(change.get("what", ""))
-        if mine and any(len(mine & words(s_["what"])) / len(mine) >= 0.5 for s_ in covered):
+        if mine and any(len(mine & words(s["what"])) / len(mine) >= 0.5 for s in covered):
             change["disclosed"] = True
             change["disclosed_by"] = f"RFC #{rfc['number']}"
-
-
-def assemble(workspace, context, facts, cover, quality, started):
-    scope, scope_name, uncovered, notes = derive_scope(context, facts, cover)
-    cover = cover["cover"]
-    settle_rfc_disclosure(facts, cover, context)
-    label = derive_label(scope, context)
-    body_match, body_reasons = derive_body_match(context, facts, scope)
-    docs_tests = "gaps" if quality["docs"].get("status") == "gaps" or quality["tests"].get("status") == "gaps" else "ok"
-    reviewers = suggest_reviewers(workspace, context, facts, scope, scope_name)
-    surfaces = facts.get("surfaces", [])
-    scope_display = scope + (f" ({scope_name})" if scope_name else "")
-    outputs = {
-        "label": label,
-        "scope": scope,
-        "scope_name": scope_name,
-        "scope_display": scope_display,
-        "body_matches_diff": body_match,
-        "docs_and_tests": docs_tests,
-        "suggested_reviewers": [r["handle"] for r in reviewers],
-    }
-    explanation = {
-        "diff": facts.get("explanation", ""),
-        "scope": scope_paragraph(context, facts, cover, scope, scope_name, uncovered, notes, label),
-        "body": body_paragraph(context, body_match, body_reasons),
-        "quality": quality_paragraph(quality),
-        "reviewers": reviewers_paragraph(reviewers),
-    }
-    return {
-        "triage_version": TRIAGE_VERSION,
-        "repo": context["repo"],
-        "pr_number": context["number"],
-        "head_sha": context["meta"]["head_sha"],
-        "title": context["meta"]["title"],
-        "author": context["meta"]["author"],
-        "base_ref": context["meta"]["base_ref"],
-        "replay_sha": context["meta"]["replay_sha"],
-        "claim": context["claim"],
-        "facts": facts,
-        "cover": cover,
-        "quality": quality,
-        "reviewers": reviewers,
-        "uncovered_surfaces": [surfaces[i] for i in uncovered if i < len(surfaces)],
-        "outputs": outputs,
-        "explanation": explanation,
-        "generation_seconds": round(time.monotonic() - started, 1),
-        "reviewed_at": cli.now_iso(),
-    }
 
 
 def brief(text, limit=120):
@@ -1485,87 +1431,88 @@ def reviewers_paragraph(reviewers):
     return " ".join(f"{r['handle'].lstrip('@')}: {names[r['basis']].format(detail=r['detail'])}." for r in reviewers)
 
 
+def assemble(context, facts, cover, quality, started, now_iso):
+    scope, scope_name, uncovered, notes = derive_scope(context, facts, cover)
+    cover = cover["cover"]
+    settle_rfc_disclosure(facts, cover, context)
+    label = derive_label(scope, context)
+    body_match, body_reasons = derive_body_match(context, facts, scope)
+    docs_tests = "gaps" if quality["docs"].get("status") == "gaps" or quality["tests"].get("status") == "gaps" else "ok"
+    reviewers = suggest_reviewers(context, facts, scope, scope_name)
+    surfaces = facts.get("surfaces", [])
+    outputs = {
+        "label": label,
+        "scope": scope,
+        "scope_name": scope_name,
+        "scope_display": scope + (f" ({scope_name})" if scope_name else ""),
+        "body_matches_diff": body_match,
+        "docs_and_tests": docs_tests,
+        "suggested_reviewers": [r["handle"] for r in reviewers],
+    }
+    meta = context["meta"]
+    return {
+        "triage_version": TRIAGE_VERSION,
+        "repo": context["repo"],
+        "pr_number": context["number"],
+        "head_sha": meta["head_sha"],
+        "title": meta["title"],
+        "author": meta["author"],
+        "url": meta["url"],
+        "state": meta["state"],
+        "is_draft": meta["is_draft"],
+        "labels": meta["labels"],
+        "base_ref": meta["base_ref"],
+        "replay_sha": meta["replay_sha"],
+        "claim": context["claim"],
+        "facts": facts,
+        "cover": cover,
+        "quality": quality,
+        "reviewers": reviewers,
+        "uncovered_surfaces": [surfaces[i] for i in uncovered if i < len(surfaces)],
+        "outputs": outputs,
+        "explanation": {
+            "diff": facts.get("explanation", ""),
+            "scope": scope_paragraph(context, facts, cover, scope, scope_name, uncovered, notes, label),
+            "body": body_paragraph(context, body_match, body_reasons),
+            "quality": quality_paragraph(quality),
+            "reviewers": reviewers_paragraph(reviewers),
+        },
+        "generation_seconds": round(time.monotonic() - started, 1),
+        "reviewed_at": now_iso,
+    }
+
+
 # --- Storage ----------------------------------------------------------------------------
 
 
-def artifact_path(workspace, repo, number):
-    return cli.artifact_dir(workspace, repo, "prs") / f"pr-{number}.json"
+def load(ctx, number):
+    return ctx.store.read_json(store.pr_key(number))
 
 
-def connect(workspace):
-    """The dashboard's connection, which owns the PR tables' schema."""
-    from repo_manager.web import connect as web_connect
-
-    return web_connect(cli.db_path(workspace))
-
-
-def store(workspace, data):
-    path = artifact_path(workspace, data["repo"], data["pr_number"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    outputs = data["outputs"]
-    with connect(workspace) as conn:
-        conn.execute(
-            """
-            INSERT INTO pr_reviews
-            (repo, pr_number, head_sha, pr_title, author, label, scope, body_matches_diff, docs_and_tests,
-             suggested_reviewers, raw_output, json_path, reviewed_at, rubric_version, generation_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(repo, pr_number, rubric_version) DO UPDATE SET
-              head_sha=excluded.head_sha, pr_title=excluded.pr_title, author=excluded.author,
-              label=excluded.label, scope=excluded.scope, body_matches_diff=excluded.body_matches_diff,
-              docs_and_tests=excluded.docs_and_tests, suggested_reviewers=excluded.suggested_reviewers,
-              raw_output=excluded.raw_output, json_path=excluded.json_path, reviewed_at=excluded.reviewed_at,
-              generation_seconds=excluded.generation_seconds
-            """,
-            (
-                data["repo"], data["pr_number"], data["head_sha"], data["title"], data["author"],
-                outputs["label"], outputs["scope_display"], outputs["body_matches_diff"], outputs["docs_and_tests"],
-                json.dumps(outputs["suggested_reviewers"]), json.dumps(data), str(path), data["reviewed_at"],
-                TRIAGE_VERSION, data["generation_seconds"],
-            ),
-        )
-    return path
-
-
-def latest(workspace, repo, number):
-    with connect(workspace) as conn:
-        row = conn.execute(
-            "SELECT * FROM pr_reviews WHERE repo=? AND pr_number=? AND rubric_version=?",
-            (repo, number, TRIAGE_VERSION),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def data_from_row(row):
-    try:
-        return json.loads(row["raw_output"])
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return None
-
-
-def rows(workspace):
-    with connect(workspace) as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM pr_reviews WHERE rubric_version=? ORDER BY reviewed_at, pr_number", (TRIAGE_VERSION,)
-        )]
+def save(ctx, data):
+    key = store.pr_key(data["pr_number"])
+    ctx.store.put_json(key, data, store.describe([key]))
+    return key
 
 
 # --- The whole thing --------------------------------------------------------------------
 
 
-def triage(workspace, repo, number, replay_sha="", save=True):
+def triage(ctx, number, replay_sha="", save_result=True):
     started = time.monotonic()
-    context = gather_context(workspace, repo, number, replay_sha)
-    facts = run_tier(workspace, context, "facts")
-    cover = run_tier(workspace, context, "cover", facts)
-    quality = run_tier(workspace, context, "quality", facts)
-    data = assemble(workspace, context, facts, cover, quality, started)
-    if save:
-        store(workspace, data)
-        from repo_manager.web import sync_pr_states
-
-        sync_pr_states(workspace, repo, numbers=[number])
+    context = gather_context(ctx, number, replay_sha)
+    facts = run_tier(context, "facts")
+    cover = run_tier(context, "cover", facts)
+    quality = run_tier(context, "quality", facts)
+    data = assemble(context, facts, cover, quality, started, ctx.now_iso())
+    if save_result:
+        previous = load(ctx, number) or {}
+        # Posting state belongs to the PR, not to any one triage: carry it across so the next
+        # `pr post` updates the comment it already owns instead of opening a second one.
+        for key in ("comment_id", "comment_url", "comment_head_sha"):
+            if previous.get(key) and key not in data:
+                data[key] = previous[key]
+        save(ctx, data)
     print(summary_line(data), flush=True)
     return data
 
@@ -1573,9 +1520,46 @@ def triage(workspace, repo, number, replay_sha="", save=True):
 def summary_line(data):
     o = data["outputs"]
     return (
-        f"PR #{data['pr_number']}: {o['label']}, scope {o['scope_display']}, body matches diff {o['body_matches_diff']}, "
-        f"docs and tests {o['docs_and_tests']}, reviewers {', '.join(o['suggested_reviewers']) or 'none'}"
+        f"PR #{data['pr_number']}: {o['label']}, scope {o['scope_display']}, body matches diff "
+        f"{o['body_matches_diff']}, docs and tests {o['docs_and_tests']}, reviewers "
+        f"{', '.join(o['suggested_reviewers']) or 'none'}"
     )
+
+
+def sweep(ctx, since=SWEEP_SINCE, limit=100, include_drafts=False, force=False):
+    prs = sorted(github.list_open_prs(ctx.repo, limit), key=lambda meta: meta["number"])
+    if since and str(since).lower() != "all":
+        older = [meta for meta in prs if (meta.get("createdAt") or "")[:10] < since]
+        prs = [meta for meta in prs if meta not in older]
+        print(f"{len(prs)} open PR(s) opened on or after {since} ({len(older)} older left alone)", flush=True)
+    else:
+        print(f"{len(prs)} open PR(s) in {ctx.repo}", flush=True)
+    triaged, skipped, failed = 0, 0, []
+    for meta in prs:
+        number = meta["number"]
+        if meta.get("isDraft") and not include_drafts:
+            print(f"Skipping draft PR #{number}", flush=True)
+            skipped += 1
+            continue
+        existing = load(ctx, number)
+        if existing and existing.get("head_sha") == meta.get("headRefOid") and not force:
+            print(f"Skipping PR #{number} (triage current at {meta.get('headRefOid', '')[:7]})", flush=True)
+            skipped += 1
+            continue
+        print(f"Triaging PR #{number}: {meta.get('title', '')}", flush=True)
+        try:
+            triage(ctx, number)
+            triaged += 1
+        except SystemExit as exc:
+            if exc.code in (130, None):
+                raise
+            print(f"PR #{number} triage failed: {exc}", flush=True)
+            failed.append(number)
+    summary = f"Swept {len(prs)} open PR(s): {triaged} triaged, {skipped} skipped"
+    if failed:
+        summary += f", {len(failed)} failed ({', '.join(f'#{n}' for n in failed)})"
+    print(summary, flush=True)
+    return failed
 
 
 # --- Rendering --------------------------------------------------------------------------
@@ -1584,9 +1568,9 @@ def summary_line(data):
 def concerns(data):
     """What a reviewer has to worry about, and nothing else: one bullet per problem.
 
-    The fold used to narrate the PR — what the diff does, what the body gets right, which
-    docs pages were checked and found fine. None of that helps a reviewer decide where to
-    spend their time, so none of it is here. A clean PR gets one line saying so.
+    The fold used to narrate the PR — what the diff does, what the body gets right, which docs
+    pages were checked and found fine. None of that helps a reviewer decide where to spend
+    their time, so none of it is here. A clean PR gets one line saying so.
     """
     o, facts, cover = data["outputs"], dict(data.get("facts") or {}), data.get("cover") or {}
     facts["breaking_changes"] = list(facts.get("breaking_changes", []))
@@ -1605,15 +1589,19 @@ def concerns(data):
         uncovered = data.get("uncovered_surfaces") or []
         items.append(head if uncovered else head.split(".")[0] + ".")
         for surface in uncovered:
-            index = next((i for i, s_ in enumerate(surfaces) if s_ is surface or s_ == surface), None)
+            index = next((i for i, s in enumerate(surfaces) if s is surface or s == surface), None)
             why = judged.get(index, {}).get("by", "")
             items.append(f"  - **{brief(surface['what'])}** ({surface['kind']})" + (f" — {brief(why, 160)}" if why else ""))
     if scope == "rfc" and o["label"] == "rfc:required":
         items.append(f"RFC {name} is linked but not yet `rfc:on-roadmap`; the PR waits for its approval.")
     for change in facts.get("breaking_changes", []):
-        disclosed = ("disclosed in " + change["disclosed_by"]) if change.get("disclosed_by") else ("disclosed" if change.get("disclosed") else "**not disclosed in the body or the linked RFC**")
+        disclosed = (("disclosed in " + change["disclosed_by"]) if change.get("disclosed_by")
+                     else ("disclosed" if change.get("disclosed") else "**not disclosed in the body or the linked RFC**"))
         migration = f", {change['migration']} migration" if change.get("migration") in ("auto", "manual") else ""
-        items.append(f"Breaking change ({disclosed}{migration}): {brief(change['what'], 160)}" + (f" — {change['where']}" if change.get("where") else ""))
+        items.append(
+            f"Breaking change ({disclosed}{migration}): {brief(change['what'], 160)}"
+            + (f" — {change['where']}" if change.get("where") else "")
+        )
     for m in facts.get("body_mismatches", []):
         items.append(f"Body says \"{brief(m['claim'], 110)}\" but the diff shows: {brief(m['actual'], 160)}")
     for reason in derive_body_reasons(data):
@@ -1655,12 +1643,9 @@ def render_comment(data, head_sha=""):
         "",
     ]
     lines += [item if item.startswith("  - ") else f"- {item}" for item in items] or ["- Nothing to flag."]
-    lines += ["", f"**Reviewers.** {data.get('explanation', {}).get('reviewers', '')}".rstrip(), "", "</details>", "", "_AI-assisted triage. A maintainer applies the label._"]
+    lines += ["", f"**Reviewers.** {data.get('explanation', {}).get('reviewers', '')}".rstrip(), "",
+              "</details>", "", "_AI-assisted triage. A maintainer applies the label._"]
     return "\n".join(lines)
-
-
-def print_review(data):
-    print(render_comment(data))
 
 
 # --- Acting on GitHub -------------------------------------------------------------------
@@ -1676,24 +1661,32 @@ RFC_REQUEST_MESSAGE = (
 )
 
 
-def apply_label(workspace, repo, number, label="", dry_run=False):
+def find_marked_comment(repo, number, marker):
+    comments = gh_api(["--method", "GET", f"repos/{repo}/issues/{number}/comments", "-f", "per_page=100"]) or []
+    for comment in comments:
+        if str(comment.get("body", "")).startswith(marker):
+            return comment
+    return None
+
+
+def apply_label(ctx, number, label="", dry_run=False):
     """Act on a triage: put the `rfc:` label on the PR, and when it is `rfc:required`, mark
     the PR as a draft and post the standard request for an RFC.
 
-    This is the one code path for that act. The dashboard button calls it, the CLI calls
-    it, and the GitHub Action that will run the triage on every new PR calls it, so the
-    three cannot drift. Each step is idempotent: a label already present is not re-added,
-    a draft is not re-drafted, and the message is posted once, found again by its marker.
+    This is the one code path for that act. The dashboard button calls it, the CLI calls it,
+    and the GitHub Action calls it, so the three cannot drift. Each step is idempotent: a
+    label already present is not re-added, a draft is not re-drafted, and the message is
+    posted once, found again by its marker.
     """
+    repo = ctx.repo
     if not label:
-        row = latest(workspace, repo, number)
-        data = data_from_row(row) if row else None
+        data = load(ctx, number)
         if not data:
-            return {"ok": False, "error": f"No stored triage for PR #{number}. Run `repo-manager review-pr {number}` first, or pass --label."}
+            return {"ok": False, "error": f"No stored triage for PR #{number}. Run `pr review {number}` first, or pass --label."}
         label = data["outputs"]["label"]
     if label not in LABELS:
         return {"ok": False, "error": f"{label!r} is not one of {', '.join(LABELS)}."}
-    meta = cli.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", "labels,isDraft,state"])
+    meta = github.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", "labels,isDraft,state"])
     if not meta:
         return {"ok": False, "error": f"Could not fetch PR #{number} from {repo}."}
     present = {item["name"] for item in meta.get("labels") or []}
@@ -1720,81 +1713,67 @@ def apply_label(workspace, repo, number, label="", dry_run=False):
         return {"ok": True, "dry_run": True, "label": label, "actions": actions, "warnings": warnings}
     done, failed = [], []
     for action in actions:
-        result = cli.run(["gh", *action["cmd"]], check=False)
+        result = github.run(["gh", *action["cmd"]], check=False)
         if result.returncode == 0:
             done.append(action["step"])
         else:
             failed.append({"step": action["step"], "error": (result.stderr or "").strip()[:300]})
-    if done:
-        from repo_manager.web import sync_pr_states
-
-        sync_pr_states(workspace, repo, numbers=[number])
     return {"ok": not failed, "label": label, "done": done, "failed": failed, "warnings": warnings,
             "error": "; ".join(f"{f['step']}: {f['error']}" for f in failed) if failed else ""}
 
 
-def find_marked_comment(repo, number, marker):
-    comments = gh_api(["--method", "GET", f"repos/{repo}/issues/{number}/comments", "-f", "per_page=100"]) or []
-    for comment in comments:
-        if str(comment.get("body", "")).startswith(marker):
-            return comment
-    return None
-
-
-
-def find_comment(repo, number):
-    return find_marked_comment(repo, number, COMMENT_MARKER)
-
-
-def post_comment(workspace, repo, number, dry_run=False):
-    row = latest(workspace, repo, number)
-    data = data_from_row(row) if row else None
+def post_comment(ctx, number, dry_run=False):
+    repo = ctx.repo
+    data = load(ctx, number)
     if not data:
-        return {"ok": False, "error": f"No stored triage for PR #{number}. Run `repo-manager review-pr {number}` first."}
+        return {"ok": False, "error": f"No stored triage for PR #{number}. Run `pr review {number}` first."}
     warnings = []
-    meta = cli.fetch_pr_metadata(repo, number)
+    meta = github.fetch_pr_metadata(repo, number)
     live_head = meta.get("headRefOid", "")
     if live_head and data.get("head_sha") and live_head != data["head_sha"]:
-        warnings.append(f"PR head has moved since the triage ({data['head_sha'][:7]} -> {live_head[:7]}); consider re-running review-pr.")
+        warnings.append(
+            f"PR head has moved since the triage ({data['head_sha'][:7]} -> {live_head[:7]}); "
+            "consider re-running `pr review`."
+        )
     body = render_comment(data)
-    existing = find_comment(repo, number)
+    existing = find_marked_comment(repo, number, COMMENT_MARKER)
     if dry_run:
-        return {"ok": True, "action": "update" if existing else "create", "dry_run": True, "body": body, "warnings": warnings}
+        return {"ok": True, "action": "update" if existing else "create", "dry_run": True,
+                "body": body, "warnings": warnings}
     if existing:
-        comment = gh_api(["--method", "PATCH", f"repos/{repo}/issues/comments/{existing['id']}", "-f", f"body={body}"], check=True)
+        comment = gh_api(["--method", "PATCH", f"repos/{repo}/issues/comments/{existing['id']}",
+                          "-f", f"body={body}"], check=True)
         action = "updated"
     else:
-        comment = gh_api(["--method", "POST", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}"], check=True)
+        comment = gh_api(["--method", "POST", f"repos/{repo}/issues/{number}/comments",
+                          "-f", f"body={body}"], check=True)
         action = "created"
     if not comment or not comment.get("id"):
         return {"ok": False, "error": "GitHub did not return the posted comment.", "warnings": warnings}
-    with connect(workspace) as conn:
-        conn.execute(
-            """
-            INSERT INTO pr_review_comments (comment_key, repo, pr_number, comment_id, comment_url, posted_head_sha, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(comment_key) DO UPDATE SET comment_id=excluded.comment_id, comment_url=excluded.comment_url,
-              posted_head_sha=excluded.posted_head_sha, synced_at=excluded.synced_at
-            """,
-            (f"{repo}|{number}", repo, number, comment["id"], comment.get("html_url", ""), data.get("head_sha", ""), cli.now_iso()),
-        )
+    data["comment_id"] = comment["id"]
+    data["comment_url"] = comment.get("html_url", "")
+    data["comment_head_sha"] = data.get("head_sha", "")
+    save(ctx, data)
     return {"ok": True, "action": action, "url": comment.get("html_url", ""), "warnings": warnings}
 
 
-def request_reviewers(workspace, repo, number, handles=None, dry_run=False):
+def request_reviewers(ctx, number, handles=None, dry_run=False):
+    repo = ctx.repo
     warnings = []
     if handles:
-        suggestions = [{"handle": cli.clean_github_handle(h), "basis": "explicit", "detail": "requested explicitly"} for h in handles if cli.clean_github_handle(h)]
+        suggestions = [
+            {"handle": github.clean_handle(h), "basis": "explicit", "detail": "requested explicitly"}
+            for h in handles if github.clean_handle(h)
+        ]
     else:
-        row = latest(workspace, repo, number)
-        data = data_from_row(row) if row else None
+        data = load(ctx, number)
         if not data:
-            return {"ok": False, "error": f"No stored triage for PR #{number}. Run `repo-manager review-pr {number}` first, or pass --reviewers."}
+            return {"ok": False, "error": f"No stored triage for PR #{number}. Run `pr review {number}` first, or pass --reviewers."}
         suggestions = data.get("reviewers", [])
-    meta = cli.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", "author,reviewRequests,reviews"])
+    meta = github.gh_cli_json(["pr", "view", str(number), "--repo", repo, "--json", "author,reviewRequests,reviews"])
     if not meta:
         return {"ok": False, "error": f"Could not fetch PR #{number} from {repo}.", "warnings": warnings}
-    author = cli.pr_author_handle(meta).lower()
+    author = github.pr_author_handle(meta).lower()
     involved = set()
     for request in meta.get("reviewRequests") or []:
         login = request.get("login") or request.get("slug") or ""
@@ -1807,7 +1786,7 @@ def request_reviewers(workspace, repo, number, handles=None, dry_run=False):
     to_request, skipped = [], []
     for item in suggestions:
         handle = item.get("handle", "")
-        if not cli.VALID_HANDLE.match(handle):
+        if not github.VALID_HANDLE.match(handle):
             skipped.append({"handle": handle, "reason": "not a plain GitHub handle"})
         elif handle.lower() == author:
             skipped.append({"handle": handle, "reason": "PR author"})
@@ -1820,7 +1799,8 @@ def request_reviewers(workspace, repo, number, handles=None, dry_run=False):
     requested, failed = [], []
     for item in to_request:
         login = item["handle"].lstrip("@")
-        result = gh_api(["--method", "POST", f"repos/{repo}/pulls/{number}/requested_reviewers", "-f", f"reviewers[]={login}"])
+        result = gh_api(["--method", "POST", f"repos/{repo}/pulls/{number}/requested_reviewers",
+                         "-f", f"reviewers[]={login}"])
         if result:
             requested.append(item["handle"])
         else:

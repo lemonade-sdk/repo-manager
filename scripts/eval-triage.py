@@ -5,8 +5,8 @@
 
 Ground truth is {"<pr>": {"label": "rfc:required", "expected_tool_label": "...", "weight": 3, ...}}.
 `expected_tool_label` wins over `label` when present (it records where the tool is meant to
-disagree with the human, such as router PRs with no charter). Nothing is stored in the
-workspace database; each artifact lands in --out as pr-N.json next to its rendered comment.
+disagree with the human, such as router PRs with no charter). Nothing reaches a real state
+directory; each artifact lands in --out as pr-N.json next to its rendered comment.
 
 Runs are sequential on purpose: the model is one local server, and concurrency only
 lengthens every run.
@@ -21,7 +21,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from repo_manager import cli, triage  # noqa: E402
+from repo_manager import triage  # noqa: E402
+from repo_manager.context import Context  # noqa: E402
+
+
+class Args:
+    """The global options a Context wants, for a run that stores nothing."""
+
+    def __init__(self, repo, checkout, state):
+        self.repo = repo
+        self.checkout = checkout
+        self.state = state
+        self.no_push = True
+        self.force = False
 
 
 def main():
@@ -31,12 +43,13 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--replay", default="", help="pr=sha,pr=sha for merged PRs to judge pre-review")
     parser.add_argument("--score-only", action="store_true", help="Score existing artifacts in --out without running")
+    parser.add_argument("--repo", default="lemonade-sdk/lemonade")
+    parser.add_argument("--checkout", default="", help="A clone of the repo, for git and blame reads.")
     args = parser.parse_args()
 
-    workspace = cli.find_workspace()
-    repo = cli.load_config(workspace)["repo"]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    ctx = Context(Args(args.repo, args.checkout, out / "state"))
     truth = json.loads(Path(args.truth).read_text()) if args.truth else {}
     replays = dict(part.split("=") for part in args.replay.split(",") if "=" in part)
     numbers = args.prs or sorted(int(n) for n in truth)
@@ -49,7 +62,9 @@ def main():
                 continue
             started = time.monotonic()
             try:
-                data = triage.triage(workspace, repo, number, replay_sha=replays.get(str(number), ""), save=False)
+                data = triage.triage(
+                    ctx, number, replay_sha=replays.get(str(number), ""), save_result=False
+                )
             except SystemExit as exc:
                 if exc.code in (130, None):
                     raise

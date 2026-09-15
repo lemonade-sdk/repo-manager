@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lemonade release dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbf9;
+    --panel: #ffffff;
+    --ink: #1b1b19;
+    --muted: #6a6a63;
+    --line: #e4e3dd;
+    --accent: #9a6b00;
+    --ready: #2f7a43;
+    --attention: #9a6b00;
+    --blocked: #b03a2e;
+    --shadow: 0 1px 2px rgba(20, 20, 16, .06), 0 8px 24px rgba(20, 20, 16, .04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1e1e23;
+      --ink: #eceae4;
+      --muted: #9b9a93;
+      --line: #32323a;
+      --accent: #e8b33c;
+      --ready: #67c187;
+      --attention: #e8b33c;
+      --blocked: #ef7a6c;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+  a { color: inherit; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
+  a:hover { text-decoration-color: currentColor; }
+  header {
+    padding: 28px 24px 0; max-width: 1160px; margin: 0 auto;
+  }
+  h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .sub b { color: var(--ink); font-weight: 600; }
+  nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  nav button {
+    appearance: none; border: 0; background: none; color: var(--muted); cursor: pointer;
+    font: inherit; font-size: 14px; padding: 9px 14px; border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  nav .count { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 5px; }
+  main { max-width: 1160px; margin: 0 auto; padding: 20px 24px 80px; }
+  .filters { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+  input[type="search"], select {
+    font: inherit; font-size: 14px; padding: 7px 11px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); min-width: 0;
+  }
+  input[type="search"] { flex: 1 1 260px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden;
+  }
+  .card > header { padding: 16px 20px; margin: 0; max-width: none; display: flex;
+    align-items: baseline; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  .card h2 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+  .card section { padding: 16px 20px; border-top: 1px solid var(--line); }
+  .card section:first-of-type { border-top: 0; }
+  .card h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    margin: 0 0 10px; font-weight: 600;
+  }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 9px;
+    border-radius: 999px; border: 1px solid currentColor; letter-spacing: .02em;
+  }
+  .v-Ready, .v-Clean { color: var(--ready); }
+  .v-NeedsAttention { color: var(--attention); }
+  .v-Blocked, .v-Blocker { color: var(--blocked); }
+  .p0 { color: var(--blocked); font-weight: 700; }
+  .p1 { color: var(--attention); font-weight: 700; }
+  .meta { color: var(--muted); font-size: 12.5px; }
+  ul.todos { list-style: none; margin: 0; padding: 0; }
+  ul.todos li { padding: 7px 0; border-top: 1px dashed var(--line); display: flex; gap: 10px; }
+  ul.todos li:first-child { border-top: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  tr.detail td { background: color-mix(in srgb, var(--accent) 4%, transparent); cursor: default; }
+  tr.detail:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+  .nowrap { white-space: nowrap; }
+  .dim { color: var(--muted); }
+  pre.md {
+    white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 13px;
+    background: color-mix(in srgb, var(--ink) 4%, transparent); padding: 14px 16px;
+    border-radius: 8px; max-height: 480px; overflow: auto;
+  }
+  .plan td:first-child { white-space: nowrap; font-weight: 600; }
+  .evidence dt { font-size: 12px; color: var(--muted); font-weight: 600; margin-top: 8px; }
+  .evidence dd { margin: 2px 0 0; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .frozen { color: var(--accent); font-size: 12px; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .actions button {
+    font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  .actions button:hover { border-color: var(--accent); }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  .result { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  @media (max-width: 640px) {
+    header, main { padding-left: 16px; padding-right: 16px; }
+    .hide-narrow { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lemonade release dashboard</h1>
+  <div class="sub" id="summary"></div>
+  <nav id="tabs"></nav>
+</header>
+<main id="view"><div class="empty">Loading…</div></main>
+<script>
+const STATIC = !!window.REPO_MANAGER_STATIC;
+let DATA = window.REPO_MANAGER_DATA || null;
+let TAB = "releases";
+let QUERY = "";
+let FILTER = "";
+const OPEN = new Set();
+
+const esc = (value) => String(value == null ? "" : value)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+// Enough Markdown for the two artifacts the page shows: headings, bullets, bold, and code.
+// Everything is escaped first, so nothing a review quotes can become markup.
+function md(text) {
+  const lines = esc(text || "").split("\n");
+  const out = [];
+  let list = false;
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+    if (heading) {
+      if (list) { out.push("</ul>"); list = false; }
+      out.push(`<h4>${inline(heading[2])}</h4>`);
+    } else if (bullet) {
+      if (!list) { out.push("<ul>"); list = true; }
+      out.push(`<li>${inline(bullet[1])}</li>`);
+    } else if (!line.trim()) {
+      if (list) { out.push("</ul>"); list = false; }
+    } else {
+      if (list) { out.push("</ul>"); list = false; }
+      out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  if (list) out.push("</ul>");
+  return out.join("");
+}
+
+const verdictClass = (v) => "v-" + String(v || "").replace(/\s+/g, "");
+const pill = (v) => v ? `<span class="pill ${verdictClass(v)}">${esc(v)}</span>` : "";
+const day = (iso) => (iso || "").slice(0, 10);
+const shortSha = (sha) => String(sha || "").slice(0, 7);
+const repoUrl = () => `https://github.com/${DATA.repo || "lemonade-sdk/lemonade"}`;
+
+function matches(text) {
+  return !QUERY || String(text).toLowerCase().includes(QUERY);
+}
+
+function summary() {
+  const c = DATA.counts;
+  const verdicts = Object.entries(c.verdicts || {})
+    .map(([name, n]) => `${n} ${name.toLowerCase()}`).join(", ");
+  const parts = [
+    DATA.repo ? `<b>${esc(DATA.repo)}</b>` : "",
+    `<b>${c.commits}</b> commit reviews${verdicts ? ` (${esc(verdicts)})` : ""}`,
+    `<b>${c.releases}</b> release bucket${c.releases === 1 ? "" : "s"}`,
+    c.blockers ? `<b class="p0">${c.blockers} open blocker${c.blockers === 1 ? "" : "s"}</b>` : "no open blockers",
+    `<b>${c.prs}</b> PR triages`,
+  ];
+  document.getElementById("summary").innerHTML = parts.filter(Boolean).join(" &middot; ");
+}
+
+function tabs() {
+  const spec = [
+    ["releases", "Releases", DATA.releases.length],
+    ["commits", "Commits", DATA.commits.length],
+    ["prs", "Pull requests", DATA.prs.length],
+  ];
+  document.getElementById("tabs").innerHTML = spec.map(([id, label, n]) =>
+    `<button role="tab" data-tab="${id}" aria-selected="${TAB === id}">${label}<span class="count">${n}</span></button>`
+  ).join("");
+}
+
+function filterBar(options) {
+  const choices = options ? options.map((o) =>
+    `<option value="${esc(o)}"${FILTER === o ? " selected" : ""}>${esc(o)}</option>`).join("") : "";
+  return `<div class="filters">
+    <input type="search" id="q" placeholder="Filter…" value="${esc(QUERY)}">
+    ${options ? `<select id="f"><option value="">All</option>${choices}</select>` : ""}
+  </div>`;
+}
+
+function releasesView() {
+  const rows = DATA.releases.filter((r) =>
+    matches(`${r.bucket} ${r.verdict} ${r.verdict_reason} ${r.branch}`));
+  if (!rows.length) return `<div class="empty">No release buckets yet.</div>`;
+  return rows.map((r) => {
+    const todos = (r.prioritized_todos || []).map((t) =>
+      `<li><span class="${t.priority === "P0" ? "p0" : "p1"}">${esc(t.priority || "P1")}</span>
+       <span>${esc(t.text || "")}</span></li>`).join("");
+    const breaking = (r.breaking_changes || []).map((b) => `<li><span>&bull;</span><span>${esc(b)}</span></li>`).join("");
+    const plan = (r.tester_plan || []).map((p) =>
+      `<tr><td>${esc(p.platform)}</td><td>${esc(p.changed)}</td><td>${esc(p.exercise)}</td></tr>`).join("");
+    const evidence = Object.entries(r.evidence || {}).map(([k, v]) =>
+      `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v)}</dd>`).join("");
+    const issues = (r.candidate_issues || []).map((n) =>
+      `<a href="${repoUrl()}/issues/${n}">#${n}</a>`).join(", ");
+    return `<article class="card">
+      <header>
+        <h2>${esc(r.bucket)}</h2>
+        ${pill(r.verdict || "not reviewed")}
+        <span class="meta">${esc(r.branch || "")}
+          ${r.range_start ? `&middot; since ${esc(r.range_start)}` : ""}
+          ${r.head_sha ? `&middot; <span class="mono">${esc(shortSha(r.head_sha))}</span>` : ""}
+          ${r.commits ? `&middot; ${r.commits} commit${r.commits === 1 ? "" : "s"}` : ""}
+          ${r.is_hotfix ? `&middot; hotfix over ${esc(r.last_stable_tag)}` : ""}
+          ${r.reviewed_at ? `&middot; reviewed ${esc(day(r.reviewed_at))}` : ""}</span>
+        ${r.frozen.length ? `<span class="frozen">frozen: ${esc(r.frozen.join(", "))}</span>` : ""}
+      </header>
+      ${r.verdict_reason ? `<section><h3>Can we ship?</h3><p>${esc(r.verdict_reason)}</p></section>` : ""}
+      ${todos ? `<section><h3>Before shipping</h3><ul class="todos">${todos}</ul></section>` : ""}
+      ${breaking ? `<section><h3>Breaking changes</h3><ul class="todos">${breaking}</ul></section>` : ""}
+      ${issues ? `<section><h3>Tester reports folded in</h3><p>${issues}</p></section>` : ""}
+      ${plan ? `<section><h3>Tester plan</h3><table class="plan">
+        <thead><tr><th>Platform</th><th>What changed</th><th>What to exercise</th></tr></thead>
+        <tbody>${plan}</tbody></table></section>` : ""}
+      ${evidence ? `<section><h3>Evidence</h3><dl class="evidence">${evidence}</dl></section>` : ""}
+      ${r.notes ? `<section><h3>notes.md &mdash; the release page</h3><pre class="md">${esc(r.notes)}</pre></section>` : ""}
+      ${r.announcement ? `<section><h3>announcement.md &mdash; the Discord post</h3><div>${md(r.announcement)}</div></section>` : ""}
+    </article>`;
+  }).join("");
+}
+
+function commitsView() {
+  const bucketList = [...new Set(DATA.commits.map((c) => c.bucket).filter(Boolean))];
+  const rows = DATA.commits.filter((c) =>
+    (!FILTER || c.bucket === FILTER) &&
+    matches(`${c.summary} ${c.author} ${c.verdict} ${c.sha} ${c.pr_number} ${c.subject}`));
+  if (!rows.length) return filterBar(bucketList) + `<div class="empty">No commit reviews match.</div>`;
+  const body = rows.map((c) => {
+    const open = OPEN.has("c" + c.sha);
+    const todos = (c.maintainer_todos || []).map((t) => `<li><span>&bull;</span><span>${esc(t)}</span></li>`).join("");
+    const shouts = (c.shout_outs || []).map((s) =>
+      `<li><span>&bull;</span><span>${esc(typeof s === "string" ? s : `${s.handle || ""} — ${s.reason || ""}`)}</span></li>`).join("");
+    const evidence = Object.entries(c.evidence || {}).map(([k, v]) =>
+      `<dt>${esc(k.replace(/_/g, " "))}</dt><dd>${esc(v)}</dd>`).join("");
+    const detail = open ? `<tr class="detail"><td colspan="6">
+      ${c.verdict_reason ? `<p>${esc(c.verdict_reason)}</p>` : ""}
+      ${todos ? `<h3>Maintainer to-do</h3><ul class="todos">${todos}</ul>` : ""}
+      ${shouts ? `<h3>Shout outs</h3><ul class="todos">${shouts}</ul>` : ""}
+      ${evidence ? `<h3>Evidence</h3><dl class="evidence">${evidence}</dl>` : ""}
+      <p class="meta">
+        <a href="${repoUrl()}/commit/${esc(c.sha)}">${esc(shortSha(c.sha))}</a>
+        ${c.cherry_picked_from ? `&middot; cherry-picked from ${esc(shortSha(c.cherry_picked_from))}` : ""}
+        ${c.reviewed_at ? `&middot; reviewed ${esc(day(c.reviewed_at))}` : ""}
+      </p></td></tr>` : "";
+    return `<tr data-open="c${esc(c.sha)}">
+      <td class="nowrap dim">${esc(day(c.committed_at))}</td>
+      <td class="nowrap mono">${esc(shortSha(c.sha))}</td>
+      <td class="nowrap">${c.pr_number ? `<a href="${repoUrl()}/pull/${c.pr_number}">#${c.pr_number}</a>` : ""}</td>
+      <td class="nowrap hide-narrow">${esc(c.author)}</td>
+      <td class="nowrap">${pill(c.verdict)}</td>
+      <td>${esc(c.summary || c.subject)}</td></tr>${detail}`;
+  }).join("");
+  return filterBar(bucketList) + `<div class="card"><table>
+    <thead><tr><th>Merged</th><th>Commit</th><th>PR</th><th class="hide-narrow">Author</th>
+    <th>Verdict</th><th>Summary</th></tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function prsView() {
+  const labels = [...new Set(DATA.prs.map((p) => p.label).filter(Boolean))];
+  const rows = DATA.prs.filter((p) =>
+    (!FILTER || p.label === FILTER) &&
+    matches(`${p.title} ${p.author} ${p.label} ${p.scope} ${p.number}`));
+  if (!rows.length) return filterBar(labels) + `<div class="empty">No PR triages match.</div>`;
+  const body = rows.map((p) => {
+    const open = OPEN.has("p" + p.number);
+    const concerns = (p.concerns || []).map((item) =>
+      `<li><span>${item.startsWith("  - ") ? "&nbsp;&nbsp;&bull;" : "&bull;"}</span><span>${md(item.trim()).replace(/^<p>|<\/p>$/g, "")}</span></li>`).join("");
+    const detail = open ? `<tr class="detail"><td colspan="7">
+      ${p.explanation.diff ? `<h3>What the diff changes</h3><p>${esc(p.explanation.diff)}</p>` : ""}
+      ${concerns ? `<h3>Concerns</h3><ul class="todos">${concerns}</ul>` : `<p class="dim">Nothing to flag.</p>`}
+      ${p.explanation.reviewers ? `<h3>Reviewers</h3><p>${esc(p.explanation.reviewers)}</p>` : ""}
+      <p class="meta">${p.url ? `<a href="${esc(p.url)}">PR #${p.number}</a>` : ""}
+        ${p.head_sha ? `&middot; <span class="mono">${esc(shortSha(p.head_sha))}</span>` : ""}
+        ${p.reviewed_at ? `&middot; triaged ${esc(day(p.reviewed_at))}` : ""}
+        ${p.comment_url ? `&middot; <a href="${esc(p.comment_url)}">posted comment</a>` : ""}</p>
+      ${STATIC ? "" : `<div class="actions" data-pr="${p.number}">
+        <button data-act="comment">Post comment</button>
+        <button data-act="label">Apply ${esc(p.label)}</button>
+        <button data-act="reviewers">Request reviewers</button>
+        <span class="result"></span></div>`}
+      </td></tr>` : "";
+    return `<tr data-open="p${p.number}">
+      <td class="nowrap"><a href="${esc(p.url)}">#${p.number}</a></td>
+      <td>${esc(p.title)}</td>
+      <td class="nowrap hide-narrow">${esc(p.author)}</td>
+      <td class="nowrap"><code>${esc(p.label)}</code></td>
+      <td class="nowrap hide-narrow">${esc(p.scope)}</td>
+      <td class="nowrap">${p.body_matches_diff === "no" ? `<span class="p0">no</span>` : `<span class="dim">yes</span>`}</td>
+      <td class="nowrap">${p.docs_and_tests === "gaps" ? `<span class="p1">gaps</span>` : `<span class="dim">ok</span>`}</td>
+      </tr>${detail}`;
+  }).join("");
+  return filterBar(labels) + `<div class="card"><table>
+    <thead><tr><th>PR</th><th>Title</th><th class="hide-narrow">Author</th><th>Label</th>
+    <th class="hide-narrow">Scope</th><th>Body</th><th>Docs/tests</th></tr></thead>
+    <tbody>${body}</tbody></table></div>`;
+}
+
+function draw() {
+  if (!DATA) return;
+  summary();
+  tabs();
+  const views = { releases: releasesView, commits: commitsView, prs: prsView };
+  document.getElementById("view").innerHTML = views[TAB]();
+  const q = document.getElementById("q");
+  if (q) {
+    q.addEventListener("input", (e) => { QUERY = e.target.value.toLowerCase(); draw();
+      const box = document.getElementById("q"); box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+  }
+  const f = document.getElementById("f");
+  if (f) f.addEventListener("change", (e) => { FILTER = e.target.value; draw(); });
+}
+
+document.addEventListener("click", (event) => {
+  const tab = event.target.closest("nav button");
+  if (tab) { TAB = tab.dataset.tab; QUERY = ""; FILTER = ""; draw(); return; }
+  const act = event.target.closest(".actions button");
+  if (act) { runAction(act); return; }
+  const row = event.target.closest("tr[data-open]");
+  if (row) {
+    const key = row.dataset.open;
+    OPEN.has(key) ? OPEN.delete(key) : OPEN.add(key);
+    draw();
+  }
+});
+
+async function runAction(button) {
+  const box = button.closest(".actions");
+  const result = box.querySelector(".result");
+  const endpoints = { comment: "/api/pr-comment", label: "/api/pr-label", reviewers: "/api/pr-reviewers" };
+  box.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  result.textContent = "Working…";
+  try {
+    const response = await fetch(endpoints[button.dataset.act], {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ number: Number(box.dataset.pr) }),
+    });
+    const data = await response.json();
+    result.textContent = data.ok
+      ? (data.url || [...(data.done || []), ...(data.requested || [])].join(", ") || "Done.")
+      : `Failed: ${data.error || "unknown error"}`;
+  } catch (error) {
+    result.textContent = `Failed: ${error}`;
+  }
+  box.querySelectorAll("button").forEach((b) => (b.disabled = false));
+}
+
+async function load() {
+  if (!DATA) {
+    DATA = await (await fetch("/api/data")).json();
+  }
+  draw();
+}
+load();
+</script>
+</body>
+</html>
