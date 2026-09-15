@@ -61,16 +61,35 @@ class LoadFromFiles(TempDirCase):
         self.assertEqual(self.data["config"]["repo"], "lemonade-sdk/lemonade")
 
     def test_a_bucket_carries_its_verdict_plan_and_artifacts(self):
-        bucket = self.data["release_reviews"][0]
-        self.assertEqual(bucket["tag_start"], "v2026.38")
+        """One release, one row: the verdict, the checklist and both artifacts together."""
+        bucket = self.data["releases"][0]
+        self.assertEqual(bucket["bucket"], "v2026.38")
         self.assertEqual(bucket["verdict"], "Needs Attention")
         self.assertEqual(bucket["todo_items"][0]["platforms"], ["macOS"])
         self.assertEqual(bucket["commits"], 1)
-        self.assertIn("## Headline", self.data["release_announcements"][0]["release_highlights_markdown"])
+        self.assertIn("## Headline", bucket["notes_markdown"])
+        self.assertEqual(self.data["buckets"], ["v2026.38"])
+
+    def test_a_bucket_with_only_commits_is_still_a_release(self):
+        """The bucket on `main` before anyone has built it. Leaving it out of the list is
+        how the old page managed to have a release filter that was empty after a sweep."""
+        self.state.write_json("commits/" + "c" * 40 + ".json", {
+            "sha": "c" * 40, "repo": "lemonade-sdk/lemonade", "bucket": "v2026.39",
+            "author": "@someone", "summary": "Later work.", "verdict": "Clean",
+            "committed_at": "2026-09-20T10:00:00Z",
+        })
+        data = site.load(self.state)
+        upcoming = data["releases"][0]
+        self.assertEqual(upcoming["bucket"], "v2026.39")
+        self.assertFalse(upcoming["reviewed"])
+        self.assertEqual(upcoming["verdict"], "")
+        self.assertEqual(upcoming["commits"], 1)
+        self.assertEqual(data["counts"]["releases"], 2)
+        self.assertEqual(data["counts"]["release_reviews"], 1)
 
     def test_a_hand_edited_artifact_shows_as_frozen(self):
         self.state.write_text(store.notes_key("v2026.38"), "## Headline\n\n- edited by hand\n")
-        self.assertEqual(site.load(self.state)["release_reviews"][0]["frozen"], ["notes.md"])
+        self.assertEqual(site.load(self.state)["releases"][0]["frozen"], ["notes.md"])
 
     def test_blockers_lead_the_to_do_list_and_are_counted(self):
         review = self.state.read_json(store.review_key("v2026.38"))
@@ -79,7 +98,7 @@ class LoadFromFiles(TempDirCase):
         data = site.load(self.state)
         self.assertEqual(data["counts"]["blockers"], 1)
         self.assertEqual(
-            [t["priority"] for t in data["release_reviews"][0]["todo_items"]], ["P0", "P1"]
+            [t["priority"] for t in data["releases"][0]["todo_items"]], ["P0", "P1"]
         )
 
     def test_an_unreadable_file_is_skipped_rather_than_crashing_the_page(self):
@@ -93,6 +112,9 @@ class LoadFromFiles(TempDirCase):
         self.assertFalse(row["state_known"])
         self.assertEqual(row["review_status"], "")
         self.assertEqual(row["attention"], "elevated")
+
+    def test_a_commit_is_filed_under_its_bucket(self):
+        self.assertEqual(self.data["commit_reviews"][0]["bucket"], "v2026.38")
 
     def test_the_commit_evidence_is_ordered_for_reading_not_alphabetically(self):
         self.assertEqual(list(self.data["commit_reviews"][0]["evidence"]), ["tests"])

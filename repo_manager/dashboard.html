@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>repo-manager</title>
+  <title>Repo Manager</title>
   <style>
     :root {
       color-scheme: light;
@@ -18,6 +18,8 @@
       --danger: #b42318;
       --warn: #9a5b00;
       --ok: #14743f;
+      --chrome: #15202b;
+      --chrome-text: #b9c7d3;
       --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
@@ -37,138 +39,104 @@
     button, input, select {
       font: inherit;
     }
+
+    /* --- the chrome -------------------------------------------------------------------
+       One bar across the top: what this is, which of the three lists you are looking at,
+       and who you are. Everything else on the page belongs to a tab, and lives inside it. */
     .shell {
       height: 100vh;
-      display: grid;
-      grid-template-columns: 280px 1fr;
-      overflow: hidden;
-    }
-    aside {
-      background: #15202b;
-      color: #eef4f8;
-      padding: 20px 16px;
-      border-right: 1px solid #0c141c;
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-      overflow: hidden;
-    }
-    .brand {
-      font-weight: 700;
-      font-size: 18px;
-      margin-bottom: 4px;
-    }
-    .repo {
-      color: #b9c7d3;
-      font-size: 13px;
-      word-break: break-word;
-    }
-    .metrics {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin: 18px 0;
-    }
-    .metric {
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 6px;
-      padding: 10px;
-    }
-    .metric strong {
-      display: block;
-      font-size: 20px;
-      line-height: 1.1;
-    }
-    .metric span {
-      color: #b9c7d3;
-      font-size: 12px;
-    }
-    nav {
-      display: grid;
-      gap: 6px;
-      margin-top: 14px;
-    }
-    .sidebar-stats {
-      margin-top: auto;
-      padding-top: 18px;
-      display: grid;
-      gap: 10px;
-    }
-    .sidebar-stat {
-      border-top: 1px solid rgba(255,255,255,0.12);
-      padding-top: 10px;
-    }
-    .sidebar-stat span {
-      display: block;
-      color: #b9c7d3;
-      font-size: 12px;
-      margin-bottom: 3px;
-    }
-    .sidebar-stat strong {
-      color: #ffffff;
-      font-size: 14px;
-      font-weight: 650;
-    }
-    .sidebar-stat small {
-      display: block;
-      color: #b9c7d3;
-      font-size: 12px;
-      margin-top: 3px;
-    }
-    .nav-button {
-      border: 0;
-      width: 100%;
-      text-align: left;
-      color: #dce7ee;
-      background: transparent;
-      border-radius: 6px;
-      padding: 10px 12px;
-      cursor: pointer;
-    }
-    .nav-button.active {
-      color: #ffffff;
-      background: rgba(255,255,255,0.14);
-    }
-    main {
-      min-width: 0;
-      min-height: 0;
       display: grid;
       grid-template-rows: auto 1fr;
       overflow: hidden;
     }
-    header {
-      background: var(--panel);
-      border-bottom: 1px solid var(--line);
-      padding: 14px 20px;
+    .topnav {
+      background: var(--chrome);
+      color: #eef4f8;
+      border-bottom: 1px solid #0c141c;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 20px;
+      padding: 0 18px;
+      min-height: 54px;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      justify-self: center;
+    }
+    .tab {
+      border: 0;
+      background: transparent;
+      color: var(--chrome-text);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-weight: 550;
+    }
+    .tab:hover {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.07);
+    }
+    .tab.active {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.15);
+    }
+    .identity {
+      justify-self: end;
       display: flex;
       align-items: center;
-      gap: 12px;
-      justify-content: space-between;
+      gap: 14px;
+      min-width: 0;
     }
-    h1 {
-      font-size: 20px;
-      margin: 0;
-      letter-spacing: 0;
+    .repo {
+      color: #93a4b3;
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .toolbar {
-      display: flex;
+    /* The GitHub login is the one piece of identity the whole page runs on, so it is typed
+       once, here, and remembered by this browser. */
+    .who {
+      display: inline-flex;
       align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 7px;
+      padding: 0 9px;
     }
-    .search {
-      width: min(420px, 42vw);
-      min-width: 220px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 8px 10px;
-      background: #fff;
+    .who:focus-within {
+      border-color: #4b7f99;
+      background: rgba(255, 255, 255, 0.11);
     }
+    .who .at {
+      color: #7f93a5;
+      font-size: 13px;
+    }
+    .who input {
+      width: 132px;
+      border: 0;
+      outline: none;
+      background: transparent;
+      color: #ffffff;
+      font-size: 13px;
+      padding: 6px 2px;
+    }
+    .who input::placeholder {
+      color: #6f8496;
+    }
+
     .content {
       min-width: 0;
       min-height: 0;
-      padding: 18px 20px 28px;
+      padding: 16px 18px 22px;
       overflow: hidden;
     }
     .split {
@@ -179,19 +147,17 @@
       gap: 16px;
       align-items: stretch;
     }
+    /* A release is picked from a short list and then read at length, so the reading pane
+       gets the room. */
+    #view-releases.split {
+      grid-template-columns: minmax(360px, 0.75fr) minmax(420px, 1.25fr);
+    }
     /* The PR list is the scanning surface and needs room for a description; the review
        beside it is read one at a time and has been sitting on slack. The old split left
        the list 535px against 558px of fixed columns, which squeezed Description to 35px
        and then, once the head stopped overflowing and forcing the pane wider, to nothing. */
     #view-prs.split {
       grid-template-columns: minmax(560px, 1.2fr) minmax(340px, 0.8fr);
-    }
-    .single {
-      height: 100%;
-      min-height: 0;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
-      align-items: stretch;
     }
     .panel {
       background: var(--panel);
@@ -205,21 +171,39 @@
       overflow: hidden;
     }
     .panel-head {
-      padding: 12px 14px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      /* The PR head carries a title, a perspective, two filters, a count and the sync
-         controls, which is more than fits across a split pane. Without wrapping the row
-         simply overflows and the panel clips whatever is furthest right — which silently
-         ate the freshness label and the Refresh button. */
+      /* A list head carries a title, its filters, a count and sometimes the sync controls,
+         which is more than fits across a split pane. Without wrapping the row simply
+         overflows and the panel clips whatever is furthest right — which silently ate the
+         freshness label and the Refresh button. */
       flex-wrap: wrap;
       gap: 8px 12px;
+      min-height: 45px;
     }
     .panel-head h2 {
       font-size: 15px;
       margin: 0;
+      white-space: nowrap;
+    }
+    /* Filters belong to the list they filter, so they sit in its head rather than in the
+       chrome above, where they would claim to apply to the whole page. */
+    .head-select,
+    .head-search {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 8px;
+      background: #fff;
+      color: var(--text);
+      font-size: 12px;
+    }
+    .head-search {
+      flex: 1 1 150px;
+      min-width: 110px;
+      max-width: 340px;
     }
     .pr-toggle {
       display: inline-flex;
@@ -230,21 +214,9 @@
       cursor: pointer;
     }
     .pr-toggle input {
-      accent-color: var(--accent, #6b8afd);
+      accent-color: var(--accent);
       margin: 0;
     }
-    .pr-toggle input[type="text"] {
-      width: 110px;
-      font: inherit;
-      font-size: 12px;
-      padding: 2px 6px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: transparent;
-      color: inherit;
-    }
-    /* Freshness sits at the right end of the PR panel head, pushed there so it reads as a
-       property of the whole column rather than of any one control beside it. */
     /* Held together on one line and pushed to the right end of whichever row they land
        on, so the freshness reads as a property of the column rather than another filter. */
     .sync-group {
@@ -271,6 +243,37 @@
       font-size: 12px;
       padding: 4px 9px;
     }
+
+    /* --- sub-tabs ---------------------------------------------------------------------
+       A release ships four things — a verdict, notes, a Discord post, and a record of what
+       went into it. They are one release read four ways, so they share a pane and take
+       turns in it rather than each claiming a tab of their own. */
+    .subtabs {
+      display: flex;
+      gap: 2px;
+      flex-wrap: wrap;
+    }
+    .subtab {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 11px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 550;
+      white-space: nowrap;
+    }
+    .subtab:hover {
+      background: var(--panel-2);
+      color: var(--text);
+    }
+    .subtab.active {
+      background: var(--panel-2);
+      color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }
+
     .table-wrap {
       overflow: auto;
       min-height: 0;
@@ -286,6 +289,9 @@
        readable instead of letting it vanish. */
     #view-prs table {
       min-width: 690px;
+    }
+    #view-releases table {
+      min-width: 380px;
     }
     th, td {
       padding: 10px 12px;
@@ -319,6 +325,10 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .release-cell {
+      font-weight: 650;
+      white-space: nowrap;
+    }
     .description {
       overflow: hidden;
       display: -webkit-box;
@@ -333,6 +343,17 @@
     /* A checked-off PR stays in the list but has stopped asking for anything. */
     #pr-rows tr.checked-off td:not(:first-child) {
       opacity: 0.5;
+    }
+    /* Wherever a handle is yours, the page says so rather than making you match it. */
+    .you {
+      margin-left: 5px;
+      font-size: 11px;
+      font-weight: 650;
+      color: var(--accent);
+      background: #e6f1f5;
+      border: 1px solid #c3dde6;
+      border-radius: 4px;
+      padding: 0 4px;
     }
     .badge {
       display: inline-flex;
@@ -364,6 +385,13 @@
       color: var(--danger);
       background: #fff0ee;
       border-color: #f4c4bd;
+    }
+    .badge.hotfix {
+      color: var(--accent-2);
+      background: #e6f6f4;
+      border-color: #b9e4df;
+      height: 19px;
+      font-size: 11px;
     }
     .pr-actions {
       display: flex;
@@ -647,12 +675,48 @@
       color: #27384a;
       font-weight: 650;
       white-space: nowrap;
+      font-variant-numeric: tabular-nums;
     }
     .todo-count.done {
       color: var(--muted);
       font-weight: 500;
     }
+    .todo-count .of {
+      color: var(--muted);
+      font-weight: 500;
+    }
     .todo-list {
+      display: grid;
+      gap: 7px;
+    }
+    /* A to-do is a thing to do, so it gets a box. The box is this browser's note to itself
+       about what I have worked through; the artifact the item came from is still the record
+       of what the release owes. */
+    .todo-item {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 9px;
+      align-items: start;
+      line-height: 1.45;
+      cursor: pointer;
+    }
+    .todo-item input {
+      margin: 3px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .todo-item.done > span {
+      color: var(--muted);
+      text-decoration: line-through;
+      text-decoration-thickness: 1px;
+    }
+    .todo-item.done .priority {
+      color: var(--muted);
+    }
+    .plain-item {
+      line-height: 1.45;
+    }
+    .plain-list {
       display: grid;
       gap: 8px;
     }
@@ -661,32 +725,52 @@
       font-size: 12px;
       white-space: nowrap;
     }
-    .plan-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-    .plan-table th {
-      text-align: left;
-      color: var(--muted);
-      font-weight: 600;
-      padding: 0 10px 6px 0;
-      border-bottom: 1px solid var(--line);
-      white-space: nowrap;
-    }
-    .plan-table td {
-      padding: 7px 10px 7px 0;
-      border-bottom: 1px solid var(--line);
-      vertical-align: top;
-    }
-    .plan-table td:first-child { white-space: nowrap; font-weight: 500; }
-    .todo-item {
-      line-height: 1.45;
-    }
     .priority {
       color: var(--warn);
       font-weight: 700;
       margin-right: 4px;
+    }
+    /* --- stats ------------------------------------------------------------------------
+       What the release is made of. Every figure is one row of one table: a number is worth
+       reading against the number above it, and cards put each one in a box of its own. */
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: auto;
+    }
+    .stats-table td {
+      padding: 7px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: baseline;
+    }
+    .stats-table tr:last-child td {
+      border-bottom: 0;
+    }
+    .stats-table .value {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      white-space: nowrap;
+      width: 1%;
+      padding-left: 16px;
+    }
+    .stats-table .of {
+      color: var(--muted);
+      font-weight: 400;
+    }
+    /* A group label is a row, not a heading above the table, so the columns stay in one
+       grid the whole way down. */
+    .stats-table .group td {
+      padding: 18px 0 5px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: #435366;
+      font-weight: 700;
+    }
+    .stats-table tr:first-child.group td {
+      padding-top: 0;
     }
     pre {
       margin: 0;
@@ -726,16 +810,10 @@
         overflow: auto;
       }
       .shell {
-        grid-template-columns: 1fr;
         height: auto;
         min-height: 100vh;
         overflow: visible;
       }
-      aside {
-        position: static;
-        overflow: visible;
-      }
-      main,
       .content {
         overflow: visible;
       }
@@ -743,133 +821,158 @@
         grid-template-columns: 1fr;
         height: auto;
       }
-      .single {
-        height: auto;
+      #view-releases.split,
+      #view-prs.split {
+        grid-template-columns: 1fr;
       }
-      .search {
-        width: 100%;
+      .topnav {
+        grid-template-columns: auto 1fr;
+        gap: 10px 16px;
+        padding: 10px 18px;
+      }
+      .tabs,
+      .identity {
+        justify-self: start;
+      }
+      .identity {
+        grid-column: 1 / -1;
       }
     }
   </style>
 </head>
 <body>
   <div class="shell">
-    <aside>
-      <div class="brand">repo-manager</div>
-      <div class="repo" id="repo-name"></div>
-      <div class="metrics">
-        <div class="metric"><strong id="metric-commits">0</strong><span>commit reviews</span></div>
-        <div class="metric"><strong id="metric-todos">0</strong><span>open to-dos</span></div>
-      </div>
-      <nav>
-        <button class="nav-button active" data-view="commits">Commit DB</button>
-        <button class="nav-button" data-view="prs">PR Reviews</button>
-        <button class="nav-button" data-view="release">Release Review</button>
-        <button class="nav-button" data-view="announcement">Announcement</button>
+    <header class="topnav">
+      <div class="brand">Repo Manager</div>
+      <nav class="tabs">
+        <button class="tab active" data-view="releases">Releases</button>
+        <button class="tab" data-view="commits">Commits</button>
+        <button class="tab" data-view="prs">PRs</button>
       </nav>
-      <div class="sidebar-stats">
-        <div class="sidebar-stat"><span>Contributions</span><strong id="stat-contributions">0</strong></div>
-        <div class="sidebar-stat"><span>Unique authors</span><strong id="stat-authors">0</strong></div>
-        <div class="sidebar-stat"><span>Unique reviewers</span><strong id="stat-reviewers">0</strong></div>
-        <div class="sidebar-stat"><span>Date range</span><strong id="stat-days">No reviews</strong><small id="stat-dates"></small></div>
+      <div class="identity">
+        <span class="repo" id="repo-name"></span>
+        <label class="who" title="Your GitHub login. The whole page is written from this account's point of view: PR status, what is yours, and everything you have checked off. This browser remembers it.">
+          <span class="at">@</span>
+          <input id="viewer" spellcheck="false" autocomplete="off" placeholder="github-id"
+                 aria-label="Your GitHub login">
+        </label>
       </div>
-    </aside>
-    <main>
-      <header>
-        <h1 id="view-title">Commit DB</h1>
-        <div class="toolbar">
-          <select class="search" id="tag-select" aria-label="Release tag"></select>
-          <input class="search" id="search" placeholder="Filter commits, verdicts, authors, descriptions">
-          <button class="copy hidden" id="copy-announcement">Copy announcement</button>
-        </div>
-      </header>
-      <section class="content">
-        <div id="view-commits" class="split">
-          <section class="panel">
-            <div class="panel-head"><h2>Saved Commit Reviews</h2><span class="muted" id="commit-count"></span></div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="width: 48px;">#</th>
-                    <th style="width: 132px;">Commit</th>
-                    <th style="width: 150px;">Verdict</th>
-                    <th style="width: 92px;">To-Dos</th>
-                    <th>Description</th>
-                    <th style="width: 130px;">Author</th>
-                  </tr>
-                </thead>
-                <tbody id="commit-rows"></tbody>
-              </table>
+    </header>
+    <section class="content">
+      <div id="view-releases" class="split">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Releases</h2>
+            <span class="muted" id="release-count"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 132px;">Release</th>
+                  <th style="width: 150px;">Verdict</th>
+                  <th style="width: 92px;">Checklist</th>
+                  <th style="width: 84px;">Commits</th>
+                </tr>
+              </thead>
+              <tbody id="release-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div class="subtabs" id="release-subtabs">
+              <button class="subtab active" data-sub="review">Review</button>
+              <button class="subtab" data-sub="notes">Release notes</button>
+              <button class="subtab" data-sub="announcement">Announcement</button>
+              <button class="subtab" data-sub="stats">Stats</button>
             </div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h2>Commit Review</h2><span class="muted" id="commit-selected"></span></div>
-            <div class="detail" id="commit-detail"></div>
-          </section>
-        </div>
+            <span class="sync-group">
+              <button class="copy sync-button hidden" id="release-copy"></button>
+            </span>
+          </div>
+          <div class="detail" id="release-detail"></div>
+        </section>
+      </div>
 
-        <div id="view-prs" class="split hidden">
-          <section class="panel">
-            <div class="panel-head">
-              <h2>Saved PR Reviews</h2>
-              <label class="muted pr-toggle" title="GitHub login whose perspective the Status column reflects">Status as
-                <input type="text" id="pr-viewer" spellcheck="false"></label>
-              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed PRs</label>
-              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide PRs not into main</label>
-              <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-drafts" checked> Hide draft PRs</label>
-              <span class="muted" id="pr-count"></span>
-              <span class="sync-group">
-                <span class="sync-state" id="pr-sync"></span>
-                <button class="copy sync-button" id="pr-refresh" title="Fetch the current state of every reviewed PR from GitHub now">Refresh</button>
-              </span>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="width: 34px;" title="Checked off: stays checked until the PR's Status changes"></th>
-                    <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
-                    <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
-                    <th style="width: 104px;" class="sortable" data-sort="attention" title="Elevated when the label, body, or docs and tests need attention">Attention</th>
-                    <th class="sortable" data-sort="description">Title</th>
-                    <th style="width: 130px;" class="sortable" data-sort="author">Author</th>
-                  </tr>
-                </thead>
-                <tbody id="pr-rows"></tbody>
-              </table>
-            </div>
-          </section>
-          <section class="panel">
-            <div class="panel-head"><h2>PR Review</h2><span class="muted" id="pr-selected"></span></div>
-            <div class="detail" id="pr-detail"></div>
-          </section>
-        </div>
+      <div id="view-commits" class="split hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Commits</h2>
+            <select class="head-select" id="commit-bucket" aria-label="Filter by release"></select>
+            <input class="head-search" id="commit-search" placeholder="Filter commits, verdicts, authors">
+            <span class="muted" id="commit-count"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 48px;">#</th>
+                  <th style="width: 118px;">Commit</th>
+                  <th style="width: 144px;">Verdict</th>
+                  <th style="width: 86px;">To-Dos</th>
+                  <th>Description</th>
+                  <th style="width: 140px;">Author</th>
+                </tr>
+              </thead>
+              <tbody id="commit-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Commit Review</h2><span class="muted" id="commit-selected"></span></div>
+          <div class="detail" id="commit-detail"></div>
+        </section>
+      </div>
 
-        <div id="view-release" class="single hidden">
-          <section class="panel">
-            <div class="panel-head"><h2>Release-Level Review</h2></div>
-            <div class="detail" id="release-detail"></div>
-          </section>
-        </div>
-
-        <div id="view-announcement" class="single hidden">
-          <section class="panel">
-            <div class="panel-head"><h2>Announcement</h2></div>
-            <div class="detail" id="announcement-detail"></div>
-          </section>
-        </div>
-      </section>
-    </main>
+      <div id="view-prs" class="split hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Pull Requests</h2>
+            <input class="head-search" id="pr-search" placeholder="Filter PRs, titles, authors">
+            <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-closed" checked> Hide closed</label>
+            <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-non-main" checked> Hide non-main</label>
+            <label class="muted pr-toggle"><input type="checkbox" id="pr-hide-drafts" checked> Hide drafts</label>
+            <span class="muted" id="pr-count"></span>
+            <span class="sync-group">
+              <span class="sync-state" id="pr-sync"></span>
+              <button class="copy sync-button" id="pr-refresh" title="Fetch the current state of every reviewed PR from GitHub now">Refresh</button>
+            </span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 34px;" title="Checked off: stays checked until the PR's Status changes"></th>
+                  <th style="width: 72px;" class="sortable" data-sort="pr" title="Sort by PR number">PR</th>
+                  <th style="width: 128px;" class="sortable" data-sort="status" title="Sort by how much this needs from you">Status</th>
+                  <th style="width: 104px;" class="sortable" data-sort="attention" title="Elevated when the label, body, or docs and tests need attention">Attention</th>
+                  <th class="sortable" data-sort="description">Title</th>
+                  <th style="width: 140px;" class="sortable" data-sort="author">Author</th>
+                </tr>
+              </thead>
+              <tbody id="pr-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>PR Review</h2><span class="muted" id="pr-selected"></span></div>
+          <div class="detail" id="pr-detail"></div>
+        </section>
+      </div>
+    </section>
   </div>
 
   <script>
     const isStatic = Boolean(window.REPO_MANAGER_STATIC);
 
-    // What this browser remembers about how I left the dashboard: which PRs I have checked
-    // off, and how I had the list sorted. Neither is a fact about the repo, so neither is
-    // worth a round trip to the server or a row in the workspace database.
+    // What this browser remembers about how I left the dashboard: who I am, which PRs and
+    // which to-dos I have checked off, and how I had the list sorted. None of it is a fact
+    // about the repo, so none of it is worth a round trip to the server or a file in the
+    // state directory — it is one person's notes to themselves about work in progress.
+    const VIEWER_KEY = "repo-manager:viewer";
     const PR_CHECKS_KEY = "repo-manager:pr-checks";
+    const TODO_CHECKS_KEY = "repo-manager:todo-checks";
     const PR_SORT_KEY = "repo-manager:pr-sort";
 
     function readStored(key, fallback) {
@@ -889,9 +992,33 @@
       }
     }
 
+    function readStoredString(key) {
+      try {
+        return String(window.localStorage.getItem(key) || "");
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function writeStoredString(key, value) {
+      try {
+        window.localStorage.setItem(key, value);
+      } catch (error) {
+        // As above: remembered for this page's lifetime and no longer.
+      }
+    }
+
+    // A GitHub login is letters, digits and hyphens. Narrowing to that is not validation
+    // for its own sake — the login is a component of every key this page stores, and a
+    // separator typed into it would put one reader's check-offs under another's name.
+    function cleanLogin(value) {
+      return String(value || "").trim().replace(/^@+/, "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 39);
+    }
+
     // Read once, at startup, and authoritative from then on: a browser that refuses to
     // store any of this must still behave normally for as long as the page is open.
     const prChecks = readStored(PR_CHECKS_KEY, {});
+    const todoChecks = readStored(TODO_CHECKS_KEY, {});
 
     // A column the table no longer offers is not a sort order, so it is forgotten along
     // with its direction rather than leaving the list sorted by nothing in particular.
@@ -909,22 +1036,27 @@
 
     const state = {
       data: null,
-      view: "commits",
-      selectedTag: "",
+      view: "releases",
+      viewer: cleanLogin(readStoredString(VIEWER_KEY)),
+      selectedRelease: 0,
+      releaseSub: "review",
       selectedCommit: 0,
       selectedPr: 0,
-      selectedRelease: 0,
-      selectedAnnouncement: 0,
-      filter: "",
+      commitBucket: "",
+      bucketChosen: false,
+      commitFilter: "",
+      prFilter: "",
       route: {},
       prActionMessage: null,
       hideClosedPrs: true,
       hideNonMainPrs: true,
       hideDraftPrs: true,
       prSort: rememberedSort.key,
-      prSortDesc: rememberedSort.desc,
-      prViewer: ""
+      prSortDesc: rememberedSort.desc
     };
+    const VIEWS = ["releases", "commits", "prs"];
+    const ALL_RELEASES = "all";
+    const RELEASE_SUBS = ["review", "notes", "announcement", "stats"];
     let suppressRouteUpdate = false;
     const $ = (id) => document.getElementById(id);
 
@@ -978,17 +1110,31 @@
       return String(value || "").slice(0, 10);
     }
 
+    // Handles are stored as "@popey" and typed as "popey". One of them is mine, and the
+    // page says which rather than leaving me to compare strings.
+    function isMe(handle) {
+      return Boolean(state.viewer) && cleanLogin(handle).toLowerCase() === state.viewer.toLowerCase();
+    }
+
+    function handleCell(handle) {
+      if (!handle) return "";
+      return `${esc(handle)}${isMe(handle) ? `<span class="you">you</span>` : ""}`;
+    }
+
+    // --- routing --------------------------------------------------------------------
+
     function parseRoute() {
       const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
       const params = new URLSearchParams(rawHash || window.location.search.slice(1));
       const view = params.get("view");
+      const sub = params.get("sub");
       return {
-        view: ["commits", "prs", "release", "announcement"].includes(view) ? view : "",
-        tag: params.get("tag") || "",
+        view: VIEWS.includes(view) ? view : "",
+        sub: RELEASE_SUBS.includes(sub) ? sub : "",
+        release: params.get("release") || "",
+        bucket: params.get("bucket") || "",
         commit: params.get("commit") || "",
-        pr: params.get("pr") || "",
-        releaseHead: params.get("releaseHead") || "",
-        announcementHead: params.get("announcementHead") || ""
+        pr: params.get("pr") || ""
       };
     }
 
@@ -997,41 +1143,36 @@
       state.route = route;
       if (!route.view && route.commit) route.view = "commits";
       if (!route.view && route.pr) route.view = "prs";
-      if (!route.view && route.releaseHead) route.view = "release";
-      if (!route.view && route.announcementHead) route.view = "announcement";
-      if (state.data && route.commit && !route.tag) {
+      if (!route.view && (route.release || route.sub)) route.view = "releases";
+      // A commit deep link should land on the release it belongs to, not on whatever
+      // bucket the filter happened to be showing.
+      if (state.data && route.commit && !route.bucket) {
         const row = (state.data.commit_reviews || []).find((item) => matchSha(item.commit_sha, route.commit));
-        if (row && row.tag_start) route.tag = row.tag_start;
-      }
-      if (state.data && route.releaseHead && !route.tag) {
-        const row = (state.data.release_reviews || []).find((item) => matchSha(item.head_sha, route.releaseHead));
-        if (row && row.tag_start) route.tag = row.tag_start;
-      }
-      if (state.data && route.announcementHead && !route.tag) {
-        const row = (state.data.release_announcements || []).find((item) => matchSha(item.head_sha, route.announcementHead));
-        if (row && row.tag_start) route.tag = row.tag_start;
+        if (row && row.bucket) route.bucket = row.bucket;
       }
       if (route.view) state.view = route.view;
-      if (route.tag) state.selectedTag = route.tag;
+      if (route.sub) state.releaseSub = route.sub;
+      if (route.bucket) {
+        state.commitBucket = route.bucket === ALL_RELEASES ? "" : route.bucket;
+        state.bucketChosen = true;
+      }
     }
 
     function updateRoute() {
       if (suppressRouteUpdate || !state.data) return;
       const params = new URLSearchParams();
       params.set("view", state.view);
-      if (state.selectedTag) params.set("tag", state.selectedTag);
-      if (state.view === "commits") {
+      if (state.view === "releases") {
+        const row = releaseList()[state.selectedRelease] || releaseList()[0];
+        if (row) params.set("release", row.bucket);
+        params.set("sub", state.releaseSub);
+      } else if (state.view === "commits") {
+        params.set("bucket", state.commitBucket || ALL_RELEASES);
         const row = filteredCommits()[state.selectedCommit] || filteredCommits()[0];
         if (row && row.commit_sha) params.set("commit", row.commit_sha);
       } else if (state.view === "prs") {
         const row = filteredPrs()[state.selectedPr] || filteredPrs()[0];
         if (row && row.pr_number) params.set("pr", String(row.pr_number));
-      } else if (state.view === "release") {
-        const row = filteredReleases()[state.selectedRelease] || filteredReleases()[0];
-        if (row && row.head_sha) params.set("releaseHead", row.head_sha);
-      } else if (state.view === "announcement") {
-        const row = filteredAnnouncements()[state.selectedAnnouncement] || filteredAnnouncements()[0];
-        if (row && row.head_sha) params.set("announcementHead", row.head_sha);
       }
       const next = `#${params.toString()}`;
       if (window.location.hash !== next) {
@@ -1063,10 +1204,10 @@
       }).join("")}</ul>`;
     }
 
-    function breakingList(items) {
+    function plainList(items) {
       if (!items || !items.length) return `<p class="muted">None.</p>`;
-      return `<div class="todo-list">${items.map((item) =>
-        `<div class="todo-item"><span>${esc(item)}</span></div>`).join("")}</div>`;
+      return `<div class="plain-list">${items.map((item) =>
+        `<div class="plain-item">${esc(item)}</div>`).join("")}</div>`;
     }
 
     function evidenceList(evidence) {
@@ -1080,26 +1221,123 @@
       `).join("")}</div>`;
     }
 
-    function todoCount(row) {
-      const total = (row.todo_items || []).length;
-      return `<span class="todo-count ${total ? "" : "done"}">${total}</span>`;
+    // --- to-dos ---------------------------------------------------------------------
+    //
+    // Every to-do on the page — a commit's maintainer to-dos, a release's tester checklist
+    // — is a box I can tick. Ticking it is a note to myself that I have worked through the
+    // item; it is stored in this browser under my GitHub login and goes nowhere near the
+    // state directory, because the artifact the item came from is still the only record of
+    // what the release owes. Two people reading the same published page keep their own.
+
+    // The text is the item's identity. An item the model has since reworded is a different
+    // item and arrives unticked, which is the right answer: the words changed, so what I
+    // worked through is no longer what the list is asking for.
+    function hash32(text) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < text.length; i++) {
+        h ^= text.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+      return (h >>> 0).toString(36);
     }
 
-    function displayVerdict(row) {
-      return row.verdict;
+    // Every workspace on this machine serves its dashboard from the same localhost origin
+    // and so shares one store, which is why the repo belongs in the key.
+    function todoScope(kind, id) {
+      return `${(state.data && state.data.config.repo) || ""}|${kind}|${id}`;
     }
 
-    // A to-do is read, not checked off. Nothing the dashboard owns is state any more: the
-    // release admin resolves an item by editing the artifact the item came from.
-    function todoList(items) {
+    function todoKey(scope, text) {
+      return `${state.viewer}|${scope}|${hash32(text)}`;
+    }
+
+    function todoDone(scope, text) {
+      return Boolean(todoChecks[todoKey(scope, text)]);
+    }
+
+    function setTodoDone(scope, text, done) {
+      const key = todoKey(scope, text);
+      if (done) {
+        todoChecks[key] = new Date().toISOString();
+      } else {
+        delete todoChecks[key];
+      }
+      writeStored(TODO_CHECKS_KEY, todoChecks);
+    }
+
+    function openTodos(items, scope) {
+      return (items || []).filter((item) => !todoDone(scope, item.text)).length;
+    }
+
+    // The scopes on screen, so a box ticked in the reading pane can find the count cell in
+    // the list beside it without a full redraw.
+    const todoScopes = new Map();
+
+    // Everything I ticked that the artifacts no longer ask for. Ticks belonging to another
+    // login are somebody else's notes and are left alone.
+    function reconcileTodoChecks() {
+      const live = new Set();
+      const data = state.data || {};
+      for (const row of data.commit_reviews || []) {
+        const scope = todoScope("commit", row.commit_sha);
+        for (const item of row.todo_items || []) live.add(todoKey(scope, item.text));
+      }
+      for (const row of data.releases || []) {
+        const scope = todoScope("release", row.bucket);
+        for (const item of row.todo_items || []) live.add(todoKey(scope, item.text));
+      }
+      const mine = `${state.viewer}|`;
+      let changed = false;
+      for (const key of Object.keys(todoChecks)) {
+        if (key.startsWith(mine) && !live.has(key)) {
+          delete todoChecks[key];
+          changed = true;
+        }
+      }
+      if (changed) writeStored(TODO_CHECKS_KEY, todoChecks);
+    }
+
+    function todoCount(items, scope) {
+      const total = (items || []).length;
+      if (!total) return `<span class="todo-count done">0</span>`;
+      const open = openTodos(items, scope);
+      const title = `${open} of ${total} still open`;
+      return `<span class="todo-count ${open ? "" : "done"}" title="${esc(title)}">${open}<span class="of">/${total}</span></span>`;
+    }
+
+    function todoList(items, scope) {
       if (!items || !items.length) return `<p class="muted">Nothing to check.</p>`;
-      return `<div class="todo-list">${items.map((item) => {
+      return `<div class="todo-list">${items.map((item, index) => {
         const where = (item.platforms || []).filter((p) => String(p).toLowerCase() !== "all");
-        return `<div class="todo-item">
+        const done = todoDone(scope, item.text);
+        return `<label class="todo-item ${done ? "done" : ""}">
+          <input type="checkbox" class="todo-check" data-index="${index}" ${done ? "checked" : ""}>
           <span>${item.priority ? `<span class="priority">${esc(item.priority)}</span>` : ""}${esc(item.text)}${
             where.length ? ` <span class="platforms">${where.map(esc).join(", ")}</span>` : ""}</span>
-        </div>`;
+        </label>`;
       }).join("")}</div>`;
+    }
+
+    // Ticking a box writes one key and redraws one label. The counts beside it catch up in
+    // place: a redraw here would scroll the pane back to the top of a checklist I am in
+    // the middle of working through.
+    function attachTodoHandlers(root, items, scope) {
+      root.querySelectorAll(".todo-check").forEach((box) => {
+        box.addEventListener("change", () => {
+          const item = items[Number(box.dataset.index)];
+          if (!item) return;
+          setTodoDone(scope, item.text, box.checked);
+          box.closest(".todo-item").classList.toggle("done", box.checked);
+          refreshTodoCounts();
+        });
+      });
+    }
+
+    function refreshTodoCounts() {
+      document.querySelectorAll("[data-todo-scope]").forEach((cell) => {
+        const scope = cell.dataset.todoScope;
+        cell.innerHTML = todoCount(todoScopes.get(scope) || [], scope);
+      });
     }
 
     // --- Freshness ------------------------------------------------------------------
@@ -1166,17 +1404,13 @@
         renderSyncState();
         return false;
       }
-      const viewerInput = $("pr-viewer");
-      if (viewerInput && document.activeElement !== viewerInput) {
-        viewerInput.value = state.prViewer || state.data.pr_viewer || "";
-      }
-      // Redrawing the list rewrites its innerHTML, which resets the scroll box to the top.
+      // Redrawing a list rewrites its innerHTML, which resets the scroll box to the top.
       // On a poll nobody asked for, that would drag the reader back up the table.
-      const wrap = document.querySelector("#view-prs .table-wrap");
-      const scrollTop = wrap ? wrap.scrollTop : 0;
+      const wraps = Array.from(document.querySelectorAll(".table-wrap"));
+      const scrolls = wraps.map((wrap) => wrap.scrollTop);
       applyRouteFromUrl();
       renderAll();
-      if (wrap && quiet) wrap.scrollTop = scrollTop;
+      if (quiet) wraps.forEach((wrap, index) => { wrap.scrollTop = scrolls[index]; });
       renderSyncState();
       return true;
     }
@@ -1188,9 +1422,14 @@
         renderAll();
         return;
       }
-      const viewerParam = state.prViewer ? `?viewer=${encodeURIComponent(state.prViewer)}` : "";
+      const viewerParam = state.viewer ? `?viewer=${encodeURIComponent(state.viewer)}` : "";
       const response = await fetch(`/api/data${viewerParam}`);
-      applyData(await response.json(), options);
+      const payload = await response.json();
+      if (!state.viewer && payload.viewer) {
+        state.viewer = cleanLogin(payload.viewer);
+        writeStoredString(VIEWER_KEY, state.viewer);
+      }
+      applyData(payload, options);
     }
 
     // Chained rather than an interval, so a slow response can never stack polls behind
@@ -1221,7 +1460,7 @@
         const response = await fetch("/api/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ viewer: state.prViewer || "" })
+          body: JSON.stringify({ viewer: state.viewer || "" })
         });
         const result = await response.json();
         syncing = false;
@@ -1250,13 +1489,29 @@
       return `<div class="kv"><span>${esc(label)}</span><strong><a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(value)}</a></strong></div>`;
     }
 
-    function filteredCommits() {
+    function generatedInField(row) {
+      const seconds = Number(row.generation_seconds || (row.details || {}).generation_seconds || 0);
+      if (!seconds || seconds <= 0) return "";
+      return field("Generated in", `${Math.round(seconds)} seconds`);
+    }
+
+    // --- what each tab is looking at -------------------------------------------------
+
+    function releaseList() {
+      return state.data.releases || [];
+    }
+
+    function commitsIn(bucket) {
       const rows = state.data.commit_reviews || [];
-      const query = state.filter.trim().toLowerCase();
-      const tagged = state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
-      if (!query) return tagged;
-      return tagged.filter((row) => [
-        row.commit_sha, row.verdict, row.summary, row.author, row.verdict_reason, row.tag_start, row.branch
+      return bucket ? rows.filter((row) => row.bucket === bucket) : rows;
+    }
+
+    function filteredCommits() {
+      const rows = commitsIn(state.commitBucket);
+      const query = state.commitFilter.trim().toLowerCase();
+      if (!query) return rows;
+      return rows.filter((row) => [
+        row.commit_sha, row.verdict, row.summary, row.author, row.verdict_reason, row.bucket, row.branch
       ].join(" ").toLowerCase().includes(query));
     }
 
@@ -1312,45 +1567,33 @@
 
     function filteredPrs() {
       const rows = (state.data.pr_reviews || []).filter(prVisible);
-      const query = state.filter.trim().toLowerCase();
+      const query = state.prFilter.trim().toLowerCase();
       if (!query) return sortPrs(rows);
       return sortPrs(rows.filter((row) => [
         String(row.pr_number), row.pr_title, row.author, row.label, row.scope, row.attention, row.review_status
       ].join(" ").toLowerCase().includes(query)));
     }
 
-    function filteredReleases() {
-      const rows = state.data.release_reviews || [];
-      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
-    }
-
-    function filteredAnnouncements() {
-      const rows = state.data.release_announcements || [];
-      return state.selectedTag ? rows.filter((row) => row.tag_start === state.selectedTag) : rows;
-    }
-
     function renderShell() {
       const data = state.data;
-      const tags = data.tags || [];
-      if (state.selectedTag && !tags.includes(state.selectedTag)) {
-        state.selectedTag = "";
+      const buckets = data.buckets || [];
+      if (state.commitBucket && !buckets.includes(state.commitBucket)) {
+        state.commitBucket = "";
       }
-      if (!state.selectedTag && tags.length) {
-        state.selectedTag = tags[0];
+      // The newest release is what is in flight, so the commit list opens on it. "All
+      // releases" is there for the times the question spans more than one, and once it has
+      // been asked for it stays asked for — the default applies to an untouched page only.
+      if (!state.bucketChosen && !state.commitBucket && buckets.length) {
+        state.commitBucket = buckets[0];
       }
-      $("tag-select").innerHTML = tags.length ? tags.map((tag) => `<option value="${esc(tag)}" ${tag === state.selectedTag ? "selected" : ""}>${esc(tag)}</option>`).join("") : `<option value="">No tags</option>`;
-      const commits = filteredCommits();
-      const releases = filteredReleases();
-      const announcements = filteredAnnouncements();
-      $("repo-name").textContent = `${data.config.repo} · ${data.config.branch || "main"}`;
-      $("metric-commits").textContent = commits.length;
-      $("metric-todos").textContent = commits.reduce((sum, row) => sum + (row.todo_items || []).length, 0) + releases.reduce((sum, row) => sum + (row.todo_items || []).length, 0);
-      $("stat-contributions").textContent = commits.length;
-      $("stat-authors").textContent = new Set(commits.map((row) => row.author).filter(Boolean)).size;
-      $("stat-reviewers").textContent = new Set(commits.flatMap((row) => row.reviewers || [])).size;
-      const range = dateRange(commits);
-      $("stat-days").textContent = range.start && range.end ? `${range.days} days` : "No reviews";
-      $("stat-dates").textContent = range.start && range.end ? `${range.start} to ${range.end}` : "";
+      $("commit-bucket").innerHTML = [
+        `<option value="">All releases</option>`,
+        ...buckets.map((name) =>
+          `<option value="${esc(name)}" ${name === state.commitBucket ? "selected" : ""}>${esc(name)}</option>`)
+      ].join("");
+      $("repo-name").textContent = `${data.config.repo}${data.config.branch ? ` · ${data.config.branch}` : ""}`;
+      const viewerInput = $("viewer");
+      if (document.activeElement !== viewerInput) viewerInput.value = state.viewer;
     }
 
     function dateRange(rows) {
@@ -1366,6 +1609,186 @@
       };
     }
 
+    // --- Releases --------------------------------------------------------------------
+
+    function renderReleases() {
+      const rows = releaseList();
+      if (state.route.release) {
+        const routedIndex = rows.findIndex((row) => row.bucket === state.route.release);
+        if (routedIndex !== -1) state.selectedRelease = routedIndex;
+      }
+      if (rows.length) {
+        state.selectedRelease = Math.min(state.selectedRelease, rows.length - 1);
+      }
+      $("release-count").textContent = `${rows.length} shown`;
+      $("release-rows").innerHTML = rows.map((row, index) => {
+        const scope = todoScope("release", row.bucket);
+        todoScopes.set(scope, row.todo_items || []);
+        return `
+        <tr data-index="${index}" class="${index === state.selectedRelease ? "selected" : ""}">
+          <td class="release-cell">${esc(row.bucket)}${row.is_hotfix ? ` <span class="badge hotfix">hotfix</span>` : ""}</td>
+          <td>${row.reviewed ? badge(row.verdict) : `<span class="muted" title="No release review has been built for this bucket yet">not built</span>`}</td>
+          <td data-todo-scope="${esc(scope)}">${todoCount(row.todo_items, scope)}</td>
+          <td>${row.commits}</td>
+        </tr>`;
+      }).join("");
+      scrollSelected($("release-rows"));
+      $("release-rows").querySelectorAll("tr").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          state.selectedRelease = Number(tr.dataset.index);
+          state.route = {};
+          renderReleases();
+          updateRoute();
+        });
+      });
+      renderReleaseDetail();
+    }
+
+    function currentRelease() {
+      const rows = releaseList();
+      return rows[state.selectedRelease] || rows[0] || null;
+    }
+
+    function renderReleaseDetail() {
+      document.querySelectorAll("#release-subtabs .subtab").forEach((button) =>
+        button.classList.toggle("active", button.dataset.sub === state.releaseSub));
+      const copy = $("release-copy");
+      const row = currentRelease();
+      if (!row) {
+        copy.classList.add("hidden");
+        $("release-detail").innerHTML = `<div class="empty">Nothing is filed under a release yet. Run <code>repo-manager commit sweep --branch main</code> to review the range, then <code>repo-manager release build --branch main</code> to write this bucket's verdict, notes and announcement.</div>`;
+        return;
+      }
+      // Offered only when there is something to copy: a button that silently puts an
+      // empty string on the clipboard is worse than no button.
+      const copyable = {
+        notes: row.notes_markdown && "Copy release notes",
+        announcement: row.announcement_markdown && "Copy announcement"
+      }[state.releaseSub];
+      copy.classList.toggle("hidden", !copyable);
+      if (copyable) copy.textContent = copyable;
+      const renderers = {
+        review: releaseReview,
+        notes: releaseNotes,
+        announcement: releaseAnnouncement,
+        stats: releaseStats
+      };
+      $("release-detail").innerHTML = renderers[state.releaseSub](row);
+      if (state.releaseSub === "review") {
+        attachTodoHandlers($("release-detail"), row.todo_items || [], todoScope("release", row.bucket));
+      }
+    }
+
+    function releaseBranch(row) {
+      return row.branch || row.bucket.replace(/^v/, "release-v");
+    }
+
+    function frozenNote(row) {
+      if (!row.frozen || !row.frozen.length) return "";
+      return section("Edited by hand", `<p class="muted">repo-manager will not overwrite ${esc(row.frozen.join(", "))}. Pass <code>--force</code> to regenerate.</p>`);
+    }
+
+    function releaseReview(row) {
+      if (!row.reviewed) {
+        return `<div class="empty">No release review for ${esc(row.bucket)} yet. Run <code>repo-manager release build --branch ${esc(releaseBranch(row))}</code>.</div>`;
+      }
+      return [
+        field("Release", row.bucket),
+        row.branch ? field("Branch", row.branch) : "",
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Head", shortSha(row.head_sha)),
+        field("Audited", row.reviewed_at),
+        generatedInField(row),
+        section("Verdict", `<p>${badge(row.verdict)} ${esc(row.verdict_reason || "")}</p>`),
+        section("Tester Checklist", todoList(row.todo_items, todoScope("release", row.bucket))),
+        section("Breaking Changes", plainList(row.breaking_changes)),
+        frozenNote(row),
+        section("Evidence", evidenceList(row.evidence))
+      ].join("");
+    }
+
+    function releaseNotes(row) {
+      if (!row.notes_markdown) {
+        return `<div class="empty">No release notes for ${esc(row.bucket)} yet. Run <code>repo-manager release notes --branch ${esc(releaseBranch(row))}</code>.</div>`;
+      }
+      return [
+        field("Release", row.bucket),
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Generated", row.reviewed_at),
+        section("Website Release Highlights", `<pre id="release-notes-markdown">${esc(row.notes_markdown)}</pre>`)
+      ].join("");
+    }
+
+    function releaseAnnouncement(row) {
+      if (!row.announcement_markdown) {
+        return `<div class="empty">No Discord announcement for ${esc(row.bucket)} yet. Run <code>repo-manager release announce --branch ${esc(releaseBranch(row))}</code>.</div>`;
+      }
+      return [
+        field("Release", row.bucket),
+        row.range_start ? field("Since", row.range_start) : "",
+        field("Generated", row.reviewed_at),
+        section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.announcement_markdown)}</pre>`)
+      ].join("");
+    }
+
+    // What this release is made of. Every figure is about the selected bucket, because a
+    // dashboard-wide total answers a question nobody is holding: the release is the unit
+    // of work, and "how much is left" only means anything inside one.
+    //
+    // One table, one format, top to bottom. These numbers are read against each other —
+    // 4 of 5 checklist items against 1 of 39 commits unreviewed — and a grid of cards
+    // makes every comparison a jump between two boxes.
+    function statRow(label, value, of) {
+      return `<tr><td>${esc(label)}</td><td class="value">${esc(value)}${
+        of ? ` <span class="of">of ${esc(of)}</span>` : ""}</td></tr>`;
+    }
+
+    function statGroup(label) {
+      return `<tr class="group"><td colspan="2">${esc(label)}</td></tr>`;
+    }
+
+    function releaseStats(row) {
+      const commits = commitsIn(row.bucket);
+      const releaseScope = todoScope("release", row.bucket);
+      const checklist = row.todo_items || [];
+      const blockers = checklist.filter((item) => item.priority === "P0");
+      const commitTodos = commits.reduce((sum, c) => sum + (c.todo_items || []).length, 0);
+      const openCommitTodos = commits.reduce(
+        (sum, c) => sum + openTodos(c.todo_items, todoScope("commit", c.commit_sha)), 0);
+      const authors = new Set(commits.map((c) => c.author).filter(Boolean));
+      const reviewers = new Set(commits.flatMap((c) => c.reviewers || []));
+      const range = dateRange(commits);
+      const verdicts = {};
+      commits.forEach((c) => {
+        if (c.verdict) verdicts[c.verdict] = (verdicts[c.verdict] || 0) + 1;
+      });
+      const inRange = commits.length + Number(row.commits_unreviewed || 0);
+      return `<table class="stats-table"><tbody>
+        ${statGroup("Left to do")}
+        ${statRow("Checklist items open", openTodos(checklist, releaseScope), checklist.length)}
+        ${statRow("Blockers open",
+                  blockers.filter((item) => !todoDone(releaseScope, item.text)).length,
+                  blockers.length)}
+        ${statRow("Commit to-dos open", openCommitTodos, commitTodos)}
+        ${statGroup("Commits")}
+        ${statRow("Reviewed", commits.length, inRange)}
+        ${statRow(state.viewer ? `Authored by @${state.viewer}` : "Authored by you",
+                  state.viewer ? commits.filter((c) => isMe(c.author)).length : "\u2014")}
+        ${statRow("Unique authors", authors.size)}
+        ${statRow("Unique reviewers", reviewers.size)}
+        ${statGroup("Verdicts")}
+        ${Object.entries(verdicts).sort((a, b) => b[1] - a[1])
+            .map(([verdict, count]) => statRow(verdict, count)).join("")
+          || statRow("No commits reviewed yet", 0)}
+        ${statGroup("Dates")}
+        ${statRow("First commit", range.start || "\u2014")}
+        ${statRow("Last commit", range.end || "\u2014")}
+        ${statRow("Days of work", range.days || 0)}
+      </tbody></table>`;
+    }
+
+    // --- Commits ---------------------------------------------------------------------
+
     function renderCommits() {
       const rows = filteredCommits();
       if (state.route.commit) {
@@ -1378,21 +1801,23 @@
         state.selectedCommit = Math.min(state.selectedCommit, rows.length - 1);
       }
       $("commit-count").textContent = `${rows.length} shown`;
-      $("commit-rows").innerHTML = rows.map((row, index) => `
+      $("commit-rows").innerHTML = rows.map((row, index) => {
+        const scope = todoScope("commit", row.commit_sha);
+        todoScopes.set(scope, row.todo_items || []);
+        return `
         <tr data-index="${index}" class="${index === state.selectedCommit ? "selected" : ""}">
           <td>${index + 1}</td>
           <td class="commit-cell" title="${esc(row.commit_sha)}">${esc(shortSha(row.commit_sha))}</td>
-          <td>${badge(displayVerdict(row))}</td>
-          <td>${todoCount(row)}</td>
+          <td>${badge(row.verdict)}</td>
+          <td data-todo-scope="${esc(scope)}">${todoCount(row.todo_items, scope)}</td>
           <td><div class="description">${esc(row.summary)}</div></td>
-          <td>${esc(row.author || "")}</td>
-        </tr>
-      `).join("");
+          <td>${handleCell(row.author)}</td>
+        </tr>`;
+      }).join("");
       scrollSelected($("commit-rows"));
       $("commit-rows").querySelectorAll("tr").forEach((tr) => {
-        tr.addEventListener("click", async () => {
-          const index = Number(tr.dataset.index);
-          state.selectedCommit = index;
+        tr.addEventListener("click", () => {
+          state.selectedCommit = Number(tr.dataset.index);
           state.route = {};
           renderCommits();
           updateRoute();
@@ -1400,27 +1825,31 @@
       });
       const row = rows[state.selectedCommit] || rows[0];
       if (!row) {
-        $("commit-detail").innerHTML = `<div class="empty">No commit reviews saved yet.</div>`;
+        $("commit-detail").innerHTML = `<div class="empty">No commit reviews saved here yet.</div>`;
         $("commit-selected").textContent = "";
         return;
       }
       $("commit-selected").textContent = shortSha(row.commit_sha);
-      const evidence = row.evidence || {};
+      const scope = todoScope("commit", row.commit_sha);
       const prUrl = row.pr_number ? `https://github.com/${state.data.config.repo}/pull/${row.pr_number}` : "";
       $("commit-detail").innerHTML = [
         field("Commit", row.commit_sha),
         linkedField("PR", prUrl, row.pr_number ? `#${row.pr_number}` : ""),
-        field("Author", row.author),
+        `<div class="kv"><span>Author</span><strong>${handleCell(row.author)}</strong></div>`,
+        row.bucket ? field("Release", row.bucket) : "",
         row.merge_date ? field("Merged", row.merge_date) : "",
         field("Audited", row.reviewed_at),
         generatedInField(row),
         section("Description", `<p>${esc(row.summary)}</p>`),
-        section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(row.verdict_reason || "")}</p>`),
-        section("Maintainer To-Do", todoList(row.todo_items)),
+        section("Verdict", `<p>${badge(row.verdict)} ${esc(row.verdict_reason || "")}</p>`),
+        section("Maintainer To-Do", todoList(row.todo_items, scope)),
         section("Shout Outs", asList(row.shout_outs)),
-        section("Evidence", evidenceList(evidence))
+        section("Evidence", evidenceList(row.evidence || {}))
       ].join("");
+      attachTodoHandlers($("commit-detail"), row.todo_items || [], scope);
     }
+
+    // --- PRs -------------------------------------------------------------------------
 
     async function runPrAction(path, prNumber) {
       const response = await fetch(path, {
@@ -1470,7 +1899,7 @@
       // A covered rung has no slate below the rule, so the button would be acting on names
       // that are not on screen — and on #3210 one of those names was a reviewer already
       // requested on the PR. The tooltip says who is covering it, so the button explains
-      // itself rather than just refusing. `repo-manager request-pr-reviewers N` still works:
+      // itself rather than just refusing. `repo-manager pr request-reviewers N` still works:
       // typing the command is an explicit override, clicking a button you cannot read is not.
       // The label button is the same act the GitHub Action will perform on every new PR:
       // apply the triage's rfc: label, and for rfc:required also draft the PR and post the
@@ -1529,12 +1958,6 @@
           }
         });
       });
-    }
-
-    function generatedInField(row) {
-      const seconds = Number(row.generation_seconds || (row.details || {}).generation_seconds || 0);
-      if (!seconds || seconds <= 0) return "";
-      return field("Generated in", `${Math.round(seconds)} seconds`);
     }
 
     // The comment is markdown, and the pane is a preview of it, so the pane has to render
@@ -1673,7 +2096,7 @@
           const task = item[2].match(/^\[([ xX])\]\s+(.*)$/);
           // A checkbox is already a marker; the bullet beside it is a second one.
           pushItem(task
-            ? `${task[1].toLowerCase() === "x" ? "\u2611" : "\u2610"} ${mdInline(task[2])}`
+            ? `${task[1].toLowerCase() === "x" ? "☑" : "☐"} ${mdInline(task[2])}`
             : mdInline(item[2]), task ? "task" : "");
           continue;
         }
@@ -1691,7 +2114,7 @@
         const active = th.dataset.sort === state.prSort;
         th.classList.toggle("sorted", active);
         const label = th.dataset.label || (th.dataset.label = th.textContent.trim());
-        th.textContent = active ? `${label} ${state.prSortDesc ? "\u25be" : "\u25b4"}` : label;
+        th.textContent = active ? `${label} ${state.prSortDesc ? "▾" : "▴"}` : label;
       });
     }
 
@@ -1720,7 +2143,7 @@
     // Every workspace on this machine serves its dashboard from the same localhost origin
     // and so shares one store, which is why the repo belongs in the key.
     function prCheckKey(row) {
-      return `${row.repo}|${row.pr_number}`;
+      return `${(state.data && state.data.config.repo) || ""}|${row.pr_number}`;
     }
 
     // A check-off also goes stale by sitting there: after a week I have stopped carrying
@@ -1732,11 +2155,11 @@
     // Status it was made against and the time it was made, and lasts only as long as both
     // hold. Two things that look like a Status change are not: a blank Status is gh
     // telling us nothing rather than telling us something new, and a Status written from
-    // another perspective is the "Status as" box being retyped, which relabels the whole
-    // column without anything having happened on GitHub. Neither may sweep the checkmarks
-    // away; the week runs regardless.
+    // another perspective is the GitHub ID being retyped, which relabels the whole column
+    // without anything having happened on GitHub. Neither may sweep the checkmarks away;
+    // the week runs regardless.
     function reconcilePrChecks(rows) {
-      const viewer = state.data.pr_viewer || "";
+      const viewer = state.viewer || "";
       const now = Date.now();
       const live = new Set();
       let changed = false;
@@ -1756,10 +2179,10 @@
         }
       }
       // A review this dashboard no longer holds has nothing left to check off. Another
-      // workspace's rows are simply absent here, so only these repos are pruned.
-      const repos = new Set(rows.map((row) => row.repo));
+      // workspace's rows are simply absent here, so only this repo's keys are pruned.
+      const repo = (state.data && state.data.config.repo) || "";
       for (const key of Object.keys(prChecks)) {
-        if (repos.has(key.slice(0, key.lastIndexOf("|"))) && !live.has(key)) {
+        if (key.slice(0, key.lastIndexOf("|")) === repo && !live.has(key)) {
           delete prChecks[key];
           changed = true;
         }
@@ -1771,7 +2194,7 @@
       if (checked) {
         prChecks[prCheckKey(row)] = {
           status: row.review_status || "",
-          viewer: state.data.pr_viewer || "",
+          viewer: state.viewer || "",
           at: new Date().toISOString()
         };
       } else {
@@ -1784,7 +2207,7 @@
     // a check that expires overnight looks like the dashboard losing my work.
     function prCheckTitle(entry) {
       if (!entry) return "Check off this PR";
-      return `Checked off ${entry.at.slice(0, 10)} \u2014 clears when the Status changes, or a week after checking`;
+      return `Checked off ${entry.at.slice(0, 10)} — clears when the Status changes, or a week after checking`;
     }
 
     function prCheckBox(entry) {
@@ -1819,7 +2242,7 @@
           <td>${statusBadge(row)}</td>
           <td title="${esc(row.attention_detail || "")}">${verdictBadge(row.attention, "attention")}</td>
           <td><div class="description">${esc(row.pr_title || "")}</div></td>
-          <td>${esc(row.author || "")}</td>
+          <td>${handleCell(row.author)}</td>
         </tr>
       `;
       }).join("");
@@ -1861,7 +2284,7 @@
         // Dashboard-only by the same test as the rest of this block: a reader of the comment
         // is already on the PR, whose own body says what it does. A reader skimming the
         // dashboard has no other way to tell one row from another.
-        field("Author", row.author),
+        `<div class="kv"><span>Author</span><strong>${handleCell(row.author)}</strong></div>`,
         row.pr_state ? field("State", `${row.pr_state}${row.base_ref ? ` → ${row.base_ref}` : ""}`) : "",
         field("Head", shortSha(row.head_sha)),
         field("Reviewed", row.reviewed_at),
@@ -1879,107 +2302,76 @@
       attachPrActionHandlers(row);
     }
 
-    function renderRelease() {
-      const rows = filteredReleases();
-      if (state.route.releaseHead) {
-        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.releaseHead));
-        if (routedIndex !== -1) {
-          state.selectedRelease = routedIndex;
-        }
-      }
-      if (rows.length) {
-        state.selectedRelease = Math.min(state.selectedRelease, rows.length - 1);
-      }
-      const row = rows[state.selectedRelease] || rows[0];
-      if (!row) {
-        $("release-detail").innerHTML = `<div class="empty">Run <code>repo-manager release build --branch main</code> to review the range and write this bucket's verdict.</div>`;
-        return;
-      }
-      const details = row.details || {};
-      $("release-detail").innerHTML = [
-        field("Repo", row.repo),
-        field("Release", row.tag_start),
-        row.range_start ? field("Since", row.range_start) : "",
-        field("Head", row.head_sha),
-        field("Audited", row.reviewed_at),
-        generatedInField(row),
-        section("Verdict", `<p>${badge(displayVerdict(row))} ${esc(details.verdict_reason || row.verdict_reason || "")}</p>`),
-        section("Checklist", todoList(row.todo_items)),
-        section("Breaking Changes", breakingList(row.breaking_changes)),
-        row.frozen && row.frozen.length
-          ? section("Edited by hand", `<p class="muted">repo-manager will not overwrite ${esc(row.frozen.join(", "))}. Pass <code>--force</code> to regenerate.</p>`)
-          : "",
-        section("Evidence", evidenceList(details.evidence))
-      ].join("");
-    }
-
-    function renderAnnouncement() {
-      const rows = filteredAnnouncements();
-      if (state.route.announcementHead) {
-        const routedIndex = rows.findIndex((row) => matchSha(row.head_sha, state.route.announcementHead));
-        if (routedIndex !== -1) {
-          state.selectedAnnouncement = routedIndex;
-        }
-      }
-      if (rows.length) {
-        state.selectedAnnouncement = Math.min(state.selectedAnnouncement, rows.length - 1);
-      }
-      const row = rows[state.selectedAnnouncement] || rows[0];
-      if (!row) {
-        $("announcement-detail").innerHTML = `<div class="empty">Run <code>repo-manager release build --branch main</code> to write the release page and the Discord post.</div>`;
-        return;
-      }
-      $("announcement-detail").innerHTML = [
-        field("Release", row.tag_start),
-        row.range_start ? field("Since", row.range_start) : "",
-        field("Head", row.head_sha),
-        field("Generated", row.generated_at),
-        generatedInField(row),
-        section("Website Release Highlights", `<pre id="release-highlights-markdown">${esc(row.release_highlights_markdown || "No website release highlights artifact saved.")}</pre>`),
-        section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.markdown || "")}</pre>`)
-      ].join("");
-    }
+    // --- wiring ----------------------------------------------------------------------
 
     function setView(view) {
       state.view = view;
-      document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
-      $("view-commits").classList.toggle("hidden", view !== "commits");
-      $("view-prs").classList.toggle("hidden", view !== "prs");
-      $("view-release").classList.toggle("hidden", view !== "release");
-      $("view-announcement").classList.toggle("hidden", view !== "announcement");
-      $("search").classList.toggle("hidden", view !== "commits" && view !== "prs");
-      $("copy-announcement").classList.toggle("hidden", view !== "announcement");
-      $("view-title").textContent = view === "commits" ? "Commit DB" : view === "prs" ? "PR Reviews" : view === "release" ? "Release Review" : "Announcement";
+      document.querySelectorAll(".tab").forEach((button) =>
+        button.classList.toggle("active", button.dataset.view === view));
+      VIEWS.forEach((name) => $(`view-${name}`).classList.toggle("hidden", name !== view));
       updateRoute();
     }
 
     function renderAll() {
+      reconcileTodoChecks();
+      todoScopes.clear();
       renderShell();
+      renderReleases();
       renderCommits();
       renderPrReviews();
-      renderRelease();
-      renderAnnouncement();
       setView(state.view);
     }
 
-    document.querySelectorAll(".nav-button").forEach((button) => {
+    document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
         state.route = {};
         setView(button.dataset.view);
       });
     });
-    $("search").addEventListener("input", (event) => {
-      state.filter = event.target.value;
+    document.querySelectorAll("#release-subtabs .subtab").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.releaseSub = button.dataset.sub;
+        state.route = {};
+        renderReleaseDetail();
+        updateRoute();
+      });
+    });
+    // Retyping the ID rewrites the page's whole point of view, so it goes back to the
+    // server for a Status column computed from the new one — and, on the published site
+    // where there is no server, simply redraws what is already here.
+    $("viewer").addEventListener("change", async (event) => {
+      const next = cleanLogin(event.target.value);
+      event.target.value = next;
+      if (next === state.viewer) return;
+      state.viewer = next;
+      writeStoredString(VIEWER_KEY, next);
+      if (isStatic) {
+        renderAll();
+      } else {
+        await reloadData().catch(() => renderAll());
+      }
+    });
+    $("commit-bucket").addEventListener("change", (event) => {
+      state.commitBucket = event.target.value;
+      state.bucketChosen = true;
       state.selectedCommit = 0;
-      state.selectedPr = 0;
       state.route = {};
       renderCommits();
-      renderPrReviews();
       updateRoute();
     });
-    $("pr-viewer").addEventListener("change", async (event) => {
-      state.prViewer = event.target.value.trim().replace(/^@/, "");
-      await reloadData();
+    $("commit-search").addEventListener("input", (event) => {
+      state.commitFilter = event.target.value;
+      state.selectedCommit = 0;
+      state.route = {};
+      renderCommits();
+      updateRoute();
+    });
+    $("pr-search").addEventListener("input", (event) => {
+      state.prFilter = event.target.value;
+      state.selectedPr = 0;
+      state.route = {};
+      renderPrReviews();
+      updateRoute();
     });
     $("pr-hide-closed").addEventListener("change", (event) => {
       state.hideClosedPrs = event.target.checked;
@@ -1999,20 +2391,12 @@
       renderPrReviews();
       updateRoute();
     });
-    $("tag-select").addEventListener("change", (event) => {
-      state.selectedTag = event.target.value;
-      state.selectedCommit = 0;
-      state.selectedPr = 0;
-      state.selectedRelease = 0;
-      state.selectedAnnouncement = 0;
-      state.route = {};
-      renderAll();
-    });
-    $("copy-announcement").addEventListener("click", async () => {
-      const markdown = $("announcement-markdown");
-      await navigator.clipboard.writeText(markdown ? markdown.textContent : "");
-      $("copy-announcement").textContent = "Copied";
-      setTimeout(() => $("copy-announcement").textContent = "Copy announcement", 1000);
+    $("release-copy").addEventListener("click", async () => {
+      const block = $(state.releaseSub === "notes" ? "release-notes-markdown" : "announcement-markdown");
+      await navigator.clipboard.writeText(block ? block.textContent : "");
+      const label = $("release-copy").textContent;
+      $("release-copy").textContent = "Copied";
+      setTimeout(() => { $("release-copy").textContent = label; }, 1000);
     });
     window.addEventListener("hashchange", () => {
       if (!state.data) return;

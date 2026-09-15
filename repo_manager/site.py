@@ -39,8 +39,12 @@ def blockers_first(todos):
 
 
 def todo_items(items):
-    """The checklist as the page renders it. There is no completion state: an item is resolved
-    by editing the artifact it came from, not by ticking it here."""
+    """The checklist as the page renders it.
+
+    No completion state travels with it. Ticking an item off is a note the reader makes to
+    themselves — it lives in their browser, under their GitHub login — and the artifact the
+    item came from stays the only record of what the release still owes.
+    """
     rows = []
     for item in items or []:
         if isinstance(item, dict):
@@ -59,7 +63,7 @@ def bucket_names(state, commits=()):
     A bucket exists as soon as a commit is filed under it, not when its release artifacts
     appear — otherwise the filter is empty exactly when a sweep is all that has run.
     """
-    names = {row["tag_start"] for row in commits if row.get("tag_start")}
+    names = {row["bucket"] for row in commits if row.get("bucket")}
     for key in state.keys("releases"):
         parts = key.split("/")
         if len(parts) > 2:
@@ -76,7 +80,7 @@ def commit_rows(state):
         repo = repo or data.get("repo", "")
         rows.append({
             "commit_sha": data.get("sha") or Path(key).stem,
-            "tag_start": data.get("bucket", ""),
+            "bucket": data.get("bucket", ""),
             "branch": data.get("branch", ""),
             "range_start": data.get("range_start", ""),
             "pr_number": data.get("pr_number"),
@@ -100,46 +104,41 @@ def commit_rows(state):
 
 
 def release_rows(state, commits):
-    reviews, announcements = [], []
+    """One row per bucket, carrying everything that bucket ships with.
+
+    The verdict, the notes and the Discord post are three views of one release, so they are
+    one row with three fields rather than three lists to line up by name. A bucket with
+    nothing but commits filed under it is still a release — it is the one on `main`, before
+    anybody has built it — and it appears here with an empty verdict rather than not at all.
+    """
+    rows = []
     for name in bucket_names(state, commits):
         review = state.read_json(store.review_key(name)) or {}
-        frozen = [f for f in ("review.json", "notes.md", "announcement.md")
-                  if store.is_frozen(state, name, f)]
-        if review:
-            reviews.append({
-                "repo": review.get("repo", ""),
-                "tag_start": name,
-                "branch": review.get("branch", ""),
-                "range_start": review.get("range_start", ""),
-                "head_sha": review.get("head_sha", ""),
-                "verdict": review.get("verdict", ""),
-                "verdict_reason": review.get("verdict_reason", ""),
-                "reviewed_at": review.get("reviewed_at", ""),
-                "generation_seconds": review.get("generation_seconds", 0),
-                "todo_items": todo_items(blockers_first(review.get("checklist") or [])),
-                "breaking_changes": review.get("breaking_changes") or [],
-                "candidate_issues": review.get("candidate_issues") or [],
-                "is_hotfix": bool(review.get("is_hotfix")),
-                "commits": sum(1 for row in commits if row["tag_start"] == name),
-                "frozen": frozen,
-                "details": {**review, "evidence": ordered_evidence(
-                    review.get("evidence") or {}, release.EVIDENCE_KEYS)},
-            })
-        notes = state.read_text(store.notes_key(name))
-        post = state.read_text(store.announcement_key(name))
-        if notes or post:
-            announcements.append({
-                "tag_start": name,
-                "branch": review.get("branch", ""),
-                "range_start": review.get("range_start", ""),
-                "head_sha": review.get("head_sha", ""),
-                "generated_at": review.get("reviewed_at", ""),
-                "generation_seconds": 0,
-                "release_highlights_markdown": notes,
-                "markdown": post,
-                "frozen": frozen,
-            })
-    return reviews, announcements
+        rows.append({
+            "bucket": name,
+            "repo": review.get("repo", ""),
+            "branch": review.get("branch", ""),
+            "range_start": review.get("range_start", ""),
+            "last_stable_tag": review.get("last_stable_tag", ""),
+            "head_sha": review.get("head_sha", ""),
+            "verdict": review.get("verdict", ""),
+            "verdict_reason": review.get("verdict_reason", ""),
+            "reviewed_at": review.get("reviewed_at", ""),
+            "generation_seconds": review.get("generation_seconds", 0),
+            "reviewed": bool(review),
+            "todo_items": todo_items(blockers_first(review.get("checklist") or [])),
+            "breaking_changes": review.get("breaking_changes") or [],
+            "candidate_issues": review.get("candidate_issues") or [],
+            "is_hotfix": bool(review.get("is_hotfix")),
+            "commits": sum(1 for row in commits if row["bucket"] == name),
+            "commits_unreviewed": review.get("commits_unreviewed", 0),
+            "frozen": [f for f in ("review.json", "notes.md", "announcement.md")
+                       if store.is_frozen(state, name, f)],
+            "notes_markdown": state.read_text(store.notes_key(name)),
+            "announcement_markdown": state.read_text(store.announcement_key(name)),
+            "evidence": ordered_evidence(review.get("evidence") or {}, release.EVIDENCE_KEYS),
+        })
+    return rows
 
 
 def pr_rows(state, mirror=None, viewer=""):
@@ -235,27 +234,28 @@ def tally(values):
 def load(state, mirror=None, viewer=""):
     """Everything the page shows, read from files (plus the live mirror when serving)."""
     commits, repo = commit_rows(state)
-    reviews, announcements = release_rows(state, commits)
+    releases = release_rows(state, commits)
     prs, pr_repo = pr_rows(state, mirror, viewer)
-    repo = repo or pr_repo or next((r.get("repo", "") for r in reviews if r.get("repo")), "")
+    repo = repo or pr_repo or next((r["repo"] for r in releases if r["repo"]), "")
     payload = {
-        "config": {"repo": repo, "branch": next((r["branch"] for r in reviews if r["branch"]), "main")},
-        "tags": bucket_names(state, commits),
+        "config": {"repo": repo, "branch": next((r["branch"] for r in releases if r["branch"]), "main")},
+        "buckets": [row["bucket"] for row in releases],
         "counts": {
             "commits": len(commits),
-            "release_reviews": len(reviews),
-            "announcements": len(announcements),
+            "releases": len(releases),
+            "release_reviews": sum(1 for r in releases if r["reviewed"]),
+            "announcements": sum(1 for r in releases
+                                 if r["notes_markdown"] or r["announcement_markdown"]),
             "pr_reviews": len(prs),
-            "open_todos": sum(len(r["todo_items"]) for r in commits) + sum(len(r["todo_items"]) for r in reviews),
-            "blockers": sum(1 for r in reviews for t in r["todo_items"] if t.get("priority") == "P0"),
+            "todos": sum(len(r["todo_items"]) for r in commits + releases),
+            "blockers": sum(1 for r in releases for t in r["todo_items"] if t.get("priority") == "P0"),
             "verdicts": tally(row["verdict"] for row in commits),
             "labels": tally(row["label"] for row in prs),
         },
         "commit_reviews": commits,
-        "release_reviews": reviews,
-        "release_announcements": announcements,
+        "releases": releases,
         "pr_reviews": prs,
-        "pr_viewer": viewer or (mirror.sync.get("viewer", "") if mirror else ""),
+        "viewer": viewer or (mirror.sync.get("viewer", "") if mirror else ""),
         "pr_sync": dict(mirror.sync) if mirror else {},
     }
     # A fingerprint of everything except the freshness block, so a poll that finds nothing new

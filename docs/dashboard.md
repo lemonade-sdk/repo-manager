@@ -1,7 +1,6 @@
 # Dashboard
 
-Four tabs — Commit DB, PR Reviews, Release Review, Announcement — built from the state
-directory.
+Three tabs — Releases, Commits, PRs — built from the state directory.
 
 ```bash
 repo-manager site render --state . --out site   # the static site
@@ -17,13 +16,64 @@ deploys to <https://testing.lemonade-server.ai>.
 `site serve` reads the same directory on each request, so a review that lands while the page
 is open shows up on the next poll.
 
+## Your GitHub ID
+
+The top bar carries one identity box, and the whole page is written from that account's point
+of view: which PRs want something from *you*, which commits are yours, and which items you
+have worked through. It is typed once and remembered by the browser, so a bookmark opens the
+page already pointed at you.
+
+It is also the namespace for everything the page remembers. Two people reading the published
+site keep their own check-offs, and retyping the box swaps the whole set rather than merging
+it — these are one reader's notes, not a record anyone else inherits.
+
+## Check-off
+
+Every to-do on the page has a box: the tester checklist on a release, the maintainer to-dos on
+a commit. Ticking one writes a single key to browser storage and updates the count in the list
+beside it — no request, no refetch, no redraw of the checklist you are working through.
+
+**A tick is a note, not a record.** It lives in one browser, under one GitHub login, and never
+reaches the state directory. The artifact the item came from is still the only record of what
+the release owes, and an item is *resolved* by editing that artifact — `review.json`, or the
+commit review — in the GitHub web editor or a local clone. This is the line the file store
+draws: the dashboard reads state, it does not own any.
+
+An item the model has since reworded arrives unticked, because the words changed and what you
+worked through is no longer what the list is asking for.
+
+## The Releases tab
+
+The list is every bucket the directory knows about, newest first — including the one on `main`
+that has only been swept, which shows its commit count and `not built`. Four sub-tabs read the
+selected release four ways:
+
+**Review** — the verdict and the one-or-two sentences answering "can we ship?", then the
+checklist a tester works through, blockers first, each item tagged with the platforms it
+applies to. Then the canonical breaking changes and the evidence. When a human has edited one
+of the bucket's files, it says which, and that `--force` is what overwrites it.
+
+**Release notes** and **Announcement** — the website highlights and the Discord post, as
+markdown, with a Copy button. They are shown verbatim because they are copied verbatim.
+
+**Stats** — what this release is made of: commits reviewed and how many in range still are
+not, open checklist items and blockers, open commit to-dos, how many of the commits are
+yours, unique authors and reviewers, the span of days, the verdict tally and the shout-outs.
+Every figure is about the selected release, because the release is the unit of work.
+
+## The Commits tab
+
+Every reviewed commit, filtered by release from the list's own title bar and searchable beside
+it. The release filter opens on the newest bucket; "All releases" is there for a question that
+spans more than one.
+
 ## The Status column
 
-The PR Reviews tab answers one question per row: does this PR need something from me?
+The PRs tab answers one question per row: does this PR need something from me?
 **Review** is your turn, **Merge** means it is approved and waiting on you, **Needs reviewer**
 means nobody is on the hook, **In progress** means someone else is, and **Waiting for RFC**
 means the PR carries `rfc:required` and is waiting on a discussion rather than a reviewer. The
-tooltip carries the reasoning. "Status as" changes whose perspective it is computed from.
+tooltip carries the reasoning, and the perspective is the GitHub ID in the top bar.
 
 That column reads GitHub, so it exists only under `site serve`, which keeps a mirror of PR
 state in the serving process's memory. The mirror is a cache, not a record: every field is
@@ -36,17 +86,3 @@ The published static site has no network, so it renders that column as **not liv
 than drawing the state a triage saw days ago as though it were current. Everything else on the
 tab — label, scope, body-matches-diff, docs and tests, attention, and the comment exactly as
 `pr post` would submit it — is in the files and renders either way.
-
-## The Release Review tab
-
-The bucket's verdict and the one-or-two sentences answering "can we ship?", then the
-checklist a tester works through — blockers first, each item tagged with the platforms it
-applies to — the canonical breaking changes, and the evidence. When a human has edited one of the bucket's files, the tab says which and that
-`--force` is what overwrites it.
-
-## What is no longer here
-
-To-do check-off and read state. They were the last two pieces of state the dashboard owned
-rather than read, and owning state is what made the old dashboard a second database. A to-do
-is resolved by editing the artifact it came from — `review.json`, or the commit review — in the
-GitHub web editor or a local clone, and repo-manager will not overwrite a human edit.
