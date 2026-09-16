@@ -396,7 +396,9 @@ class ArtifactReconciliation(unittest.TestCase):
 
     def test_the_announcement_must_ping_everyone(self):
         errors = release.announcement_errors("## Lemonade v2026.38\n\nHi.\n", [], hotfix=False)
-        self.assertTrue(any("@everyone" in e for e in errors))
+        # Read as an instruction, not a complaint: a model told "the opener pings @everyone"
+        # removed the ping on every retry.
+        self.assertTrue(any("add `@everyone`" in e for e in errors))
 
     def test_a_hotfix_pings_release_instead(self):
         post = "## Lemonade v2026.38\n\n@everyone a fix.\n"

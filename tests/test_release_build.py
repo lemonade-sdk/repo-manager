@@ -88,6 +88,30 @@ class BuildingABucket(TempDirCase):
         self.build_all()
         recorded = self.state.read_json(store.generated_key("v2026.39"))
         self.assertEqual(set(recorded), {"review.json", "notes.md", "announcement.md"})
+        self.assertNotIn(store.VALIDATION_NOTES, recorded)
+        self.assertEqual(release.frozen_files(self.ctx, "v2026.39"), [])
+
+    def test_an_artifact_the_validator_gave_up_on_is_written_with_its_notes(self):
+        def advise(skill, outputs, build_prompt, validate, notes=None, **kwargs):
+            if skill == "release-announcement":
+                notes.append("The post must open with an `@everyone` ping.")
+                return POST.replace("@everyone ", "")
+            if skill == "release-notes":
+                return NOTES
+            notes.append("An id was left unrated.")
+            return release.normalize_review(dict(REVIEW))
+
+        with mock.patch.object(release, "generate", side_effect=advise), \
+             mock.patch.object(release, "candidate_issues", return_value=[]):
+            release.build_review(self.ctx, self.bucket)
+            release.build_notes(self.ctx, self.bucket)
+            release.build_announcement(self.ctx, self.bucket)
+        review = self.state.read_json(store.review_key("v2026.39"))
+        self.assertEqual(review["validation_notes"], ["An id was left unrated."])
+        self.assertIn("three good things", self.state.read_text(store.announcement_key("v2026.39")))
+        self.assertEqual(store.validation_notes(self.state, "v2026.39"),
+                         {"announcement.md": ["The post must open with an `@everyone` ping."]})
+        # The ledger still knows every file, so none of them reads as hand-edited.
         self.assertEqual(release.frozen_files(self.ctx, "v2026.39"), [])
 
     def test_a_hand_edited_file_is_skipped_and_kept(self):

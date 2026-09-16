@@ -48,6 +48,14 @@ tab, because there was only ever one of it.
 An item the model has since reworded arrives unticked, because the words changed and what you
 worked through is no longer what the list is asking for.
 
+## Validation notes
+
+Every artifact on the page was validated as it was generated, and the skill was re-asked, up
+to three times, to fix what the validator found. What it still got wrong on the last attempt
+is stored on the artifact and shown above it, in a yellow box, on the commit review, the PR
+triage, and each of the release's three sub-tabs. The artifact underneath is the model's
+last attempt, complete: read it with the box in mind.
+
 ## The Releases tab
 
 The list is every bucket the directory knows about, newest first — including the one on `main`

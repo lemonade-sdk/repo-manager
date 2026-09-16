@@ -39,6 +39,30 @@ class PlainDirectory(TempDirCase):
         self.assertEqual(state.keys("releases"), ["releases/v2026.38/notes.md"])
 
 
+class TheLedger(TempDirCase):
+    """generated.json records what repo-manager wrote and, for a Markdown file that cannot
+    carry them itself, what the validator still had against it."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = Store(self.tmp / "state")
+
+    def test_notes_ride_beside_the_hash_and_a_clean_rewrite_clears_them(self):
+        self.state.write_text(store.notes_key("v1.2"), "notes")
+        store.record_generated(self.state, "v1.2", "notes.md", "notes", ["Too long."])
+        self.assertEqual(store.validation_notes(self.state, "v1.2"), {"notes.md": ["Too long."]})
+        self.assertFalse(store.is_frozen(self.state, "v1.2", "notes.md"))
+        store.record_generated(self.state, "v1.2", "notes.md", "notes", [])
+        self.assertEqual(store.validation_notes(self.state, "v1.2"), {})
+        self.assertNotIn(store.VALIDATION_NOTES, store.generated_hashes(self.state, "v1.2"))
+
+    def test_one_files_notes_leave_the_others_alone(self):
+        store.record_generated(self.state, "v1.2", "notes.md", "n", ["a"])
+        store.record_generated(self.state, "v1.2", "announcement.md", "p", ["b"])
+        store.record_generated(self.state, "v1.2", "notes.md", "n2")
+        self.assertEqual(store.validation_notes(self.state, "v1.2"), {"announcement.md": ["b"]})
+
+
 class Committing(TempDirCase):
     def setUp(self):
         super().setUp()

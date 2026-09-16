@@ -225,8 +225,16 @@ def generated_key(bucket):
 # repo-manager wrote is missing from the ledger, so it came from somewhere else.
 
 
+VALIDATION_NOTES = "validation_notes"
+
+
 def generated_hashes(store, bucket):
     return store.read_json(generated_key(bucket)) or {}
+
+
+def validation_notes(store, bucket):
+    """{filename: [problems the last attempt still had]}, for the bucket's Markdown files."""
+    return generated_hashes(store, bucket).get(VALIDATION_NOTES) or {}
 
 
 def is_frozen(store, bucket, filename):
@@ -237,8 +245,16 @@ def is_frozen(store, bucket, filename):
     return sha256_text(store.read_text(key)) != recorded
 
 
-def record_generated(store, bucket, filename, content):
+def record_generated(store, bucket, filename, content, notes=None):
     hashes = generated_hashes(store, bucket)
     hashes[filename] = sha256_text(content)
+    recorded = hashes.get(VALIDATION_NOTES) or {}
+    recorded.pop(filename, None)
+    if notes:
+        recorded[filename] = list(notes)
+    if recorded:
+        hashes[VALIDATION_NOTES] = recorded
+    else:
+        hashes.pop(VALIDATION_NOTES, None)
     store.write_json(generated_key(bucket), hashes)
     return generated_key(bucket)

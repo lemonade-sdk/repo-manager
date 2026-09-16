@@ -83,8 +83,8 @@ PR it was discussed in. The file records the pick in `cherry_picked_from`.
 
 ## Validation
 
-A review is not stored until it validates. The skill is asked again, up to three times, with
-the list of problems and its own previous attempt:
+Validation guides the skill; it does not gate the file. The skill is asked again, up to
+three times, with the list of problems and its own previous attempt:
 
 - `summary`, `verdict`, and `verdict_reason` are present, and the verdict is one of the three.
 - Every `evidence` key is filled — "none observed" is a real answer, silence is not.
@@ -114,6 +114,10 @@ the list of problems and its own previous attempt:
   happens to look like a filename is not one (`llama.cpp` is a backend), and an English word
   spelled in hex is not a SHA (`defaced`), so neither is flagged.
 
-A commit whose review cannot be made to validate is recorded as failed and the sweep carries
-on; it shows up as an unreviewed commit in the release review's coverage evidence. A single
-bad review never blocks a release.
+A review that still has problems after the third attempt is stored anyway, with those
+problems listed in `validation_notes`, and the dashboard shows them above the review. A
+reader can weigh a caveat; they cannot weigh an absence, and a to-do that names a source file
+is still a better lead than no to-do at all. The only review not stored is one that never
+existed: Pi failing to run, or no attempt writing a parseable file. That commit is recorded as
+failed, the sweep carries on, and it shows up as an unreviewed commit in the release review's
+coverage evidence. A single bad review never blocks a release.

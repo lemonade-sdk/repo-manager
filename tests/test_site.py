@@ -86,6 +86,31 @@ class LoadFromFiles(TempDirCase):
         self.assertEqual(data["counts"]["releases"], 2)
         self.assertEqual(data["counts"]["release_reviews"], 1)
 
+    def test_validation_notes_reach_every_kind_of_row(self):
+        commit = self.state.read_json("commits/" + "a" * 40 + ".json")
+        commit["validation_notes"] = ["Names a source file."]
+        self.state.write_json("commits/" + "a" * 40 + ".json", commit)
+        pr = self.state.read_json("prs/3500.json")
+        pr["validation_notes"] = ["The cover names no group."]
+        self.state.write_json("prs/3500.json", pr)
+        review = self.state.read_json(store.review_key("v2026.38"))
+        review["validation_notes"] = ["An id was left unrated."]
+        self.state.write_json(store.review_key("v2026.38"), review)
+        store.record_generated(self.state, "v2026.38", "review.json",
+                               self.state.read_text(store.review_key("v2026.38")))
+        store.record_generated(self.state, "v2026.38", "notes.md",
+                               self.state.read_text(store.notes_key("v2026.38")), ["Too long."])
+        data = site.load(self.state)
+        self.assertEqual(data["commit_reviews"][0]["validation_notes"], ["Names a source file."])
+        self.assertEqual(data["pr_reviews"][0]["validation_notes"], ["The cover names no group."])
+        self.assertEqual(data["releases"][0]["validation_notes"],
+                         {"review.json": ["An id was left unrated."], "notes.md": ["Too long."]})
+
+    def test_a_row_with_nothing_to_note_says_so_rather_than_omitting_the_field(self):
+        self.assertEqual(self.data["commit_reviews"][0]["validation_notes"], [])
+        self.assertEqual(self.data["pr_reviews"][0]["validation_notes"], [])
+        self.assertEqual(self.data["releases"][0]["validation_notes"], {"review.json": []})
+
     def test_a_hand_edited_artifact_shows_as_frozen(self):
         self.state.write_text(store.notes_key("v2026.38"), "## Headline\n\n- edited by hand\n")
         self.assertEqual(site.load(self.state)["releases"][0]["frozen"], ["notes.md"])

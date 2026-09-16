@@ -8,7 +8,13 @@ repo-manager release build --branch release-v2026.38 --head "$GITHUB_SHA"
 
 `release build` is what the release workflow calls, as a `needs:` dependency of the job that
 creates the GitHub release. Its exit code matters: a failure fails the release job, because a
-published release page with no notes is worse than a candidate that did not publish.
+published release page with no notes is worse than a candidate that did not publish. Only a
+step that produced nothing counts as failed, though. An artifact the validator still had
+problems with on its last attempt is written all the same, with the problems recorded — on
+`review.json` as `validation_notes`, and for `notes.md` and `announcement.md`, which cannot
+carry a field of their own, in `generated.json` beside each file's hash. The dashboard shows
+them above the artifact. A Discord post missing its `@everyone` is a post to fix before
+pasting, not a reason to publish no candidate.
 
 In order, it:
 

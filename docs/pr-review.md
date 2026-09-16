@@ -70,6 +70,9 @@ Every step is idempotent: a label already present is not re-added, a draft is no
 
 Each triage is one file, `prs/<number>.json`, holding the three tiers' output, the derived
 five lines, the prose behind them, and what GitHub said about the PR when it was triaged.
+Each tier is validated and re-asked up to three times; whatever a tier still got wrong on its
+last attempt is kept in `validation_notes` and shown on the dashboard, rather than costing
+the PR its triage.
 Posting a comment records its id and URL in the same file, so the next `pr post` updates the
 comment it already owns rather than opening a second one.
 

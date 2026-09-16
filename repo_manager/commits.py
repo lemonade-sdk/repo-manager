@@ -270,9 +270,13 @@ def review(ctx, sha, bucket, branch="main", range_start="", force=False):
             return None, ["The artifact file must contain a valid JSON object."]
         return data, validation_errors(data)
 
+    notes = []
     data = generate(
-        "commit-review", {"review": ".json"}, prompt, validate, checkout=str(checkout.path)
+        "commit-review", {"review": ".json"}, prompt, validate, checkout=str(checkout.path),
+        notes=notes,
     )
+    if notes:
+        data["validation_notes"] = notes
     data.update({
         "repo": ctx.repo,
         "sha": full_sha,

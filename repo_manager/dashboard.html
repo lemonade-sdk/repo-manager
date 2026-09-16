@@ -830,6 +830,27 @@
       padding: 18px;
       color: var(--muted);
     }
+    /* What the validator could not get the model to fix. It reads as a caveat on the
+       artifact, not as an error page: the artifact is here and worth reading, with this
+       beside it. */
+    .validation {
+      border: 1px solid #f4d79a;
+      background: #fff5df;
+      color: var(--warn);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin: 0 0 14px;
+    }
+    .validation p {
+      margin: 0 0 6px;
+    }
+    .validation ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .validation li {
+      line-height: 1.45;
+    }
     .copy {
       border: 1px solid var(--line);
       background: #fff;
@@ -1807,6 +1828,15 @@
       return row.branch || row.bucket.replace(/^v/, "release-v");
     }
 
+    // The validator asks the skill to fix what it finds, up to three times, and then
+    // stores the artifact regardless. Whatever was still wrong on the last attempt is
+    // shown here, above the artifact it qualifies, so a reader weighs it rather than
+    // trusts a blank.
+    function validationNote(notes, what) {
+      if (!notes || !notes.length) return "";
+      return `<div class="validation"><p>The validator still had ${notes.length === 1 ? "a problem" : `${notes.length} problems`} with ${esc(what)} after its last attempt; read it with these in mind.</p><ul>${notes.map((note) => `<li>${mdInline(note)}</li>`).join("")}</ul></div>`;
+    }
+
     function frozenNote(row) {
       if (!row.frozen || !row.frozen.length) return "";
       return section("Edited by hand", `<p class="muted">repo-manager will not overwrite ${esc(row.frozen.join(", "))}. Pass <code>--force</code> to regenerate.</p>`);
@@ -1823,6 +1853,7 @@
         field("Head", shortSha(row.head_sha)),
         field("Audited", row.reviewed_at),
         generatedInField(row),
+        validationNote((row.validation_notes || {})["review.json"], "this checklist"),
         // Above the checklist: what this release does to users is the context the checklist
         // is read in, and a tester who scrolls past twenty to-dos to reach it has already
         // decided what to try.
@@ -1841,6 +1872,7 @@
         field("Release", row.bucket),
         row.range_start ? field("Since", row.range_start) : "",
         field("Generated", row.reviewed_at),
+        validationNote((row.validation_notes || {})["notes.md"], "these notes"),
         section("Website Release Highlights", `<pre id="release-notes-markdown">${esc(row.notes_markdown)}</pre>`)
       ].join("");
     }
@@ -1853,6 +1885,7 @@
         field("Release", row.bucket),
         row.range_start ? field("Since", row.range_start) : "",
         field("Generated", row.reviewed_at),
+        validationNote((row.validation_notes || {})["announcement.md"], "this post"),
         section("Discord Markdown", `<pre id="announcement-markdown">${esc(row.announcement_markdown)}</pre>`)
       ].join("");
     }
@@ -1968,6 +2001,7 @@
         row.merge_date ? field("Merged", row.merge_date) : "",
         field("Audited", row.reviewed_at),
         generatedInField(row),
+        validationNote(row.validation_notes, "this review"),
         section("Description", `<p>${esc(row.summary)}</p>`),
         section("Verdict", `<p>${badge(row.verdict)} ${esc(row.verdict_reason || "")}</p>`),
         section("Maintainer To-Do", todoList(row.todo_items, scope)),
@@ -2417,6 +2451,7 @@
         field("Head", shortSha(row.head_sha)),
         field("Reviewed", row.reviewed_at),
         generatedInField(row),
+        validationNote(row.validation_notes, "this triage"),
         row.review_status ? section("Review Status", `<p>${statusBadge(row)} ${esc(row.review_status_detail || "")}</p>`) : "",
         section("Actions", prActions(row)),
         // The rule is the line between the two audiences. Above it is the dashboard's own:

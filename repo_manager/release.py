@@ -536,8 +536,11 @@ def build_review(ctx, bucket, force=False):
         data = normalize_review(data, index)
         return data, review_errors(data, issues, index, ratings)
 
+    notes = []
     data = generate("release-review", {"review": ".json"}, prompt, validate,
-                    checkout=str(bucket.checkout.path))
+                    checkout=str(bucket.checkout.path), notes=notes)
+    if notes:
+        data["validation_notes"] = notes
     data.update({
         "repo": ctx.repo,
         "bucket": bucket.name,
@@ -697,7 +700,7 @@ def announcement_errors(markdown, canonical, hotfix, bucket="", repo=""):
         if "@everyone" in text:
             errors.append("A hotfix post pings `@release`, never `@everyone`; remove the `@everyone`.")
     elif "@everyone" not in text:
-        errors.append("The opener pings `@everyone`.")
+        errors.append("The post must open with an `@everyone` ping; add `@everyone` to the opener.")
     if canonical:
         errors.extend(breaking_count_errors(count_breaking_bullets(text), canonical, "The announcement"))
     return errors
@@ -856,9 +859,10 @@ Write the website release highlights Markdown to: {paths['notes']}
         text = contents["notes"]
         return text, notes_errors(text, canonical, bucket.name)
 
+    notes = []
     text = generate("release-notes", {"notes": ".md"}, prompt, validate,
-                    checkout=str(bucket.checkout.path))
-    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n")
+                    checkout=str(bucket.checkout.path), notes=notes)
+    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n", notes)
     return text
 
 
@@ -915,21 +919,23 @@ fixes be subsumed by the outcome they enabled.
         text = contents["announcement"]
         return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo)
 
+    notes = []
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,
-                    checkout=str(bucket.checkout.path))
-    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n")
+                    checkout=str(bucket.checkout.path), notes=notes)
+    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n", notes)
     return text
 
 
-def write_bucket_file(ctx, bucket_name, filename, content):
+def write_bucket_file(ctx, bucket_name, filename, content, notes=None):
     """Write a generated file and record its hash, in one commit.
 
     The hash and the file travel together: a commit that carried one without the other would
-    make the file look human-edited on the next run and freeze it for good.
+    make the file look human-edited on the next run and freeze it for good. A Markdown file
+    has nowhere to carry its own validation notes, so they ride in the ledger beside its hash.
     """
     key = f"releases/{bucket_name}/{filename}"
     ctx.store.write_text(key, content)
-    hashes_key = store.record_generated(ctx.store, bucket_name, filename, content)
+    hashes_key = store.record_generated(ctx.store, bucket_name, filename, content, notes)
     ctx.store.save([key, hashes_key], f"releases/{bucket_name}: {filename.split('.')[0]}")
     print(f"Wrote {key}", flush=True)
     return key

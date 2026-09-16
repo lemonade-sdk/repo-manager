@@ -48,6 +48,10 @@ def cmd_build(args):
     everything that is wrong rather than only the first thing. The exit code is what the
     release workflow reads: a nonzero here fails the release job, which is the point — a
     candidate with no release notes is worse than a candidate that did not publish.
+
+    Only a step that produced *nothing* counts as failed. An artifact the validator still
+    had problems with on the last attempt is written all the same, with the problems noted
+    on it, because a reader can weigh a caveat and cannot weigh an absence.
     """
     ctx, bucket = open_bucket(args)
     frozen = release.frozen_files(ctx, bucket.name)
