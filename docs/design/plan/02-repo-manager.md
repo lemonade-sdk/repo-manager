@@ -71,7 +71,7 @@ Exit code is nonzero if any artifact could not be produced. Step 4 relies on thi
 
 ### B. Buckets replace CMake inference
 
-- Port `upcoming_release_week` and `release_branch_name` from lemonade's `tools/version.py` into repo-manager (copy the functions and their tests; do not import lemonade).
+- Load `upcoming_release_week` from lemonade's `tools/version.py` in the tracked checkout at run time, so the release cutoff is defined only in lemonade.
 - Bucket for a `release-v<y>.<w>` branch is `v<y>.<w>`. Bucket for `main` is `v<y>.<w>` from `upcoming_release_week(now)`.
 - Range start is the newest `v*` tag whose bucket is earlier than the current bucket. A tag's bucket is its first two components. This matters on a tag build or a hotfix: bucket `v2026.38` with stable `v2026.38.1` still ranges from the newest `v2026.37`-or-earlier tag, never from its own tag. Ignore tags that do not match `^v\d+(\.\d+)+$`, which excludes `candidate-v*`.
 - Delete `cmake_release_tag`, `cmake_version_from_text`, `release_lifecycle_info`, `migrate_vnext_release_state`, `resolve_release_state`, and every `vNext` string.

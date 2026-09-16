@@ -70,7 +70,7 @@ In `docs/dev/release.md`:
 ## Done when
 
 - A push to `main` produces a run per SHA that adds `commits/<sha>.json` to `lemonade-testing` and the dashboard shows it.
-- `workflow_dispatch` of Create Release Branch on a test branch name (or the next real Wednesday cut) produces a candidate whose release page has Headline and Breaking Changes taken from `notes.md`.
+- `workflow_dispatch` of Create Release Branch on a test branch name (or the next real weekly cut) produces a candidate whose release page has Headline and Breaking Changes taken from `notes.md`.
 - Deleting `notes.md` for a bucket and rerunning the release job makes the release job fail at the notes step.
 - The second repo-manager run on any given machine logs that `lemond` and the model were found in `$CI_CACHE` and did not download. Confirm on all four runners.
 - The old `repo-manager.yml` steps that used `/opt/lemonade-manager` are gone. Jeremy retires the machine per `01-human.md`.

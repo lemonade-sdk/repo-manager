@@ -49,7 +49,7 @@ class Bucket:
         self.ctx = ctx
         self.branch = branch
         self.checkout = ctx.checkout()
-        self.name = buckets.bucket_for_branch(branch, ctx.now())
+        self.name = buckets.bucket_for_branch(branch, self.checkout, ctx.now())
         self.tags = ctx.tags()
         self.range_start = buckets.range_start(self.tags, self.name)
         self.head = self.checkout.resolve(head) if head else self.checkout.resolve(f"origin/{branch}")

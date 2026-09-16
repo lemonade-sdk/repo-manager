@@ -29,7 +29,7 @@ def add_parser(sub, shared):
 def cmd_review(args):
     ctx = Context(args)
     ctx.require_repo()
-    bucket = buckets.bucket_for_branch(args.branch, ctx.now())
+    bucket = buckets.bucket_for_branch(args.branch, ctx.checkout(), ctx.now())
     tags = ctx.tags()
     commits.review(
         ctx, args.sha, bucket,
@@ -44,7 +44,7 @@ def cmd_sweep(args):
     ctx = Context(args)
     ctx.require_repo()
     checkout = ctx.checkout()
-    bucket = buckets.bucket_for_branch(args.branch, ctx.now())
+    bucket = buckets.bucket_for_branch(args.branch, checkout, ctx.now())
     range_start = args.since or buckets.range_start(ctx.tags(), bucket)
     head = checkout.resolve(args.head) if args.head else checkout.resolve(f"origin/{args.branch}")
     _, _, failed = commits.sweep(ctx, args.branch, bucket, range_start, head, force=args.force)
