@@ -1,6 +1,6 @@
 """repo-manager: commit reviews, PR triage, and release artifacts as files."""
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # The `pi` release repo-manager is tested against. Consuming workflows install this exact
 # version (`npm install -g pi@$(repo-manager pi version)`) so the agent that writes an
