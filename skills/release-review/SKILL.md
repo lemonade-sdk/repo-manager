@@ -29,43 +29,41 @@ Synthesize from this digest; do not re-review diffs unless the digest is clearly
 
 ## Priorities
 
-Three priorities exist, and every to-do gets exactly one.
+Three priorities exist, and every to-do gets exactly one. **Everything on this checklist is
+work to do before the release ships** — the priority says what a tester reaches for first, not
+whether an item counts. Nothing here is deferred to after the release.
 
-**Everything on this checklist is work to do before the release ships.** The priority says what
-a tester does *first*, not whether an item counts. A tester works down from P0, and if the
-candidate has to go out before the list is finished, the priority is what tells them where the
-damage of stopping is smallest. Nothing here is deferred to after the release — this is a
-release checklist, and an item nobody should look at before shipping does not belong on it.
+Rate each item by **what a user loses if this ships broken and nobody checked**. How new the
+code is, how large the diff was, and how thin the test evidence looks all say how *likely* a
+problem is — they say nothing about how much it would cost, and a likely problem with a
+trivial consequence is still trivial.
 
-- **P0 — the release does not go out until this is resolved.** Evidence of user-visible
-  breakage in shipped artifacts, a likely security issue, an *unintended* breaking change (a
-  regression that slipped in, as opposed to a deliberate one — deliberate breaks belong in
-  `breaking_changes`), or a headline feature whose release packaging or tests are failing with
-  the cause not yet understood. Uncertainty about whether release artifacts are broken is
-  itself P0: "we don't know if the package works" blocks a release the same way "the package
-  is broken" does. A new *shipping surface* is exactly that kind of unknown — when this
-  release adds something users install or download, a new OS or distro target, an installer, a
-  container image, a wheel for a new platform, and nothing shows the built artifact actually
-  installs and runs there, it is P0 until verified. An untested package is indistinguishable
-  from a broken one and gates every user on that platform at the door.
+- **P0 — a devastating break to new or existing setups.** Somebody cannot install, cannot
+  start the server, cannot download a model, cannot reach the API, or a configuration that
+  worked before the upgrade stops working. A version or packaging mistake stamped into a
+  shipped artifact is P0 because it cannot be taken back once published, and so is anything
+  that routes ordinary users to an untested build. Damage the user cannot see — wrong data,
+  wrong model, a silently dropped guard — outranks damage that stops them, because it is what
+  they do not think to report. A check that something which worked *last release* still works
+  guards every existing setup, and outranks a check that a new feature works at all — new is
+  not the same as important.
 
-- **P1 — check it before shipping; users would feel it if nobody did.** New user-facing
-  behavior, on a surface that already ships, that lacks test evidence and needs a human to
-  confirm it works: a new backend on platforms Lemonade already supports, a new command
-  end-to-end. The dividing line from P0 is blast radius — one feature on familiar ground is P1;
-  the shipped artifact's basic integrity on new ground is P0.
+- **P1 — very annoying or incomplete behavior.** It works, but badly, or a feature this
+  release advertises does not do what it says. A new endpoint that errors, a relay that drops
+  what it was meant to carry, a cache that no longer holds. The user loses the feature, not the
+  product, and usually has a way around it.
 
-- **P2 — check it before shipping, but do it last.** Work whose consequence is real but
-  narrow, or felt by somebody other than a user on release day: an internal document that now
-  describes the wrong workflow, a confirmation that a post-approval commit was seen, a
-  performance question worth answering before it becomes a habit. P2 is the honest answer to
-  "if the candidate has to ship tonight and the list is not finished, what hurts least to
-  leave?" — not "this is somebody else's problem".
+- **P2 — a minor annoyance.** A stale document, an example that needs a tweak, a diagnostic
+  nobody reads, a surface nobody reaches on release day. Internal tooling belongs here by
+  default: when a CI workflow or a release script fails, a maintainer does the step by hand,
+  and "the release team would be inconvenienced" is not a user-visible consequence. Promote it
+  only where its failure reaches a user.
 
-Two failure modes matter more than the rest. Rating a real blocker P1 or P2 ships a release
-that should have been held. Rating everything P0 or P1 buries the two items that mattered in a
-list of twenty and costs the tester the ordering that makes the list worth having. Read each
-item for what it would cost *users* if this release shipped without it, and let that decide.
+**Most releases carry one or two P0s, and a real spread below them.** If everything is a P1,
+nothing is: the tester loses the ordering that made the list worth having, and the two items
+that mattered are buried among twenty that did not. Rate each item alone, on consequence, and
+let the spread fall out — but a checklist that comes back nearly all one priority is a sign
+the rating was skipped, not that the release is uniform.
 
 ## Tester reports
 

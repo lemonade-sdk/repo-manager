@@ -41,11 +41,13 @@ worked an item and would invite a reader to ship on it.
   than text appended to the sentence — which is what lets the dashboard treat the release
   checklist item and the commit's to-do as one to-do, with one checkbox.
 - `priority` is the whole judgement the model contributes, and every item carrying one is work
-  to do *before* the release ships: **P0** the release does not go out until it is resolved,
-  **P1** check it before shipping because users would feel it, **P2** check it before shipping
-  but do it last. The priority is the order a tester works in, and what tells them where the
-  damage is smallest if a candidate has to go out before the list is finished. Nothing on a
-  release checklist is deferred to after the release.
+  to do *before* the release ships, rated by what a user loses if it ships broken: **P0** a
+  devastating break to a new or existing setup, **P1** very annoying or incomplete behavior,
+  **P2** a minor annoyance. The axis is consequence, not likelihood — how new the code is or
+  how thin its tests are says how likely a problem is, not what it would cost. The priority is
+  the order a tester works in, and what tells them where the damage is smallest if a candidate
+  has to go out before the list is finished. Nothing on a release checklist is deferred to
+  after the release.
 - `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.

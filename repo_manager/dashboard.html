@@ -754,12 +754,14 @@
     .todo-source a {
       color: var(--accent);
     }
-    .plain-item {
-      line-height: 1.45;
-    }
     .plain-list {
+      margin: 0;
+      padding-left: 22px;
       display: grid;
-      gap: 8px;
+      gap: 6px;
+    }
+    .plain-list li {
+      line-height: 1.45;
     }
     .platforms {
       color: var(--muted);
@@ -770,7 +772,9 @@
        What the release is made of. Every figure is one row of one table: a number is worth
        reading against the number above it, and cards put each one in a box of its own. */
     .stats-table {
-      width: 100%;
+      /* Two columns, label and number. Stretched to the panel, the number sits a screen
+         away from what it counts; capped, the eye reads the pair. */
+      width: min(100%, 480px);
       border-collapse: collapse;
       table-layout: auto;
     }
@@ -1241,8 +1245,8 @@
 
     function plainList(items) {
       if (!items || !items.length) return `<p class="muted">None.</p>`;
-      return `<div class="plain-list">${items.map((item) =>
-        `<div class="plain-item">${esc(item)}</div>`).join("")}</div>`;
+      return `<ul class="plain-list">${items.map((item) =>
+        `<li>${mdInline(item)}</li>`).join("")}</ul>`;
     }
 
     function evidenceList(evidence) {

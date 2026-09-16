@@ -499,7 +499,8 @@ do not count the entries yourself.
 `ratings` needs one entry per id below — P0, P1 or P2, plus the platforms it applies to. Each
 id's text is in the digest above; do not retype it, the caller carries the words over. Every
 to-do is on the checklist whichever way you rate it, so the priority is only the order a tester
-works in.
+works in. Rate by what a user loses if it ships broken, not by how new or untested the code
+is: P0 breaks a setup, P1 makes it annoying or incomplete, P2 is minor.
 
 {rating_targets(index)}
 
