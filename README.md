@@ -4,7 +4,8 @@ Commit reviews, PR triage, and release artifacts for GitHub projects, stored as 
 
 repo-manager reads a repository through the GitHub CLI, runs one of its bundled
 [Pi](https://github.com/badlogic/pi-mono) skills against a Lemonade server, validates what
-the model wrote, and saves it as a file. That is the whole tool. There is no database
+the model wrote — re-asking up to three times, then saving the last attempt with whatever it
+still got wrong noted on it — and saves it as a file. That is the whole tool. There is no database
 anywhere, and no code path that differs between a laptop and a runner.
 
 ## The store

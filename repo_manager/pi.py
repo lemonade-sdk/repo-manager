@@ -252,17 +252,27 @@ def feedback_block(errors, previous):
     )
 
 
-def generate(skill, outputs, build_prompt, validate, checkout="", attempts=3, base_ref=""):
-    """Run a skill until what it wrote validates, then return the validated value.
+def generate(skill, outputs, build_prompt, validate, checkout="", attempts=3, base_ref="",
+             notes=None):
+    """Run a skill until what it wrote validates, or until the attempts run out, and return
+    the best artifact it produced.
 
     `outputs` maps a name to a filename suffix; each attempt gets a fresh path per name
-    inside a scratch directory, so nothing reaches the state directory until it passes.
+    inside a scratch directory, so nothing reaches the state directory until this returns.
     `build_prompt(paths, feedback)` writes the prompt, `validate(contents)` returns
     `(value, errors)`.
+
+    Validation guides; it does not gate. Each failed attempt is handed back to the skill with
+    the problems listed, and an artifact that still has problems on the last attempt is
+    returned anyway, with those problems appended to `notes` for the caller to store on it.
+    A reader is better served by a review that says what its checks could not confirm than
+    by no review at all. The only way out with nothing is nothing to return: Pi failing to
+    run, or no attempt producing a parseable artifact.
     """
     with tempfile.TemporaryDirectory(prefix="repo-manager-") as work:
         work = Path(work)
         feedback = ""
+        best = None
         for attempt in range(1, attempts + 1):
             paths = {name: work / f"{name}.{attempt}{suffix}" for name, suffix in outputs.items()}
             prompt = build_prompt(paths, feedback)
@@ -293,9 +303,18 @@ def generate(skill, outputs, build_prompt, validate, checkout="", attempts=3, ba
             value, errors = (None, missing) if missing else validate(contents)
             if not errors:
                 return value
+            if value is not None:
+                best = (value, errors)
             listed = "\n".join(f"- {error}" for error in errors)
-            if attempt == attempts:
-                raise SystemExit(f"{skill} failed validation after {attempts} attempts:\n{listed}")
-            print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{listed}\n", flush=True)
-            feedback = feedback_block(errors, contents)
-    raise SystemExit(f"{skill} produced no usable artifact.")
+            if attempt < attempts:
+                print(f"\nAttempt {attempt} failed validation; asking Pi to revise:\n{listed}\n",
+                      flush=True)
+                feedback = feedback_block(errors, contents)
+    if best is None:
+        raise SystemExit(f"{skill} produced no usable artifact in {attempts} attempts:\n{listed}")
+    value, errors = best
+    print(f"\n{skill}: kept the last usable attempt with {len(errors)} unresolved problem(s):\n"
+          + "\n".join(f"- {error}" for error in errors), flush=True)
+    if notes is not None:
+        notes.extend(errors)
+    return value

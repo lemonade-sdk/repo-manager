@@ -105,6 +105,7 @@ def commit_rows(state):
             "cherry_picked_from": data.get("cherry_picked_from", ""),
             "generation_seconds": data.get("generation_seconds", 0),
             "todo_items": todo_items(data.get("maintainer_todos")),
+            "validation_notes": data.get("validation_notes") or [],
             "details": data,
         })
     rows.sort(key=lambda row: (row["commit_date"] or row["reviewed_at"] or "", row["commit_sha"]), reverse=True)
@@ -146,6 +147,13 @@ def release_rows(state, commits):
             "notes_markdown": state.read_text(store.notes_key(name)),
             "announcement_markdown": state.read_text(store.announcement_key(name)),
             "evidence": ordered_evidence(review.get("evidence") or {}, release.EVIDENCE_KEYS),
+            # What the validator could not get the model to fix. The review's own notes are
+            # on the review; a Markdown file's ride in the ledger, so the three are gathered
+            # here under the filename each belongs to.
+            "validation_notes": {
+                "review.json": review.get("validation_notes") or [],
+                **store.validation_notes(state, name),
+            },
         })
     return rows
 
@@ -174,6 +182,7 @@ def pr_rows(state, mirror=None, viewer=""):
             "comment_url": data.get("comment_url", ""),
             "comment_markdown": comment_preview(data),
             "requirement": prstate.requirement_of(data),
+            "validation_notes": data.get("validation_notes") or [],
             "details": data,
             # Without a live mirror these are what the triage saw when it ran. The page shows
             # the Status column as "not live" rather than drawing a stale answer as a fresh one.

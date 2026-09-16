@@ -931,7 +931,7 @@ TIERS = {
 }
 
 
-def run_tier(context, tier, facts=None):
+def run_tier(context, tier, facts=None, notes=None):
     skill, build = TIERS[tier]
 
     def prompt(paths, feedback):
@@ -954,6 +954,7 @@ def run_tier(context, tier, facts=None):
     candidate = pi.generate(
         skill, {"tier": ".json"}, prompt, validate,
         checkout=str(context["checkout"].path), base_ref=context["meta"]["base_ref"],
+        notes=notes,
     )
     if tier == "facts":
         settle_known_keys(candidate, context)
@@ -1500,10 +1501,13 @@ def save(ctx, data):
 def triage(ctx, number, replay_sha="", save_result=True):
     started = time.monotonic()
     context = gather_context(ctx, number, replay_sha)
-    facts = run_tier(context, "facts")
-    cover = run_tier(context, "cover", facts)
-    quality = run_tier(context, "quality", facts)
+    notes = []
+    facts = run_tier(context, "facts", notes=notes)
+    cover = run_tier(context, "cover", facts, notes=notes)
+    quality = run_tier(context, "quality", facts, notes=notes)
     data = assemble(context, facts, cover, quality, started, ctx.now_iso())
+    if notes:
+        data["validation_notes"] = notes
     if save_result:
         previous = load(ctx, number) or {}
         # Posting state belongs to the PR, not to any one triage: carry it across so the next
