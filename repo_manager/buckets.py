@@ -6,13 +6,14 @@ at once — the one accumulating on `main`, the one under test on a release bran
 older branch taking a hotfix — which is why every artifact carries its bucket rather than
 the tool inferring one global "current release".
 
-`upcoming_release_week` is ported from lemonade's `tools/version.py` so the two agree on
-which week a commit belongs to. It is copied, not imported: repo-manager runs from a
-different checkout than the repo it tracks, and often with no lemonade checkout at all.
+Which week `main` is accumulating toward is lemonade's decision, not repo-manager's: the
+cutoff lives in lemonade's `tools/version.py`, and repo-manager loads that file from the
+tracked checkout and asks it. There is no copy of the cutoff here to drift.
 """
 
 import datetime
 import re
+import types
 
 
 RELEASE_BRANCH_PATTERN = re.compile(r"^release-v(\d{4})\.(\d{1,2})$")
@@ -23,23 +24,29 @@ RELEASE_TAG_PATTERN = re.compile(r"^v(\d{4})\.(\d{1,2})\.(\d+)$")
 VERSION_TAG_PATTERN = re.compile(r"^v\d+(\.\d+)+$")
 
 
-def upcoming_release_week(now):
-    """(year, week) of the release the given moment is accumulating toward.
+VERSION_TOOL = "tools/version.py"
 
-    A cron cuts `release-v<year>.<week>` from main every Wednesday at 19:00 UTC, and that
-    branch ships the following week. So the bucket on `main` is the ISO week of the Wednesday
-    *after* the next cutoff — a commit merged at 18:59 lands in this week's branch, and one
-    merged at 19:01 lands in the next.
-    """
-    days_until_wednesday = (2 - now.weekday()) % 7
-    cutoff = (now + datetime.timedelta(days=days_until_wednesday)).replace(
-        hour=19, minute=0, second=0, microsecond=0
-    )
-    if now >= cutoff:
-        cutoff += datetime.timedelta(days=7)
-    release_date = cutoff + datetime.timedelta(days=7)
-    iso_date = release_date.isocalendar()
-    return iso_date.year, iso_date.week
+
+def load_version_tool(checkout):
+    """Lemonade's `tools/version.py`, as a module, from the tip of `main` in the checkout."""
+    for ref in ("origin/main", "main"):
+        result = checkout.git("show", f"{ref}:{VERSION_TOOL}", check=False)
+        if result.returncode == 0:
+            break
+    else:
+        raise SystemExit(
+            f"{VERSION_TOOL} was not found on main in {checkout.path}; the bucket on main is "
+            "computed by that file, so repo-manager cannot tell which release it is tracking."
+        )
+    module = types.ModuleType("lemonade_version")
+    exec(compile(result.stdout, f"{checkout.path}/{VERSION_TOOL}", "exec"), module.__dict__)
+    return module
+
+
+def upcoming_release_week(checkout, now):
+    """(year, week) of the release the given moment is accumulating toward, as lemonade's
+    `tools/version.py` computes it from its release cutoff."""
+    return load_version_tool(checkout).upcoming_release_week(now)
 
 
 def release_branch_name(year, week):
@@ -50,17 +57,20 @@ def bucket_name(year, week):
     return f"v{year}.{week}"
 
 
-def bucket_for_branch(branch, now=None):
+def bucket_for_branch(branch, checkout=None, now=None):
     """The bucket a branch is building.
 
     A `release-v<y>.<w>` branch names its own bucket. Any other branch — `main`, or a topic
-    branch someone is testing from — is accumulating toward the upcoming release week.
+    branch someone is testing from — is accumulating toward the upcoming release week, which
+    only lemonade's version tool in the checkout can name.
     """
     match = RELEASE_BRANCH_PATTERN.fullmatch(str(branch or ""))
     if match:
         return bucket_name(int(match.group(1)), int(match.group(2)))
+    if checkout is None:
+        raise ValueError(f"A checkout is needed to name the bucket {branch!r} is building.")
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return bucket_name(*upcoming_release_week(now.astimezone(datetime.timezone.utc)))
+    return bucket_name(*upcoming_release_week(checkout, now.astimezone(datetime.timezone.utc)))
 
 
 def branch_for_bucket(bucket):

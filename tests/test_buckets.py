@@ -1,44 +1,69 @@
 import datetime
 import unittest
 
-from repo_manager import buckets
+from repo_manager import buckets, gitops
+from tests.helpers import TempDirCase, commit_file, init_repo
 
 
-class UpcomingReleaseWeek(unittest.TestCase):
-    def week(self, *when):
-        return buckets.upcoming_release_week(datetime.datetime(*when, tzinfo=datetime.timezone.utc))
-
-    def test_before_the_wednesday_cutoff_targets_this_weeks_branch(self):
-        # Tuesday: the branch is cut tomorrow at 19:00 and ships the Wednesday after.
-        self.assertEqual(self.week(2026, 9, 15, 12, 0), (2026, 39))
-
-    def test_a_minute_before_the_cutoff_still_makes_this_weeks_branch(self):
-        self.assertEqual(self.week(2026, 9, 16, 18, 59), (2026, 39))
-
-    def test_a_minute_after_the_cutoff_falls_into_the_next_one(self):
-        self.assertEqual(self.week(2026, 9, 16, 19, 1), (2026, 40))
+# Stands in for lemonade's tools/version.py. It is deliberately not lemonade's clock, so a
+# test can only pass by asking the checkout, never by agreeing with a copy kept here.
+STUB_VERSION_TOOL = """
+def upcoming_release_week(now):
+    return now.year, now.isocalendar().week + 1
+"""
 
 
-class BucketForBranch(unittest.TestCase):
+class CheckoutCase(TempDirCase):
+    def setUp(self):
+        super().setUp()
+        self.repo = init_repo(self.tmp / "repo")
+        commit_file(self.repo, "README.md", "lemonade\n")
+        self.checkout = gitops.Checkout(self.repo)
+
+    def add_version_tool(self, source=STUB_VERSION_TOOL):
+        commit_file(self.repo, buckets.VERSION_TOOL, source)
+
+
+class UpcomingReleaseWeek(CheckoutCase):
+    def test_the_week_comes_from_the_checkouts_version_tool(self):
+        self.add_version_tool()
+        now = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(buckets.upcoming_release_week(self.checkout, now), (2026, 39))
+
+    def test_a_checkout_without_the_version_tool_is_an_error(self):
+        now = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=datetime.timezone.utc)
+        with self.assertRaises(SystemExit) as raised:
+            buckets.upcoming_release_week(self.checkout, now)
+        self.assertIn(buckets.VERSION_TOOL, str(raised.exception))
+
+
+class BucketForBranch(CheckoutCase):
+    def setUp(self):
+        super().setUp()
+        self.now = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=datetime.timezone.utc)
+
     def test_a_release_branch_names_its_own_bucket(self):
         self.assertEqual(buckets.bucket_for_branch("release-v2026.38"), "v2026.38")
 
     def test_a_single_digit_week_is_read_as_written(self):
         self.assertEqual(buckets.bucket_for_branch("release-v2026.3"), "v2026.3")
 
-    def test_main_uses_the_cutoff_clock(self):
-        now = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=datetime.timezone.utc)
-        self.assertEqual(buckets.bucket_for_branch("main", now), "v2026.39")
+    def test_main_asks_the_checkouts_version_tool(self):
+        self.add_version_tool()
+        self.assertEqual(buckets.bucket_for_branch("main", self.checkout, self.now), "v2026.39")
 
     def test_a_topic_branch_is_treated_like_main(self):
-        now = datetime.datetime(2026, 9, 15, 12, 0, tzinfo=datetime.timezone.utc)
-        self.assertEqual(buckets.bucket_for_branch("jfowers/experiment", now), "v2026.39")
+        self.add_version_tool()
+        self.assertEqual(
+            buckets.bucket_for_branch("jfowers/experiment", self.checkout, self.now), "v2026.39"
+        )
+
+    def test_main_without_a_checkout_is_an_error(self):
+        with self.assertRaises(ValueError):
+            buckets.bucket_for_branch("main", None, self.now)
 
     def test_a_bucket_names_its_branch_back(self):
         self.assertEqual(buckets.branch_for_bucket("v2026.38"), "release-v2026.38")
-
-
-class VersionOrdering(unittest.TestCase):
     def test_the_old_scheme_sorts_before_the_new_one(self):
         self.assertLess(buckets.version_parts("v11.9.0"), buckets.version_parts("v2026.38"))
 

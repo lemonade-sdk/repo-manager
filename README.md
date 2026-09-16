@@ -37,10 +37,12 @@ editor, and `--force` is the only way to overwrite them.
 ## Buckets
 
 A **bucket** is `v<year>.<week>` — the two-component prefix of the versions the build system
-produces, like `v2026.38`. A cron cuts `release-v<year>.<week>` from `main` every Wednesday
-at 19:00 UTC, so a `release-v*` branch names its own bucket and `main` accumulates toward the
-upcoming release week. The final `.number` is unknown until a human tags a candidate, so
-nothing stored here depends on it.
+produces, like `v2026.38`. Lemonade cuts `release-v<year>.<week>` from `main` at its weekly
+release cutoff, so a `release-v*` branch names its own bucket and `main` accumulates toward
+the upcoming release week. The cutoff is defined once, in lemonade's `tools/version.py`;
+repo-manager loads that file from its checkout of lemonade rather than keeping a copy. The
+final `.number` is unknown until a human tags a candidate, so nothing stored here depends on
+it.
 
 Several buckets are live at once: the one on `main`, the one under test, and any older branch
 taking a hotfix. A bucket's range starts at the newest `v*` tag belonging to an *earlier*

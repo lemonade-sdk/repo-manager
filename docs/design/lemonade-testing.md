@@ -6,10 +6,10 @@ Major feature (spans multiple well-scoped PRs across `repo-manager`, `lemonade`,
 
 ## User Story
 
-The new release process (RFC #3522, PR stack #3579-#3589) turns releasing into an automated weekly machine: a cron cuts `release-v<year>.<week>` from `main` every Wednesday at 19:00 UTC, every push to that branch publishes a numbered candidate, and a human tags one candidate to promote it to stable. repo-manager was built for the old process, where a human decided to release, bumped the version in `CMakeLists.txt`, and had days to read repo-manager's output before tagging. Three things no longer hold:
+The new release process (RFC #3522, PR stack #3579-#3589) turns releasing into an automated weekly machine: a cron cuts `release-v<year>.<week>` from `main` at lemonade's weekly release cutoff, every push to that branch publishes a numbered candidate, and a human tags one candidate to promote it to stable. repo-manager was built for the old process, where a human decided to release, bumped the version in `CMakeLists.txt`, and had days to read repo-manager's output before tagging. Three things no longer hold:
 
 1. **repo-manager cannot tell which release it is tracking.** It infers the release from the CMake version, which PR #3539 removed. On `main` today, inference never resolves, so `repo-manager all` skips release review, announcement, and issue sync on every run.
-2. **Its output is now consumed by automation on a clock, not by a person.** The release action reads the release-notes issue when it creates the release page. If repo-manager has not finished for that commit, the page ships without notes. A commit merged at 18:59 lands in the 19:00 branch, and the current workflow's cancel-in-progress concurrency cancels the run that was reviewing it.
+2. **Its output is now consumed by automation on a clock, not by a person.** The release action reads the release-notes issue when it creates the release page. If repo-manager has not finished for that commit, the page ships without notes. A commit merged a minute before the cutoff lands in that week's branch, and the current workflow's cancel-in-progress concurrency cancels the run that was reviewing it.
 3. **It runs on one self-hosted machine holding the only copy of its state.** A SQLite database under `/opt/lemonade-manager` is the source of truth. If that machine is down, no candidate can get release notes. The same database is also the development store, so any change to storage has to be made twice.
 
 This design makes release notes a guaranteed part of every candidate and stable release, and lets repo-manager run on any of several runners with no state on the runner.
@@ -18,7 +18,7 @@ This design makes release notes a guaranteed part of every candidate and stable 
 
 ### Release buckets
 
-A bucket is `v<year>.<week>`, the two-component prefix of the versions the build system produces. It is computed the same way `tools/version.py` computes it: from the branch name on a `release-v*` branch, or from the Wednesday cutoff clock on `main`. The final `.number` is unknown until a human tags, so nothing repo-manager stores is keyed on it.
+A bucket is `v<year>.<week>`, the two-component prefix of the versions the build system produces. It is computed the same way `tools/version.py` computes it: from the branch name on a `release-v*` branch, or from lemonade's release cutoff on `main`. The final `.number` is unknown until a human tags, so nothing repo-manager stores is keyed on it.
 
 Several buckets are live at once: the one accumulating on `main`, the one under test, and any older branch taking a hotfix. All state is keyed per bucket and per branch. `vNext`, CMake inference, and the `vNext`-to-tag migration code are removed.
 
@@ -33,7 +33,7 @@ Four jobs, each idempotent and each keyed on a natural identifier so reruns are 
 | 3. PR review (future) | PR opened or synchronized | `prs/<number>.json` | `prs/<number>.json` |
 | 4. Candidate delta (future) | job 2, when the bucket already has a candidate | previous candidate's commit list | `releases/<bucket>/candidates/<N>.md` |
 
-Job 2 never assumes earlier runs covered the range. It reviews any commit in `last-stable..tip` that has no file, where `last-stable` is the newest `v*` tag belonging to an earlier bucket, so a bucket's own stable tag never truncates its range on a hotfix or tag build. That closes the 18:59 race: a cancelled or never-run review on `main` is simply done here. The release workflow's build takes 1.5 to 3 hours, so job 2 normally adds no wall-clock time to a candidate; it only becomes the long pole if job 1 has fallen far behind on `main`.
+Job 2 never assumes earlier runs covered the range. It reviews any commit in `last-stable..tip` that has no file, where `last-stable` is the newest `v*` tag belonging to an earlier bucket, so a bucket's own stable tag never truncates its range on a hotfix or tag build. That closes the race at the cutoff: a cancelled or never-run review on `main` is simply done here. The release workflow's build takes 1.5 to 3 hours, so job 2 normally adds no wall-clock time to a candidate; it only becomes the long pole if job 1 has fallen far behind on `main`.
 
 ### Release notes are a required step
 
