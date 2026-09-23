@@ -64,7 +64,8 @@ transplant the wording or the facts of an example into a new post.
 
 Shape the post like the references, scaled to the release:
 
-- Title: `## Lemonade <bucket>`, using the release bucket name (for example `## Lemonade v2026.38`).
+- Title: `## Lemonade <version>`, using the release version the caller gives (for example
+  `## Lemonade v2026.39.1`) — the version people will install, not the bucket it came from.
 - A one-or-two-sentence `@everyone` opener that names what makes this release worth reading,
   written fresh each time. A quick patch can say so ("a quick release today to cover two
   important things"); a flagship release can be loud about it.
@@ -86,11 +87,15 @@ Shape the post like the references, scaled to the release:
   section is for stories enthusiasts will want to read a paragraph about or try today. Three
   or four sections is typical; one is fine for a small release. Never pad.
 - A `### Additional Improvements` section of compact bullets for everything else worth
-  mentioning. Bullets follow the same one-story-one-bullet rule: all the CI work is one
-  bullet, a handful of small fixes in one area is one bullet, with shared credit ("A trio of
-  fixes for Linux by @handle, one for macOS by @handle..."). Infrastructure work earns its
-  bullet by stating the benefit ("CI system overhaul by myself and @handle to make
-  contributing more fun"); changes with no audience at all are simply omitted.
+  mentioning, one item per bullet with its people named ("Faster model downloads on Windows
+  by @handle."). Changes share a bullet only when they share a theme a reader would name — all
+  the CI work, several fixes for Linux ("A trio of fixes for Linux by @handle, one for macOS
+  by @handle...") — never to save lines: routing, a download source and CI strung together
+  with commas is three bullets pretending to be one. Small fixes with nothing else in common
+  can share a thank-you that names everyone ("Nice fixes by @a, @b, and @c!"); "a handful of
+  fixes" with the names dropped cannot. Infrastructure work earns its bullet by stating the
+  benefit ("CI system overhaul by myself and @handle to make contributing more fun"); changes
+  with no audience at all are simply omitted.
 - A closing line that links the full release notes, worded differently from every prior post,
   optionally inviting feedback or teasing a screenshot. Link to the repository's releases
   page (`https://github.com/lemonade-sdk/lemonade/releases`). Never build a link from the
@@ -102,9 +107,10 @@ flagship. The CLI rejects posts over 45 non-blank lines.
 
 Tell each story exactly once: a breaking change covered in `Breaking Changes` does not also
 get a feature section, and a change mentioned in a feature section does not reappear as a
-bullet. The post is an editorial post telling the release's story, not a changelog. You may
-omit commits entirely. Group by story, never by commit, author, or subsystem. Never include
-PR numbers, commit SHAs, verdicts, or review evidence.
+bullet. The post is an editorial post telling the release's story, not a changelog: a commit
+with no audience can be left out, but a person whose work users will meet gets named. Group by
+story, never by commit, author, or subsystem. Never include PR numbers, commit SHAs,
+verdicts, or review evidence.
 
 ## Hotfixes
 

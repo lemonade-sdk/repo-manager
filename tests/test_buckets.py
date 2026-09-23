@@ -116,3 +116,16 @@ class RangeStart(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseVersion(CheckoutCase):
+    def test_a_release_branch_is_numbered_by_the_checkouts_version_tool(self):
+        self.add_version_tool(STUB_VERSION_TOOL + """
+def get_version(repo, now=None, branch=None, head="HEAD"):
+    return branch.removeprefix("release-v") + ".7"
+""")
+        version = buckets.release_version(self.checkout, "release-v2026.39", "HEAD")
+        self.assertEqual(version, "2026.39.7")
+
+    def test_off_a_release_branch_there_is_no_version_to_announce(self):
+        self.assertEqual(buckets.release_version(self.checkout, "main", "HEAD"), "")
