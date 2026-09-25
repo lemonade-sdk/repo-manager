@@ -128,7 +128,7 @@ class BuildingABucket(TempDirCase):
         self.state.write_text(store.notes_key("v2026.39"), "edited")
         with mock.patch.object(release, "generate", return_value=NOTES):
             release.build_notes(self.ctx, self.bucket, force=True)
-        self.assertEqual(self.state.read_text(store.notes_key("v2026.39")), NOTES)
+        self.assertEqual(self.state.read_text(store.notes_key("v2026.39")), release.annotate_notes(NOTES))
         self.assertEqual(release.frozen_files(self.ctx, "v2026.39"), [])
 
     def test_the_announcement_is_shaped_by_the_notes_already_written(self):
@@ -138,12 +138,16 @@ class BuildingABucket(TempDirCase):
             seen[skill] = build_prompt({name: self.tmp / f"x{suffix}" for name, suffix in outputs.items()}, "")
             return {"notes": NOTES, "announcement": POST}[next(iter(outputs))]
 
-        self.state.write_text(store.notes_key("v2026.39"), NOTES)
-        store.record_generated(self.state, "v2026.39", "notes.md", NOTES)
+        notes = release.annotate_notes(NOTES)
+        self.state.write_text(store.notes_key("v2026.39"), notes)
+        store.record_generated(self.state, "v2026.39", "notes.md", notes)
         with mock.patch.object(release, "generate", side_effect=capture):
             release.build_announcement(self.ctx, self.bucket)
         self.assertIn("already written", seen["release-announcement"])
         self.assertIn("## Headline", seen["release-announcement"])
+        self.assertNotIn(release.AI_WARNING, seen["release-announcement"])
+        post = self.state.read_text(store.announcement_key("v2026.39"))
+        self.assertEqual(post.count(release.AI_WARNING), 1)
 
     def test_a_missing_commit_review_is_reported_as_a_coverage_gap(self):
         commit_file(self.source, "c.txt", "three\n", "third")

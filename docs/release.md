@@ -90,6 +90,22 @@ breaking change. Voice and story shaping are the skill's job.
 since that tag and opens with `@release` rather than `@everyone`. The people reading it are
 running the build that broke.
 
+## The AI-generated warning
+
+Every `notes.md` and `announcement.md` that repo-manager writes carries, in plain Python after
+validation, the line
+
+```markdown
+### ⚠️ These notes are AI generated and will be revised by a human ⚠️
+```
+
+under `## Headline` and `## Breaking Changes` in the notes, and under the post's title in the
+announcement. The release action copies each notes section from its `##` heading to the next
+one, so the `###` line goes with it: if nobody edits the notes before the stable tag, the
+release page says so itself. Deleting the line is part of the release admin's edit, and like
+any edit it freezes the file. The warning is stripped before earlier notes and posts are
+handed to a skill as the style reference, so the model never learns to write it.
+
 ## Human edits are authoritative
 
 repo-manager records the SHA-256 of every file it writes into a bucket in
