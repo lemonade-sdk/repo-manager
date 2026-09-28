@@ -49,6 +49,17 @@ def upcoming_release_week(checkout, now):
     return load_version_tool(checkout).upcoming_release_week(now)
 
 
+def release_version(checkout, branch, head):
+    """The version the build of `head` on a release branch carries — `2026.39.1` — as
+    lemonade's `tools/version.py` numbers it. That is the candidate being tested and the tag it
+    is promoted to, so it is what the release is called. Empty off a release branch, where the
+    version is a development string nobody announces.
+    """
+    if not RELEASE_BRANCH_PATTERN.fullmatch(str(branch or "")):
+        return ""
+    return load_version_tool(checkout).get_version(checkout.path, branch=branch, head=head)
+
+
 def release_branch_name(year, week):
     return f"release-v{year}.{week}"
 

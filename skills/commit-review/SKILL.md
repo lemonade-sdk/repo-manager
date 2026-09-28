@@ -102,11 +102,16 @@ Judge the commit against these criteria.
 
 ### PR Context
 
-- Summarize what the PR does in one sentence.
+- Summarize what the PR does in one sentence. Name the specifics a user would look for — which
+  GPUs, which models, which versions, which command — rather than the category they belong to:
+  "adds gfx103X, gfx110X and gfx120X support", not "expands supported GPU families". The
+  release notes and the Discord post are written from this sentence and cannot recover what it
+  leaves out.
 - Identify the PR merge date as an ISO 8601 timestamp and put it in `merge_date`. If the associated PR is not merged or no merge date is available, use an empty string.
 - Identify the author's GitHub handle.
 - Identify the GitHub handles of people who substantively reviewed the PR. Put them in the `reviewers` JSON array even if they do not meet the high bar for a shout out. Do not include the PR author as a reviewer unless they also reviewed someone else's substantial changes on the PR.
 - Identify collaborators or reviewers who were substantially involved enough to deserve a shout out. Use a very high bar: include people only when they made an exceptional contribution beyond review, such as substantial hands-on testing, direct contribution to code or architecture, radically changing the solution direction, or catching a major release/security/API risk and materially driving the fix. Do not include routine approvers, drive-by commenters, normal review comments, small suggestions, CI-review comments, filing follow-up issues by itself, or people merely performing expected reviewer responsibilities. Catching issues during review is not enough by itself unless the person also substantially drove the resolution beyond ordinary review. Filing follow-up issues only supports a shout out when it is evidence from substantial hands-on validation or another exceptional contribution.
+- A person credited as a co-author of the commit (a `Co-authored-by:` trailer) wrote part of it, which always clears that bar: give them a shout out saying so. The trailer carries a name and email, not a handle; match it to the GitHub handle among the PR's participants. The release announcement credits people from `author` and `shout_outs` only, so a co-author left out here goes uncredited. AI assistants and bots are not people to credit.
 
 ### Review Quality
 
@@ -146,12 +151,21 @@ platform not yet published or advertised. Note the residual risk in evidence; wr
 
 ### API Compatibility
 
-Flag any API breaking change whatsoever, including schema, protocol, config, CLI contract, exported API, documented behavior, persistence format, or integration behavior.
+A change is breaking when **an existing setup stops working on upgrade**: a command, flag,
+config value, API call, saved file, or app built on the documented API that works on the last
+release fails on this one, or quietly does something else, until its owner changes something.
+Look for it in every contract a user builds on — schema, protocol, config, CLI, exported API,
+documented behavior, persistence format, integrations — and picture the people already running
+the project: their installed server, their config, their scripts, the apps they point at it.
+If finding a victim means imagining someone who depended on an undocumented detail, a bug, or
+an accident of the old implementation, the change is not breaking. Describe it as the behavior
+change it is.
 
-Lead with what the person upgrading meets: what used to work, what happens now, what they must
-change. The release notes and the Discord post are built from this, so an entry about which
-module moved or which build variable was renamed reaches users as a sentence they cannot act
-on. Internals come after, if they matter.
+Say plainly whether this commit breaks an existing setup. When it does, lead with what the
+person upgrading meets: what used to work, what happens now, what they must change. The
+release notes and the Discord post are built from this, so an entry about which module moved
+or which build variable was renamed reaches users as a sentence they cannot act on. Internals
+come after, if they matter.
 
 ### Security And Malice
 
