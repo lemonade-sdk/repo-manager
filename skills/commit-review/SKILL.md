@@ -161,13 +161,11 @@ If finding a victim means imagining someone who depended on an undocumented deta
 an accident of the old implementation, the change is not breaking. Describe it as the behavior
 change it is.
 
-Say plainly whether this commit breaks an existing setup. The release's breaking-change list
-is compiled from that answer, and every entry on it is announced to users.
-
-When it does, lead with what the person upgrading meets: what used to work, what happens now,
-what they must change. The release notes and the Discord post are built from this, so an entry about which
-module moved or which build variable was renamed reaches users as a sentence they cannot act
-on. Internals come after, if they matter.
+Say plainly whether this commit breaks an existing setup. When it does, lead with what the
+person upgrading meets: what used to work, what happens now, what they must change. The
+release notes and the Discord post are built from this, so an entry about which module moved
+or which build variable was renamed reaches users as a sentence they cannot act on. Internals
+come after, if they matter.
 
 ### Security And Malice
 
