@@ -465,6 +465,45 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TheAiWarning(unittest.TestCase):
+    NOTES = "## Headline\n\n- One.\n- Two.\n- Three.\n\n## Breaking Changes\n\n- Removed --foo.\n"
+    POST = "## Lemonade v2026.40\n\n@everyone hi.\n\n### Breaking Changes\n\n- Removed --foo.\n"
+
+    def test_the_warning_sits_under_both_notes_sections(self):
+        w = release.AI_WARNING
+        self.assertEqual(
+            release.annotate_notes(self.NOTES),
+            f"## Headline\n\n{w}\n\n- One.\n- Two.\n- Three.\n\n"
+            f"## Breaking Changes\n\n{w}\n\n- Removed --foo.\n",
+        )
+
+    def test_an_empty_breaking_section_is_still_warned(self):
+        notes = release.annotate_notes("## Headline\n\n- One.\n\n## Breaking Changes\n")
+        self.assertTrue(notes.endswith(f"## Breaking Changes\n\n{release.AI_WARNING}\n"))
+
+    def test_the_warning_sits_under_the_announcement_title(self):
+        post = release.annotate_announcement(self.POST)
+        self.assertTrue(post.startswith(f"## Lemonade v2026.40\n\n{release.AI_WARNING}\n\n@everyone"))
+        self.assertEqual(post.count(release.AI_WARNING), 1)
+
+    def test_an_untitled_announcement_opens_with_the_warning(self):
+        post = release.annotate_announcement("@everyone hi.\n")
+        self.assertEqual(post, f"{release.AI_WARNING}\n\n@everyone hi.\n")
+
+    def test_annotating_twice_changes_nothing(self):
+        once = release.annotate_notes(self.NOTES)
+        self.assertEqual(release.annotate_notes(once), once)
+        post = release.annotate_announcement(self.POST)
+        self.assertEqual(release.annotate_announcement(post), post)
+
+    def test_stripping_restores_the_original(self):
+        self.assertEqual(release.strip_ai_warning(release.annotate_notes(self.NOTES)), self.NOTES.rstrip())
+
+    def test_the_release_page_extraction_keeps_the_warning(self):
+        sections = release.extract_note_sections(release.annotate_notes(self.NOTES))
+        self.assertEqual(sections.count(release.AI_WARNING), 2)
+
+
 class StoredShape(unittest.TestCase):
     """The files are the store, so what lands in them has one shape per field."""
 

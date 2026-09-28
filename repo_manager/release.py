@@ -576,6 +576,53 @@ MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+")
 BREAKING_HEADING = re.compile(r"^#{1,6}\s+.*breaking\s+changes", re.IGNORECASE)
 
 
+AI_WARNING = "### ⚠️ These notes are AI generated and will be revised by a human ⚠️"
+NOTES_SECTIONS = ("## Headline", "## Breaking Changes")
+
+
+def strip_ai_warning(markdown):
+    """The text without the warning, so a prior release that kept it is not copied from."""
+    lines = (markdown or "").splitlines()
+    kept = []
+    for index, line in enumerate(lines):
+        if line.strip() == AI_WARNING:
+            continue
+        if not line.strip() and index and lines[index - 1].strip() == AI_WARNING:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _warn_after(lines, index):
+    """Put the warning under heading `index`, with one blank line on each side."""
+    rest = lines[index + 1 :]
+    while rest and not rest[0].strip():
+        rest = rest[1:]
+    return lines[: index + 1] + ["", AI_WARNING, ""] + rest
+
+
+def annotate_notes(markdown):
+    """Warn under each section the lemonade release action copies onto the release page.
+
+    The action takes each section from its `##` heading to the next `##` heading, so a `###`
+    line directly under the heading travels with it. If nobody edits the notes before the
+    stable tag, the page itself says they were never revised.
+    """
+    lines = strip_ai_warning(markdown).strip().splitlines()
+    for index in reversed(range(len(lines))):
+        if lines[index].strip() in NOTES_SECTIONS:
+            lines = _warn_after(lines, index)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def annotate_announcement(markdown):
+    """Warn under the post's title, or open with the warning when it has none."""
+    lines = strip_ai_warning(markdown).strip().splitlines()
+    first = next((i for i, line in enumerate(lines) if MARKDOWN_HEADING.match(line)), None)
+    lines = _warn_after(lines, first) if first is not None else [AI_WARNING, ""] + lines
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def notes_errors(markdown, canonical, bucket=""):
     """The structural contract for the machine-parsed file, and nothing else.
 
@@ -753,7 +800,7 @@ def prior_notes_block(repo, bucket):
     for tag in reversed(buckets.sort_tags(bucket.tags)):
         if buckets.version_parts(buckets.tag_bucket(tag)) >= buckets.version_parts(bucket.name):
             continue
-        extracted = extract_note_sections(github.release_body(repo, tag))
+        extracted = extract_note_sections(strip_ai_warning(github.release_body(repo, tag)))
         if extracted:
             sections.append(f"### {tag}\n\n{extracted}")
         if len(sections) == 3:
@@ -799,7 +846,7 @@ def prior_announcements_block(ctx, bucket, limit=3):
         name = key.split("/")[1]
         if buckets.version_parts(name) >= buckets.version_parts(bucket.name):
             continue
-        text = ctx.store.read_text(key).strip()
+        text = strip_ai_warning(ctx.store.read_text(key)).strip()
         if text:
             sections.append(f"### {name}\n\n{text}")
         if len(sections) == limit:
@@ -877,7 +924,7 @@ Write the website release highlights Markdown to: {paths['notes']}
     notes = []
     text = generate("release-notes", {"notes": ".md"}, prompt, validate,
                     checkout=str(bucket.checkout.path), notes=notes)
-    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n", notes)
+    write_bucket_file(ctx, bucket.name, filename, annotate_notes(text), notes)
     return text
 
 
@@ -893,7 +940,7 @@ def build_announcement(ctx, bucket, force=False):
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)
     title = bucket.title()
-    notes = ctx.store.read_text(store.notes_key(bucket.name)).strip()
+    notes = strip_ai_warning(ctx.store.read_text(store.notes_key(bucket.name))).strip()
     shaping = (
         "The website highlights for this same release, already written. Its headline bullets are "
         "the stories, in order — tell the same stories here, in the Discord voice:\n"
@@ -939,7 +986,7 @@ fixes be subsumed by the outcome they enabled.
     notes = []
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,
                     checkout=str(bucket.checkout.path), notes=notes)
-    write_bucket_file(ctx, bucket.name, filename, text.strip() + "\n", notes)
+    write_bucket_file(ctx, bucket.name, filename, annotate_announcement(text), notes)
     return text
 
 
