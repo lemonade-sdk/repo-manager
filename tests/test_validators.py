@@ -435,6 +435,13 @@ class ArtifactReconciliation(unittest.TestCase):
                 "https://github.com/lemonade-sdk/lemonade/releases/tag/v2026.39.1\n")
         self.assertEqual(release.announcement_errors(post, [], hotfix=False, bucket="v2026.39"), [])
 
+    def test_the_post_is_titled_with_the_release_version(self):
+        post = "## Lemonade v2026.39\n\n@everyone here we go.\n"
+        errors = release.announcement_errors(post, [], hotfix=False, title="v2026.39.1")
+        self.assertTrue(any("## Lemonade v2026.39.1" in e for e in errors), errors)
+        good = "## Lemonade v2026.39.1\n\n@everyone here we go.\n"
+        self.assertEqual(release.announcement_errors(good, [], hotfix=False, title="v2026.39.1"), [])
+
     def test_a_link_to_the_releases_page_is_fine(self):
         post = ("## Lemonade v2026.39\n\n@everyone here we go.\n\n"
                 "https://github.com/lemonade-sdk/lemonade/releases\n")

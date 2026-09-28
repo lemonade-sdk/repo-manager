@@ -54,7 +54,8 @@ worked an item and would invite a reader to ship on it.
   the order a tester works in, and what tells them where the damage is smallest if a candidate
   has to go out before the list is finished. Nothing on a release checklist is deferred to
   after the release.
-- `breaking_changes` is the canonical list. `notes.md` and `announcement.md` are reconciled
+- `breaking_changes` is the canonical list, compiled from what the commit reviews report as
+  breaking: a change that stops an existing setup working on upgrade. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.
 
@@ -82,7 +83,8 @@ stories and their order are decided once, here.
 
 ## announcement.md
 
-The Discord post, in the maintainer's voice. The CLI checks only what it can — that the post
+The Discord post, in the maintainer's voice, titled with the version the candidate build
+carries (`## Lemonade v2026.39.1`) as lemonade's `tools/version.py` numbers it. The CLI checks only what it can — that the post
 exists, stays under 45 non-blank lines, pings the right audience, and covers every canonical
 breaking change. Voice and story shaping are the skill's job.
 

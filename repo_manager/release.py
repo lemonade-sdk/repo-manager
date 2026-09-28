@@ -65,6 +65,11 @@ class Bucket:
         """On a hotfix, only what came after the tag users already have."""
         return self.checkout.commits(self.last_stable, self.head) if self.is_hotfix else []
 
+    def title(self):
+        """What the release is called: `v2026.39.1`, or the bucket when there is no number."""
+        version = buckets.release_version(self.checkout, self.branch, self.head)
+        return f"v{version}" if version else self.name
+
     def summary(self):
         line = f"{self.name} on {self.branch}: {self.range_start or 'the beginning'}..{self.head[:7]}"
         return line + (f" (hotfix over {self.last_stable})" if self.is_hotfix else "")
@@ -711,6 +716,15 @@ def bucket_as_tag_errors(markdown, bucket, where):
     return []
 
 
+def title_errors(markdown, title):
+    """The post is titled with the version people will install, not a placeholder for it."""
+    heading = f"## Lemonade {title}"
+    first = next((line.strip() for line in markdown.splitlines() if line.strip()), "")
+    if first != heading:
+        return [f"Title the post `{heading}` on its first line; that is the version this release ships as."]
+    return []
+
+
 def closing_link_errors(markdown, repo):
     """The post has to leave the reader somewhere to go.
 
@@ -726,11 +740,12 @@ def closing_link_errors(markdown, repo):
     ]
 
 
-def announcement_errors(markdown, canonical, hotfix, bucket="", repo=""):
+def announcement_errors(markdown, canonical, hotfix, bucket="", repo="", title=""):
     text = (markdown or "").strip()
     if not text:
         return ["announcement.md is empty."]
     errors = bucket_as_tag_errors(text, bucket, "The announcement") if bucket else []
+    errors += title_errors(text, title) if title else []
     errors += closing_link_errors(text, repo) if repo else []
     lines = [line for line in text.splitlines() if line.strip()]
     if len(lines) > MAX_ANNOUNCEMENT_LINES:
@@ -924,6 +939,7 @@ def build_announcement(ctx, bucket, force=False):
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)
+    title = bucket.title()
     notes = strip_ai_warning(ctx.store.read_text(store.notes_key(bucket.name))).strip()
     shaping = (
         "The website highlights for this same release, already written. Its headline bullets are "
@@ -944,6 +960,7 @@ def build_announcement(ctx, bucket, force=False):
 Repo: {ctx.repo}
 Branch: {bucket.branch}
 Release bucket: {bucket.name}
+Release version: {title} — title the post `## Lemonade {title}`
 Range start: {bucket.last_stable or bucket.range_start or 'unknown'}
 Head SHA: {bucket.head}
 
@@ -964,7 +981,7 @@ fixes be subsumed by the outcome they enabled.
 
     def validate(contents):
         text = contents["announcement"]
-        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo)
+        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo, title)
 
     notes = []
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,
