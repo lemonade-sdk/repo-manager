@@ -151,15 +151,21 @@ platform not yet published or advertised. Note the residual risk in evidence; wr
 
 ### API Compatibility
 
-Flag any API breaking change whatsoever, including schema, protocol, config, CLI contract, exported API, documented behavior, persistence format, or integration behavior.
+A change is breaking when **an existing setup stops working on upgrade**: a command, flag,
+config value, API call, saved file, or app built on the documented API that works on the last
+release fails on this one, or quietly does something else, until its owner changes something.
+Look for it in every contract a user builds on — schema, protocol, config, CLI, exported API,
+documented behavior, persistence format, integrations — and picture the people already running
+the project: their installed server, their config, their scripts, the apps they point at it.
+If finding a victim means imagining someone who depended on an undocumented detail, a bug, or
+an accident of the old implementation, the change is not breaking. Describe it as the behavior
+change it is.
 
-Then say plainly which kind it is: one that breaks an existing setup — something that works on
-the last release and fails after upgrading until its owner changes it — or one that only
-changes behavior nobody should have relied on, like an undocumented fallback or a bug. The
-release review keeps only the first kind, and it decides from what you write here.
+Say plainly whether this commit breaks an existing setup. The release's breaking-change list
+is compiled from that answer, and every entry on it is announced to users.
 
-Lead with what the person upgrading meets: what used to work, what happens now, what they must
-change. The release notes and the Discord post are built from this, so an entry about which
+When it does, lead with what the person upgrading meets: what used to work, what happens now,
+what they must change. The release notes and the Discord post are built from this, so an entry about which
 module moved or which build variable was renamed reaches users as a sentence they cannot act
 on. Internals come after, if they matter.
 

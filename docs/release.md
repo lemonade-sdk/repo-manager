@@ -54,9 +54,8 @@ worked an item and would invite a reader to ship on it.
   the order a tester works in, and what tells them where the damage is smallest if a candidate
   has to go out before the list is finished. Nothing on a release checklist is deferred to
   after the release.
-- `breaking_changes` is the canonical list, and its bar is an existing setup that stops
-  working on upgrade. A behavior change nobody should have relied on — an undocumented
-  fallback, a bug fixed — is set aside in `evidence.breaking_changes` instead. `notes.md` and `announcement.md` are reconciled
+- `breaking_changes` is the canonical list, compiled from what the commit reviews report as
+  breaking: a change that stops an existing setup working on upgrade. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
   unannounced. Documenting one is therefore never a to-do.
 

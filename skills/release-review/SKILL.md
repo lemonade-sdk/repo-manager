@@ -81,22 +81,9 @@ tester should get to.
 
 ## Breaking changes
 
-A change is breaking when **an existing setup stops working on upgrade**: a command, flag,
-config value, API call, or app built on the documented API that works on the last release
-fails on this one, or quietly does something else, until its owner changes something. That is
-the whole test. Picture the people already running Lemonade — their installed server, their
-config file, their scripts, the apps they point at it — and ask whether any of them breaks.
-If finding a victim means imagining someone who depended on an undocumented detail, a bug, or
-an accident of the old implementation, the change is not breaking, however visible it is in
-the diff.
-
-The commit reviews flag every behavior change they see, on purpose, so expect to set aside
-most of what they call breaking. Setting one aside loses nothing: say what you excluded and why
-in `evidence.breaking_changes`, where the release admin can overrule you.
-
-**Documenting a breaking change is never a to-do.** Capture every breaking change in
-`breaking_changes`; the release-notes and release-announcement steps read that list and
-document each one under an enforced coverage check, so "write the migration note for X" is
+**Documenting a breaking change is never a to-do.** Capture every breaking change the commit
+reviews report in `breaking_changes` — a change that stops an existing setup working on
+upgrade. The release-notes and release-announcement steps read that list and document each one under an enforced coverage check, so "write the migration note for X" is
 already done by the pipeline. The only breaking change that also earns a *priority* is one that
 was unintended — a regression to fix or revert before shipping, which is P0 like any other
 regression. A deliberate break, however large, goes in `breaking_changes` and is not work.
@@ -132,7 +119,7 @@ CLI reads that file after the skill exits. Use exactly this shape:
     "coverage": "What range was reviewed and anything not covered.",
     "blockers": "Short synthesis of what a tester has to clear before this can ship.",
     "manual_testing": "What human verification this release needs and why.",
-    "breaking_changes": "What breaks existing setups and the migration story, plus any behavior changes set aside as not breaking, and why.",
+    "breaking_changes": "User-facing breaking changes and their migration story.",
     "security": "Security-relevant observations, or 'none observed'."
   }
 }
@@ -144,9 +131,9 @@ CLI reads that file after the skill exits. Use exactly this shape:
   discarded.
 - `extra_items` is only for work no commit review wrote, which in practice means `candidate`
   issues. Leave it `[]` when there are none. Never restate a digest to-do here.
-- `breaking_changes` is the canonical, deduplicated list of every change in this release that
-  breaks an existing setup, by the test in "Breaking changes" above — one entry per distinct change, each a single sentence naming the
-  change and its migration ("Removed X; use Y instead."). **Write each entry as the person who
+- `breaking_changes` is the canonical, deduplicated list of every breaking change the commit
+  reviews report shipping in this release — one entry per distinct change, each a single
+  sentence naming the change and its migration ("Removed X; use Y instead."). **Write each entry as the person who
   upgrades meets it**: what used to work, what happens now, what they must change. The release
   page and the Discord post publish this list word for word to people who have never seen this
   repository, so how it was done — a module that moved, a build variable renamed — belongs in
