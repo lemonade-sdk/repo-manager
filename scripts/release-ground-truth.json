@@ -1,0 +1,68 @@
+{
+  "v2026.42": {
+    "branch": "release-v2026.42",
+    "head": "2aedebc4858642b9dd51e21bdb2791e62b03408b",
+    "checks": [
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "--no-sign",
+        "why": "The admin dropped the release-tool flag change: it is maintainer tooling, not a break for users."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "present",
+        "pattern": "(?i)TheNoise",
+        "why": "TheNoise on Windows led the published post."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "(?m)^###\\s+[^\\x00-\\x7F]",
+        "why": "The admin removes emoji from section headings."
+      }
+    ]
+  },
+  "v2026.44": {
+    "branch": "release-v2026.44",
+    "head": "69948a7d40afbf91f6ad990d8b863c83ce5cc71d",
+    "checks": [
+      {
+        "file": "notes.md",
+        "expect": "first_headline",
+        "pattern": "(?i)launch pi",
+        "why": "pi was the release's flagship; the admin moved it back to the top."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "resolved_ctx_size",
+        "why": "The null came from #3862 and #3986 took it back out within the release; v2026.43.3 always returned a number."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "(?i)physical RAM|RAM[- ]in[- ]use",
+        "why": "#3986 repairs a regression introduced in this same release, so nobody upgrading met it."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "resolved_ctx_size",
+        "why": "The same breaking change, taken back out within the release."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "@fl0hrnr",
+        "why": "A misspelled handle in the v2026.44.0 draft."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "(?m)^###\\s+[^\\x00-\\x7F]",
+        "why": "The admin removes emoji from section headings."
+      }
+    ]
+  }
+}

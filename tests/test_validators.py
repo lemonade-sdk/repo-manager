@@ -581,3 +581,61 @@ class PlatformShorthand(unittest.TestCase):
             {"id": "c0mmit0-1", "priority": "P1", "platforms": list(release.PLATFORMS[:-1])}]},
             todo_index("Check the version."))
         self.assertEqual(data["checklist"][0]["platforms"], list(release.PLATFORMS[:-1]))
+
+
+def digest_row(sha, pr, summary, fixes=(), author="@someone", **extra):
+    row = {"sha": sha, "pr_number": pr, "author": author, "summary": summary,
+           "shout_outs": [], "evidence": {}, "fixes_prs": list(fixes)}
+    row.update(extra)
+    return row
+
+
+class FixesFoldIntoWhatTheyRepair(unittest.TestCase):
+    """A fix for a PR in the same release is how that PR ships, not a story of its own."""
+
+    def test_an_in_range_fix_rides_on_the_pr_it_repairs(self):
+        rows = [digest_row("aaaaaaa", 3862, "Reworks context sizing."),
+                digest_row("bbbbbbb", 3986, "Never refuses a load.", fixes=[3862])]
+        entries = release.announcement_digest(rows)
+        self.assertEqual([e["id"] for e in entries], ["aaaaaaa"])
+        self.assertEqual(entries[0]["amended_by"], ["Never refuses a load."])
+
+    def test_a_fix_of_a_fix_lands_on_the_original(self):
+        rows = [digest_row("aaaaaaa", 1, "Feature."),
+                digest_row("bbbbbbb", 2, "First fix.", fixes=[1]),
+                digest_row("ccccccc", 3, "Second fix.", fixes=[2])]
+        entries = release.announcement_digest(rows)
+        self.assertEqual([e["id"] for e in entries], ["aaaaaaa"])
+        self.assertEqual(entries[0]["amended_by"], ["First fix.", "Second fix."])
+
+    def test_a_fix_for_something_users_already_have_stays(self):
+        rows = [digest_row("aaaaaaa", 3986, "Fixes a bug from last release.", fixes=[3500])]
+        self.assertEqual([e["id"] for e in release.announcement_digest(rows)], ["aaaaaaa"])
+
+    def test_folding_does_not_touch_the_callers_rows(self):
+        rows = [digest_row("aaaaaaa", 1, "Feature."), digest_row("bbbbbbb", 2, "Fix.", fixes=[1])]
+        release.announcement_digest(rows)
+        self.assertNotIn("amended_by", rows[0])
+
+    def test_a_revert_subject_names_what_it_repairs(self):
+        self.assertEqual(release.fixes_of({"subject": 'Revert "Bump FLM to v1.0.9 (#3873)"'}), [3873])
+
+    def test_fixes_prs_is_normalized_to_ints(self):
+        self.assertEqual(commits.normalize_pr_numbers(["#3862", 3862, "x", 0, " 12 "]), [12, 3862])
+
+
+class OnlyRealHandles(unittest.TestCase):
+    ALLOWED = {"fl0rianr", "sawansri"}
+
+    def test_a_misspelled_handle_is_caught(self):
+        errors = release.handle_errors("Thanks `@fl0hrnr` for the tuning.", self.ALLOWED)
+        self.assertTrue(any("@fl0hrnr" in e for e in errors))
+
+    def test_known_handles_pings_and_emails_pass(self):
+        text = "@everyone `@Sawansri` and @fl0rianr did it. Mail me at me@example.com.\n@release"
+        self.assertEqual(release.handle_errors(text, self.ALLOWED), [])
+
+    def test_credited_handles_include_shout_outs(self):
+        rows = [digest_row("aaaaaaa", 1, "x", author="@a", shout_outs=["@B"])]
+        self.assertEqual(release.credited_handles(rows), {"a", "b"})
+

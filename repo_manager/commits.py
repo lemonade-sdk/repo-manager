@@ -212,6 +212,18 @@ def normalize_todos(value):
     return items
 
 
+def normalize_pr_numbers(value):
+    """`fixes_prs` as sorted, distinct ints, whatever the model wrote: `[3862]`, `["#3862"]`,
+    or a bare `3862`. Anything that is not a PR number is dropped rather than guessed at."""
+    items = value if isinstance(value, list) else [value]
+    numbers = set()
+    for item in items:
+        match = re.fullmatch(r"\s*#?(\d+)\s*", str(item if item is not None else ""))
+        if match and int(match.group(1)) > 0:
+            numbers.add(int(match.group(1)))
+    return sorted(numbers)
+
+
 def origin_commit(checkout, sha):
     """The commit a review should attribute: the original when this one is a cherry-pick."""
     source = checkout.cherry_pick_source(sha)
@@ -288,6 +300,7 @@ def review(ctx, sha, bucket, branch="main", range_start="", force=False):
         "subject": meta.get("subject", ""),
         "verdict": normalize_verdict(data.get("verdict")),
         "maintainer_todos": normalize_todos(data.get("maintainer_todos")),
+        "fixes_prs": normalize_pr_numbers(data.get("fixes_prs")),
         "reviewed_at": ctx.now_iso(),
         "generation_seconds": round(time.monotonic() - started, 1),
     })

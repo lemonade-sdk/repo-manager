@@ -32,6 +32,9 @@ The JSON must use this shape:
       "reason": "Exceptional contribution beyond routine review."
     }
   ],
+  "fixes_prs": [
+    123
+  ],
   "verdict": "Clean",
   "verdict_reason": "One sentence explaining the core reason for the grade.",
   "maintainer_todos": [
@@ -51,7 +54,7 @@ The JSON must use this shape:
 }
 ```
 
-Use an empty array for `shout_outs` or `maintainer_todos` when none apply.
+Use an empty array for `shout_outs`, `fixes_prs` or `maintainer_todos` when none apply.
 
 ## Required Inputs
 
@@ -107,6 +110,12 @@ Judge the commit against these criteria.
   "adds gfx103X, gfx110X and gfx120X support", not "expands supported GPU families". The
   release notes and the Discord post are written from this sentence and cannot recover what it
   leaves out.
+- Put in `fixes_prs` the number of every earlier PR whose defect or regression this commit
+  fixes, or whose change it reverts or rolls back: "Fixes a regression from the context sizing
+  rework (#3862)" gives `[3862]`, and a revert of #3873 gives `[3873]`. Read the PR body and
+  the commit message for it. A PR that is merely related, or that this one builds on, does not
+  belong here; the release pipeline folds each fix into the PR it repairs, so a wrong entry
+  hides a real story.
 - Identify the PR merge date as an ISO 8601 timestamp and put it in `merge_date`. If the associated PR is not merged or no merge date is available, use an empty string.
 - Identify the author's GitHub handle.
 - Identify the GitHub handles of people who substantively reviewed the PR. Put them in the `reviewers` JSON array even if they do not meet the high bar for a shout out. Do not include the PR author as a reviewer unless they also reviewed someone else's substantial changes on the PR.

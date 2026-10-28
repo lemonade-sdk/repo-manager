@@ -88,6 +88,13 @@ already done by the pipeline. The only breaking change that also earns a *priori
 was unintended — a regression to fix or revert before shipping, which is P0 like any other
 regression. A deliberate break, however large, goes in `breaking_changes` and is not work.
 
+A breaking change is judged on what the whole range ships, measured from the last release the
+caller names. When a digest row's `fixes_prs` names another PR in the digest, the two ship as
+one change: a commit review that reported a break describes its own commit, and a later fix
+or revert in the same release can take that break back out. List only what an upgrade from
+the last release to this head still meets. The list is rebuilt from the digest on every run,
+never carried over from an earlier one.
+
 ## Platforms
 
 The caller lists the platforms this project is tested on. Every rating names the platforms its

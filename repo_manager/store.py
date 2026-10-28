@@ -245,6 +245,25 @@ def is_frozen(store, bucket, filename):
     return sha256_text(store.read_text(key)) != recorded
 
 
+def generated_draft(store, bucket, filename, depth=30):
+    """The text repo-manager last wrote for a file a human has since edited, or "".
+
+    The ledger keeps only the draft's hash; the draft itself is in the store's git history,
+    so this walks that file's recent commits for the version whose hash matches. A store that
+    is not a git checkout has no history to walk.
+    """
+    recorded = generated_hashes(store, bucket).get(filename)
+    key = f"releases/{bucket}/{filename}"
+    if not store.is_git or not recorded:
+        return ""
+    log = store._git("log", f"-n{depth}", "--format=%H", "--", key)
+    for sha in (log.stdout or "").split():
+        shown = store._git("show", f"{sha}:{key}")
+        if shown.returncode == 0 and sha256_text(shown.stdout) == recorded:
+            return shown.stdout
+    return ""
+
+
 def record_generated(store, bucket, filename, content, notes=None):
     hashes = generated_hashes(store, bucket)
     hashes[filename] = sha256_text(content)
