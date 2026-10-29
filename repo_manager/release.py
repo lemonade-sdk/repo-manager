@@ -7,6 +7,7 @@ All three are regenerated in place on every candidate — except where a human h
 one, which freezes it: the release admin's words win over the model's, always.
 """
 
+import difflib
 import json
 import re
 import time
@@ -57,9 +58,27 @@ class Bucket:
         self.stable_tags = buckets.stable_tags_in_bucket(self.tags, self.name)
         self.is_hotfix = bool(self.stable_tags)
         self.last_stable = self.stable_tags[-1] if self.stable_tags else ""
+        on_release_branch = bool(buckets.RELEASE_BRANCH_PATTERN.fullmatch(branch))
+        self.cut = (
+            self.checkout.merge_base(f"origin/{branch}", "origin/main")
+            if on_release_branch and self.checkout.has_branch(branch) else ""
+        )
+        # Read before this run rewrites the review: it is the head the previous candidate's
+        # artifacts described.
+        self.previous_head = (ctx.store.read_json(store.review_key(self.name)) or {}).get("head_sha", "")
 
     def commits(self):
         return self.checkout.commits(self.range_start, self.head)
+
+    def candidate_fixes(self):
+        """Commits that reached the release branch after it was cut from main."""
+        return set(self.checkout.commits(self.cut, self.head)) if self.cut else set()
+
+    def since_previous(self):
+        """Commits the previous candidate's artifacts did not cover."""
+        if not self.previous_head or self.previous_head == self.head:
+            return set()
+        return set(self.checkout.commits(self.previous_head, self.head))
 
     def hotfix_commits(self):
         """On a hotfix, only what came after the tag users already have."""
@@ -75,9 +94,27 @@ class Bucket:
         return line + (f" (hotfix over {self.last_stable})" if self.is_hotfix else "")
 
 
-def digest(ctx, shas):
+REVERT_SUBJECT = re.compile(r'^Revert ".*\(#(\d+)\)"')
+
+
+def fixes_of(data):
+    """The PRs a reviewed commit repairs: what its review named, plus the PR a `git revert`
+    subject names, which reviews written before `fixes_prs` existed still let us read."""
+    numbers = set(commits.normalize_pr_numbers(data.get("fixes_prs")))
+    match = REVERT_SUBJECT.match(str(data.get("subject", "")))
+    if match:
+        numbers.add(int(match.group(1)))
+    return sorted(numbers)
+
+
+def digest(ctx, shas, bucket=None):
     """The per-commit digest the release skills read, in commit order, and an index of every
     to-do in it.
+
+    Given the bucket, each row also says how it relates to the rest of the release: which PRs
+    it repairs (`fixes_prs`) and whether it reached the release branch after the cut
+    (`candidate_fix`). Those are facts git and the reviews can settle, so they are settled
+    here rather than left for the model to notice.
 
     Only what a release decision turns on: who to ask, what shipped, what the commit review
     concluded, and the evidence behind it. Not the full review — a release with eighty
@@ -88,6 +125,7 @@ def digest(ctx, shas):
     quietly lose an item, reword one, or drift from the commit review it came from.
     """
     rows, missing, index = [], [], {}
+    candidate_fixes = bucket.candidate_fixes() if bucket else set()
     for sha in shas:
         data = ctx.store.read_json(store.commit_key(sha))
         if not data:
@@ -122,8 +160,41 @@ def digest(ctx, shas):
             "evidence": {
                 key: evidence[key] for key in DIGEST_EVIDENCE_KEYS if str(evidence.get(key, "")).strip()
             },
+            "fixes_prs": fixes_of(data),
+            "candidate_fix": sha in candidate_fixes,
         })
     return rows, missing, index
+
+
+def fold_fixes(rows, keep_fixes=False):
+    """The rows a release tells as stories, with each in-range fix folded into the PR it
+    repairs.
+
+    A fix for a PR in the same release is not news to anyone upgrading from the last one; it
+    is part of how that PR ships, so it rides on the PR's row as `amended_by` and leaves no row
+    of its own. A fix for something users already have is news, and stays. `keep_fixes` keeps
+    the fix's own row too, for the review, which rates every row's to-dos.
+    """
+    rows = [dict(row) for row in rows]
+    by_pr = {row["pr_number"]: row for row in rows if row.get("pr_number")}
+    folded_into = {}
+    for row in rows:
+        target = next(
+            (by_pr[n] for n in row.get("fixes_prs") or [] if n in by_pr and by_pr[n] is not row),
+            None,
+        )
+        # A fix of a fix lands on the row the first fix was folded into.
+        while target is not None and id(target) in folded_into:
+            target = folded_into[id(target)]
+        if target is None or target is row:
+            continue
+        amendment = {"pr_number": row.get("pr_number"), "summary": row["summary"]}
+        compatibility = (row.get("evidence") or {}).get("api_compatibility")
+        if compatibility:
+            amendment["api_compatibility"] = compatibility
+        target.setdefault("amended_by", []).append(amendment)
+        folded_into[id(row)] = target
+    return rows if keep_fixes else [row for row in rows if id(row) not in folded_into]
 
 
 def todo_text(item):
@@ -345,13 +416,20 @@ NO_BREAKING = re.compile(
 )
 
 
+NOT_FOR_USERS = re.compile(
+    r"\b(internal|maintainer|not shipped|not user[- ]facing|no user[- ]facing|does not affect users)\b",
+    re.IGNORECASE,
+)
+
+
 def review_errors(data, issues, index=None, ratings=None):
     """Structural checks that protect the maintainer-facing panels — nothing more.
 
     The checklist's contents are guaranteed by `normalize_review`, so what is left is the
     judgement only the model can supply — a priority for every to-do — and the one
     contradiction that would mislead a reader: an empty breaking-change list under prose
-    that describes breaking changes.
+    that describes breaking changes, or a list the prose and the entries themselves say
+    does not reach users.
     """
     errors = []
     index = index or {}
@@ -396,6 +474,19 @@ def review_errors(data, issues, index=None, ratings=None):
             "changes — enumerate every user-facing breaking change in the list, one entry each with "
             "its migration, since the notes and the announcement are reconciled against it."
         )
+    if (isinstance(breaking, list) and breaking and HAS_BREAKING.search(claims)
+            and not prose.asserts(claims, HAS_BREAKING, NO_BREAKING)):
+        errors.append(
+            "evidence.breaking_changes says there are no breaking changes, but breaking_changes "
+            "lists some. Keep only the entries an existing user's setup meets on upgrade, and "
+            "make the prose agree with the list."
+        )
+    for entry in breaking if isinstance(breaking, list) else []:
+        if NOT_FOR_USERS.search(str(entry)):
+            errors.append(
+                f"breaking_changes entry {str(entry)[:80]!r} describes something internal or for "
+                "maintainers. A change no user runs into is not a breaking change: drop it."
+            )
     known = {p.lower() for p in PLATFORMS} | {ALL_PLATFORMS}
     for index, todo in enumerate(todos):
         unknown = [p for p in todo.get("platforms", []) if p.lower() not in known]
@@ -442,6 +533,9 @@ def issues_block(issues):
 
 
 def prior_review_block(ctx, bucket):
+    """Last run's priorities, as continuity. Breaking changes are rebuilt from the digest on
+    every run instead: whether something breaks depends on the whole range, and a later
+    commit can undo it."""
     data = ctx.store.read_json(store.review_key(bucket.name))
     if not data:
         return ""
@@ -451,7 +545,6 @@ def prior_review_block(ctx, bucket):
             for todo in data.get("checklist", []) if todo.get("commit")
         },
         "extra_items": [todo for todo in data.get("checklist", []) if not todo.get("commit")],
-        "breaking_changes": data.get("breaking_changes", []),
     }
     return (
         "The priorities this bucket was given last time. Use them as the continuity baseline: "
@@ -492,12 +585,24 @@ Write the machine-readable JSON result to: {path}
 
 Every rating names the platforms its to-do applies to in `platforms`, or `["all"]`.
 
+## Breaking changes are judged against {bucket.range_start or 'the last release'}
+
+People upgrade from {bucket.range_start or 'the last release'} to this head, so an entry
+belongs in `breaking_changes` only when that upgrade meets it. A row's `fixes_prs` names the
+PRs it repairs or reverts; when one of those is also in this digest, the two ship as one
+change. Judge what they ship together: a break that a later commit in this digest undoes is
+no break at all. A row with `amended_by` was changed again later in this release, and its own
+evidence describes it before that change: read each amendment, and list the row's break only
+if it survives the amendment. An amendment that says it restores what used to work, or does
+X "instead of" what the row introduced, has taken that break back out: someone upgrading from
+{bucket.range_start or 'the last release'} never meets it.
+
 ## Per-commit digest of the stored commit reviews
 
 This digest holds exactly {len(rows)} commit review(s). Use that number if you state one;
 do not count the entries yourself.
 {coverage}
-{json.dumps(rows, indent=2)}
+{json.dumps(fold_fixes(rows, keep_fixes=True), indent=2)}
 
 ## Rate all {len(index)} to-dos
 
@@ -524,7 +629,7 @@ def build_review(ctx, bucket, force=False):
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_json(key) or {}
     shas = bucket.commits()
-    rows, missing, index = digest(ctx, shas)
+    rows, missing, index = digest(ctx, shas, bucket)
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     issues = candidate_issues(ctx, bucket)
@@ -740,6 +845,11 @@ def closing_link_errors(markdown, repo):
     ]
 
 
+HEADING = re.compile(r"^\s*#{1,6}\s")
+EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
+AI_WARNING_LINE = re.compile(r"^\s*#{1,6}\s*⚠️ These notes are AI generated")
+
+
 def announcement_errors(markdown, canonical, hotfix, bucket="", repo="", title=""):
     text = (markdown or "").strip()
     if not text:
@@ -763,6 +873,14 @@ def announcement_errors(markdown, canonical, hotfix, bucket="", repo="", title="
             errors.append("A hotfix post pings `@release`, never `@everyone`; remove the `@everyone`.")
     elif "@everyone" not in text:
         errors.append("The post must open with an `@everyone` ping; add `@everyone` to the opener.")
+    decorated = [
+        line.strip() for line in text.splitlines()
+        if HEADING.match(line) and EMOJI.search(line) and not AI_WARNING_LINE.match(line)
+    ]
+    if decorated:
+        errors.append(
+            f"Section headings carry no emoji: {decorated[0]!r}. Name the section in words alone."
+        )
     if canonical:
         errors.extend(breaking_count_errors(count_breaking_bullets(text), canonical, "The announcement"))
     return errors
@@ -794,16 +912,33 @@ def breaking_block(canonical):
     )
 
 
-def prior_notes_block(repo, bucket):
-    """Headline and Breaking Changes from the last three releases, as the style reference."""
+def human_edited_first(ctx, names, filename, limit):
+    """Up to `limit` of these buckets, newest first, keeping only those whose file a human
+    wrote or edited. A draft nobody revised shipped in repo-manager's own words, and as a
+    reference it teaches the model to repeat itself; it is used only when no edited one exists.
+    A bucket with no file in the store predates repo-manager, so a human wrote it."""
+    names = sorted(set(names), key=buckets.version_parts, reverse=True)
+    edited = [
+        name for name in names
+        if not ctx.store.exists(f"releases/{name}/{filename}") or store.is_frozen(ctx.store, name, filename)
+    ]
+    return (edited or names)[:limit]
+
+
+def prior_notes_block(ctx, bucket, limit=3):
+    """Headline and Breaking Changes from recent releases, as the style reference."""
+    latest = {}
+    for tag in buckets.sort_tags(bucket.tags):
+        name = buckets.tag_bucket(tag)
+        if buckets.version_parts(name) < buckets.version_parts(bucket.name):
+            latest[name] = tag
     sections = []
-    for tag in reversed(buckets.sort_tags(bucket.tags)):
-        if buckets.version_parts(buckets.tag_bucket(tag)) >= buckets.version_parts(bucket.name):
-            continue
-        extracted = extract_note_sections(strip_ai_warning(github.release_body(repo, tag)))
+    for name in human_edited_first(ctx, latest, "notes.md", len(latest)):
+        tag = latest[name]
+        extracted = extract_note_sections(strip_ai_warning(github.release_body(ctx.repo, tag)))
         if extracted:
             sections.append(f"### {tag}\n\n{extracted}")
-        if len(sections) == 3:
+        if len(sections) == limit:
             break
     if not sections:
         return ""
@@ -836,17 +971,13 @@ def extract_note_sections(markdown):
 
 def prior_announcements_block(ctx, bucket, limit=3):
     """Earlier buckets' Discord posts, as the voice reference. They live in the store."""
+    earlier = [
+        key.split("/")[1] for key in ctx.store.keys("releases", "announcement.md")
+        if buckets.version_parts(key.split("/")[1]) < buckets.version_parts(bucket.name)
+    ]
     sections = []
-    earlier = sorted(
-        (key for key in ctx.store.keys("releases", "announcement.md")),
-        key=lambda key: buckets.version_parts(key.split("/")[1]),
-        reverse=True,
-    )
-    for key in earlier:
-        name = key.split("/")[1]
-        if buckets.version_parts(name) >= buckets.version_parts(bucket.name):
-            continue
-        text = strip_ai_warning(ctx.store.read_text(key)).strip()
+    for name in human_edited_first(ctx, earlier, "announcement.md", len(earlier)):
+        text = strip_ai_warning(ctx.store.read_text(f"releases/{name}/announcement.md")).strip()
         if text:
             sections.append(f"### {name}\n\n{text}")
         if len(sections) == limit:
@@ -855,8 +986,71 @@ def prior_announcements_block(ctx, bucket, limit=3):
         return ""
     return (
         "Prior release announcements, as the voice reference. Match their voice, level of detail, "
-        "and Discord formatting; never copy their facts, and vary the closing line so posts do not "
-        "become repetitive:\n\n" + "\n\n---\n\n".join(sections) + "\n\n"
+        "and Discord formatting; never copy their facts:\n\n" + "\n\n---\n\n".join(sections) + "\n\n"
+    )
+
+
+MAX_EDIT_EXAMPLE_LINES = 60
+
+
+def edit_examples_block(ctx, bucket, filename, limit=2):
+    """How the release admin rewrote recent drafts of this file, as diffs.
+
+    A finished post shows what the admin accepted; the diff from the draft shows what they
+    refused, which is the part a prompt cannot otherwise learn. Only buckets whose file was
+    edited by hand and whose draft is still in the store's history have one.
+    """
+    examples = []
+    earlier = sorted(
+        (key.split("/")[1] for key in ctx.store.keys("releases", filename)),
+        key=buckets.version_parts,
+        reverse=True,
+    )
+    for name in earlier:
+        if buckets.version_parts(name) >= buckets.version_parts(bucket.name):
+            continue
+        if not store.is_frozen(ctx.store, name, filename):
+            continue
+        draft = strip_ai_warning(store.generated_draft(ctx.store, name, filename)).strip()
+        final = strip_ai_warning(ctx.store.read_text(f"releases/{name}/{filename}")).strip()
+        if not draft or draft == final:
+            continue
+        diff = list(difflib.unified_diff(
+            draft.splitlines(), final.splitlines(), "draft", "published", n=1, lineterm=""
+        ))[2:]
+        if len(diff) > MAX_EDIT_EXAMPLE_LINES:
+            diff = diff[:MAX_EDIT_EXAMPLE_LINES] + ["..."]
+        examples.append(f"### {name}\n\n```diff\n" + "\n".join(diff) + "\n```")
+        if len(examples) == limit:
+            break
+    if not examples:
+        return ""
+    return (
+        "How the release admin rewrote earlier drafts of this file: `-` lines are what the draft "
+        "said, `+` lines what the admin published instead. Write toward what they keep choosing. "
+        "These teach taste; never take a fact from them:\n\n" + "\n\n".join(examples) + "\n\n"
+    )
+
+
+def previous_headline_block(ctx, bucket):
+    """The headline this bucket's previous candidate carried, and what is new since.
+
+    A candidate is the same release as the one before it, so its stories should be the ones
+    readers already saw unless something new outranks them. What is stored is repo-manager's
+    own previous draft, or, under `--force`, the admin's edit, which is a baseline worth
+    keeping too.
+    """
+    previous = extract_note_sections(strip_ai_warning(ctx.store.read_text(store.notes_key(bucket.name))))
+    headline = previous.split("## Breaking Changes")[0].strip()
+    if not headline:
+        return ""
+    new = sorted(sha[:7] for sha in bucket.since_previous())
+    return (
+        "The headline this release carried on its previous candidate. Keep its stories and their "
+        "order. Change it only to add a story from a commit that is new since then and outranks "
+        "one already there, or to drop a story the commit summaries no longer support. "
+        f"New since the previous candidate: {', '.join(new) if new else 'none'}.\n\n"
+        f"```markdown\n{headline}\n```\n\n"
     )
 
 
@@ -870,15 +1064,53 @@ def human(handle):
 
 
 def announcement_digest(rows):
-    """What the announcement is allowed to draw on: outcomes and the people behind them."""
-    return [
-        {
+    """What the notes and the post are allowed to draw on: outcomes and the people behind
+    them, one entry per change a reader upgrading from the last release will meet."""
+    entries = []
+    for row in fold_fixes(rows):
+        entry = {
+            "id": row.get("sha", ""),
             "author": human(row["author"]),
             "summary": row["summary"],
             "credits": [c for c in (human(c) for c in row["shout_outs"]) if c],
             "docs": " ".join(str(row["evidence"].get("documentation", "")).split())[:200],
         }
-        for row in rows
+        if row.get("amended_by"):
+            entry["amended_by"] = [item["summary"] for item in row["amended_by"]]
+        if row.get("candidate_fix"):
+            entry["candidate_fix"] = True
+        entries.append(entry)
+    return entries
+
+
+HANDLE = re.compile(r"(?<![\w.@/])@([A-Za-z0-9][A-Za-z0-9-]{0,38})\b")
+PINGS = {"everyone", "release", "here"}
+
+
+def credited_handles(rows):
+    """Everyone a post may name: every author and credited person in the release, folded
+    fixes included."""
+    names = set()
+    for row in rows:
+        for handle in [row.get("author", "")] + list(row.get("shout_outs") or []):
+            name = str(handle or "").strip().lstrip("@").lower()
+            if name:
+                names.add(name)
+    return names
+
+
+def handle_errors(markdown, allowed):
+    """A handle nobody in the release has is a typo or an invention, and on Discord it pings
+    a stranger or nobody. The release's own authors and credits are the whole set."""
+    unknown = sorted({
+        f"@{match.group(1)}" for match in HANDLE.finditer(markdown or "")
+        if match.group(1).lower() not in allowed and match.group(1).lower() not in PINGS
+    })
+    if not unknown:
+        return []
+    return [
+        f"The post credits {', '.join(unknown)}, who did not author or get credited for any "
+        "change in this release. Use the handles in the commit summaries exactly as written."
     ]
 
 
@@ -888,7 +1120,7 @@ def build_notes(ctx, bucket, force=False):
     if store.is_frozen(ctx.store, bucket.name, filename) and not force:
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_text(key)
-    rows, _, _ = digest(ctx, bucket.commits())
+    rows, _, _ = digest(ctx, bucket.commits(), bucket)
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)
@@ -898,6 +1130,8 @@ def build_notes(ctx, bucket, force=False):
             "Run `release review` first.",
             flush=True,
         )
+    baseline = previous_headline_block(ctx, bucket)
+    edits = edit_examples_block(ctx, bucket, filename)
 
     def prompt(paths, feedback):
         return f"""/skill:release-notes
@@ -910,7 +1144,7 @@ Head SHA: {bucket.head}
 
 Write the website release highlights Markdown to: {paths['notes']}
 
-{prior_notes_block(ctx.repo, bucket)}{breaking_block(canonical)}\
+{prior_notes_block(ctx, bucket)}{edits}{baseline}{breaking_block(canonical)}\
 ## Commit summaries for this release (the only source material)
 
 {json.dumps(announcement_digest(rows), indent=2)}
@@ -935,11 +1169,14 @@ def build_announcement(ctx, bucket, force=False):
         print(f"Frozen (edited by hand): {key} — skipping. Use --force to regenerate.", flush=True)
         return ctx.store.read_text(key)
     shas = bucket.hotfix_commits() if bucket.is_hotfix else bucket.commits()
-    rows, _, _ = digest(ctx, shas)
+    rows, _, _ = digest(ctx, shas, bucket)
     if not rows:
         raise SystemExit(f"No commit reviews found for {bucket.name}. Run `commit sweep` first.")
     canonical = canonical_breaking(ctx, bucket)
     title = bucket.title()
+    entries = announcement_digest(rows)
+    allowed = credited_handles(rows)
+    edits = edit_examples_block(ctx, bucket, filename)
     notes = strip_ai_warning(ctx.store.read_text(store.notes_key(bucket.name))).strip()
     shaping = (
         "The website highlights for this same release, already written. Its headline bullets are "
@@ -966,10 +1203,10 @@ Head SHA: {bucket.head}
 
 Write the Discord-friendly Markdown announcement to: {paths['announcement']}
 
-{hotfix}{prior_announcements_block(ctx, bucket)}{shaping}{breaking_block(canonical)}\
+{hotfix}{prior_announcements_block(ctx, bucket)}{edits}{shaping}{breaking_block(canonical)}\
 ## Commit summaries for this release (the only source material)
 
-{json.dumps(announcement_digest(rows), indent=2)}
+{json.dumps(entries, indent=2)}
 
 Final editorial reminders: tell the release as 3-5 stories, one Discord section each; if two
 candidate sections would answer the same reader question, they are one story, and leftover
@@ -981,7 +1218,10 @@ fixes be subsumed by the outcome they enabled.
 
     def validate(contents):
         text = contents["announcement"]
-        return text, announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo, title)
+        return text, (
+            announcement_errors(text, canonical, bucket.is_hotfix, bucket.name, ctx.repo, title)
+            + handle_errors(text, allowed)
+        )
 
     notes = []
     text = generate("release-announcement", {"announcement": ".md"}, prompt, validate,

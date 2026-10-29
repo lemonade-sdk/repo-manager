@@ -14,8 +14,10 @@ headline bullets, so the stories you pick here — and the order you put them in
 stories that release tells everywhere. Decide them here, once.
 
 The input is the release bucket, the range it covers, the release review's canonical
-breaking-change list, up to three prior releases' sections as a style reference, and a
-per-commit digest of the stored commit reviews. The digest is the only source of the facts.
+breaking-change list, up to three prior releases' sections as a style reference, diffs of how
+the release admin rewrote recent drafts, the previous candidate's headline when there was
+one, and a per-commit digest of the stored commit reviews. The digest is the only source of
+the facts.
 
 ## Shaping the release into stories
 
@@ -32,6 +34,17 @@ per-commit digest of the stored commit reviews. The digest is the only source of
 - A story is a capability that *debuts in this release*. Check every candidate against the
   prior releases above: if it already appears there, this release only refined it, and a
   refinement is not a headline bullet unless the refinement itself is what users get.
+- Rank stories by what a reader upgrading from the last release gets, in this order: a new
+  capability they can try; then something the last release had broken, now working again;
+  then other fixes. Inside a tier, the change more people will touch goes first.
+- Every entry is told as of the head, measured from the last release. An entry's
+  `amended_by` lists fixes that landed later in this same release: describe the entry as it
+  ships with them, and never tell a fix to something this release introduced as a story of
+  its own. Nobody upgrading met the problem.
+- An entry marked `candidate_fix` reached the release branch after it was cut, to repair the
+  candidate. It is a story only when it fixes something users of the last release have.
+- When the caller hands you the previous candidate's headline, it is the baseline: keep its
+  stories and order unless the caller names a new commit that outranks one of them.
 
 ## The file
 

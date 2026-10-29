@@ -59,6 +59,7 @@ class BuildingABucket(TempDirCase):
             bucket.range_start = "v11.9.0"
             bucket.head = self.second
             bucket.stable_tags, bucket.is_hotfix, bucket.last_stable = [], False, ""
+            bucket.cut, bucket.previous_head = "", ""
         return bucket
 
     def build_all(self, review=None, notes=NOTES, post=POST, force=False):
@@ -149,6 +150,28 @@ class BuildingABucket(TempDirCase):
         post = self.state.read_text(store.announcement_key("v2026.39"))
         self.assertEqual(post.count(release.AI_WARNING), 1)
 
+    def test_the_previous_candidates_headline_is_the_notes_baseline(self):
+        seen = {}
+
+        def capture(skill, outputs, build_prompt, validate, **kwargs):
+            seen[skill] = build_prompt({name: self.tmp / f"x{suffix}" for name, suffix in outputs.items()}, "")
+            return NOTES
+
+        previous = release.annotate_notes("## Headline\n\n- pi gains MCP mode.\n- B.\n- C.\n\n## Breaking Changes\n")
+        self.state.write_text(store.notes_key("v2026.39"), previous)
+        store.record_generated(self.state, "v2026.39", "notes.md", previous)
+        with mock.patch.object(release, "generate", side_effect=capture):
+            release.build_notes(self.ctx, self.bucket)
+        self.assertIn("previous candidate", seen["release-notes"])
+        self.assertIn("- pi gains MCP mode.", seen["release-notes"])
+        self.assertNotIn(release.AI_WARNING, seen["release-notes"])
+
+    def test_last_runs_breaking_changes_are_not_carried_forward(self):
+        self.state.write_json(store.review_key("v2026.39"), {
+            "checklist": [], "breaking_changes": ["resolved_ctx_size can now be null."],
+        })
+        self.assertNotIn("resolved_ctx_size", release.prior_review_block(self.ctx, self.bucket))
+
     def test_a_missing_commit_review_is_reported_as_a_coverage_gap(self):
         commit_file(self.source, "c.txt", "three\n", "third")
         self.bucket.head = self.ctx._checkout.resolve("HEAD")
@@ -193,6 +216,7 @@ class CommittedToGit(TempDirCase):
         self.bucket.name, self.bucket.tags = "v2026.39", []
         self.bucket.range_start, self.bucket.head = "", self.sha
         self.bucket.stable_tags, self.bucket.is_hotfix, self.bucket.last_stable = [], False, ""
+        self.bucket.cut, self.bucket.previous_head = "", ""
 
     def test_the_file_and_its_hash_land_in_one_commit(self):
         with mock.patch.object(release, "generate", return_value=NOTES):
@@ -207,3 +231,20 @@ class CommittedToGit(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_review_digest_keeps_fix_rows_and_marks_the_amended_pr():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "a", "pr_number": 3862, "summary": "sizing", "fixes_prs": []},
+        {"sha": "b", "pr_number": 3986, "summary": "never refuse", "fixes_prs": [3862],
+         "evidence": {"api_compatibility": "No breaking change: always a number again."}},
+    ]
+    kept = release.fold_fixes(rows, keep_fixes=True)
+    assert [r["sha"] for r in kept] == ["a", "b"]
+    assert kept[0]["amended_by"] == [{
+        "pr_number": 3986, "summary": "never refuse",
+        "api_compatibility": "No breaking change: always a number again.",
+    }]
+    assert [r["sha"] for r in release.fold_fixes(rows)] == ["a"]

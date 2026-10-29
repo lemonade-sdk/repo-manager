@@ -32,6 +32,9 @@ The JSON must use this shape:
       "reason": "Exceptional contribution beyond routine review."
     }
   ],
+  "fixes_prs": [
+    123
+  ],
   "verdict": "Clean",
   "verdict_reason": "One sentence explaining the core reason for the grade.",
   "maintainer_todos": [
@@ -51,7 +54,7 @@ The JSON must use this shape:
 }
 ```
 
-Use an empty array for `shout_outs` or `maintainer_todos` when none apply.
+Use an empty array for `shout_outs`, `fixes_prs` or `maintainer_todos` when none apply.
 
 ## Required Inputs
 
@@ -107,6 +110,12 @@ Judge the commit against these criteria.
   "adds gfx103X, gfx110X and gfx120X support", not "expands supported GPU families". The
   release notes and the Discord post are written from this sentence and cannot recover what it
   leaves out.
+- Put in `fixes_prs` the number of every earlier PR whose defect or regression this commit
+  fixes, or whose change it reverts or rolls back: "Fixes a regression from the context sizing
+  rework (#3862)" gives `[3862]`, and a revert of #3873 gives `[3873]`. Read the PR body and
+  the commit message for it. A PR that is merely related, or that this one builds on, does not
+  belong here; the release pipeline folds each fix into the PR it repairs, so a wrong entry
+  hides a real story.
 - Identify the PR merge date as an ISO 8601 timestamp and put it in `merge_date`. If the associated PR is not merged or no merge date is available, use an empty string.
 - Identify the author's GitHub handle.
 - Identify the GitHub handles of people who substantively reviewed the PR. Put them in the `reviewers` JSON array even if they do not meet the high bar for a shout out. Do not include the PR author as a reviewer unless they also reviewed someone else's substantial changes on the PR.
@@ -160,6 +169,22 @@ the project: their installed server, their config, their scripts, the apps they 
 If finding a victim means imagining someone who depended on an undocumented detail, a bug, or
 an accident of the old implementation, the change is not breaking. Describe it as the behavior
 change it is.
+
+Most behavior changes are not breaking, and listing one as breaking buries the real ones.
+These are not breaking:
+
+- A request that already failed now fails with a more accurate status code or error message
+  (a 500 that becomes a 400, a 404 that becomes a 405, one consistent "missing field" error).
+  It failed before and it fails now.
+- Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A field that now carries a more useful value of the same type, such as a product name where
+  a raw code was.
+- A requirement that always existed and is now documented or enforced with a clearer error.
+- A change to maintainer tooling (release scripts, CI, build helpers) that no user runs.
+
+A removed backend, flag, model id or config key that someone's setup names, a changed default
+that changes what an existing setup does, a field whose type changes, and a new download or
+migration on first run after upgrading are breaking.
 
 Say plainly whether this commit breaks an existing setup. When it does, lead with what the
 person upgrading meets: what used to work, what happens now, what they must change. The

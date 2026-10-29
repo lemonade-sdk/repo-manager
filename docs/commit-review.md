@@ -66,9 +66,13 @@ not have to guess and validates the rest:
 | `bucket`, `branch`, `range_start` | the branch being reviewed |
 | `summary`, `verdict`, `verdict_reason` | the skill |
 | `maintainer_todos`, `shout_outs`, `reviewers` | the skill |
+| `fixes_prs` | the skill: the earlier PRs this commit fixes, reverts, or rolls back, normalized to sorted ints |
 | `evidence` | the skill: review, post-approval commits, tests, manual release testing, API compatibility, security, documentation |
 
 `verdict` is `Clean`, `Needs Attention`, or `Blocker`.
+
+`fixes_prs` is what lets a release fold a fix into the PR it repairs when both land in the
+same range; see [release artifacts](release.md#telling-the-range-from-the-last-release).
 
 GitHub is the authority on which PR a commit came from and who wrote it. The model is asked
 so it can reason about the PR discussion, but its answer is not what gets stored.

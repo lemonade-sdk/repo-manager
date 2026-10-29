@@ -57,7 +57,9 @@ worked an item and would invite a reader to ship on it.
 - `breaking_changes` is the canonical list, compiled from what the commit reviews report as
   breaking: a change that stops an existing setup working on upgrade. `notes.md` and `announcement.md` are reconciled
   against it — one bullet per entry, enforced — so a breaking change cannot reach users
-  unannounced. Documenting one is therefore never a to-do.
+  unannounced. Documenting one is therefore never a to-do. The list is judged against the
+  range start, the release people upgrade from, and rebuilt from the digest on every run: a
+  break that a later commit in the same range undoes is not on it.
 
 **Tester reports.** Open issues in the tracked repo carrying the `candidate` label, filed
 since the bucket's branch was cut, are folded into the prompt. No commit review wrote these,
@@ -70,6 +72,28 @@ reverted is the release admin's call and they make it from what the tester finds
 whether to revert" gives the tester nothing to do and the admin nothing new to decide with.
 Because these are the skill's own prose rather than a commit review's, they are held to the
 same test every to-do is — see [commit reviews](commit-review.md#who-the-to-dos-are-for).
+
+## Telling the range from the last release
+
+The notes and the post describe what someone upgrading from the range start gets, not what
+each commit did on its way there. Git and the commit reviews settle two facts per commit
+before any model reads the digest:
+
+- **`fixes_prs`.** The PRs a commit repairs or reverts, as its commit review recorded them
+  (plus the PR a `Revert "..."` subject names). When the repaired PR is in the same range,
+  the fix is folded into that PR's entry as `amended_by` and has no entry of its own: a fix
+  to something this release introduced is not news to anyone upgrading.
+- **`candidate_fix`.** A commit that reached the release branch after it was cut from `main`.
+  It repairs the candidate, and is a story only when it fixes something the last release had.
+
+Two more inputs keep a candidate's artifacts close to the one before and to the admin's taste:
+
+- **The previous headline.** `notes.md` is written with the previous candidate's headline as
+  the baseline, along with the commits that are new since that candidate. Stories and their
+  order hold unless a new commit outranks one.
+- **Edit diffs.** For the two most recent buckets where the release admin edited a file, the
+  draft repo-manager wrote is recovered from the store's git history (its hash is in
+  `generated.json`) and handed to the skill as a diff against what was published.
 
 ## notes.md
 
@@ -85,8 +109,9 @@ stories and their order are decided once, here.
 
 The Discord post, in the maintainer's voice, titled with the version the candidate build
 carries (`## Lemonade v2026.39.1`) as lemonade's `tools/version.py` numbers it. The CLI checks only what it can — that the post
-exists, stays under 45 non-blank lines, pings the right audience, and covers every canonical
-breaking change. Voice and story shaping are the skill's job.
+exists, stays under 45 non-blank lines, pings the right audience, covers every canonical
+breaking change, and names only `@handles` that authored or were credited for a change in the
+release. Voice and story shaping are the skill's job.
 
 **Hotfixes.** When the bucket already has a stable tag, the post covers only the commits
 since that tag and opens with `@release` rather than `@everyone`. The people reading it are
