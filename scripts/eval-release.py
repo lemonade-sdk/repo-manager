@@ -27,7 +27,18 @@ import sys
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+def package_root():
+    """`--package DIR` scores another checkout of repo-manager, such as a released tag, with
+    this harness. It has to be read before the imports below."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--package" and i + 1 < len(sys.argv):
+            return Path(sys.argv[i + 1]).resolve()
+        if arg.startswith("--package="):
+            return Path(arg.split("=", 1)[1]).resolve()
+    return Path(__file__).resolve().parents[1]
+
+
+sys.path.insert(0, str(package_root()))
 
 from repo_manager import commits, release, store  # noqa: E402
 from repo_manager.context import Context  # noqa: E402
@@ -71,6 +82,8 @@ def run_bucket(args, name, spec, out):
     print(f"{name}: {bucket.summary()}", flush=True)
     stale = [sha for sha in bucket.commits()
              if "fixes_prs" not in (ctx.store.read_json(store.commit_key(sha)) or {"fixes_prs": []})]
+    if not hasattr(release, "fold_fixes"):
+        stale = []
     if stale and args.refresh_reviews:
         for sha in stale:
             commits.review(ctx, sha, name, branch=bucket.branch, range_start=bucket.range_start, force=True)
@@ -122,6 +135,7 @@ def main():
     parser.add_argument("--state", default="", help="A clone of the state repository to copy from.")
     parser.add_argument("--checkout", default="", help="A clone of the tracked repository.")
     parser.add_argument("--repo", default="lemonade-sdk/lemonade")
+    parser.add_argument("--package", default="", help="The repo-manager checkout to run (default: this one).")
     parser.add_argument("--score-only", action="store_true", help="Score existing artifacts in --out without running")
     parser.add_argument("--refresh-reviews", action="store_true",
                         help="Re-review, in the copy, every commit whose review predates fixes_prs.")

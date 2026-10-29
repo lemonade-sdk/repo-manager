@@ -170,6 +170,22 @@ If finding a victim means imagining someone who depended on an undocumented deta
 an accident of the old implementation, the change is not breaking. Describe it as the behavior
 change it is.
 
+Most behavior changes are not breaking, and listing one as breaking buries the real ones.
+These are not breaking:
+
+- A request that already failed now fails with a more accurate status code or error message
+  (a 500 that becomes a 400, a 404 that becomes a 405, one consistent "missing field" error).
+  It failed before and it fails now.
+- Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A field that now carries a more useful value of the same type, such as a product name where
+  a raw code was.
+- A requirement that always existed and is now documented or enforced with a clearer error.
+- A change to maintainer tooling (release scripts, CI, build helpers) that no user runs.
+
+A removed backend, flag, model id or config key that someone's setup names, a changed default
+that changes what an existing setup does, a field whose type changes, and a new download or
+migration on first run after upgrading are breaking.
+
 Say plainly whether this commit breaks an existing setup. When it does, lead with what the
 person upgrading meets: what used to work, what happens now, what they must change. The
 release notes and the Discord post are built from this, so an entry about which module moved

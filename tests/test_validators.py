@@ -639,3 +639,44 @@ class OnlyRealHandles(unittest.TestCase):
         rows = [digest_row("aaaaaaa", 1, "x", author="@a", shout_outs=["@B"])]
         self.assertEqual(release.credited_handles(rows), {"a", "b"})
 
+
+
+def test_style_references_skip_drafts_nobody_edited(tmp_path):
+    from repo_manager import release, store as store_mod
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.store = store_mod.Store(tmp_path)
+    for name, edited in (("v2026.41", True), ("v2026.42", False), ("v2026.43", True)):
+        release.write_bucket_file(ctx, name, "announcement.md", f"draft {name}\n")
+        if edited:
+            (tmp_path / "releases" / name / "announcement.md").write_text(f"edited {name}\n")
+    names = ["v2026.41", "v2026.42", "v2026.43", "v2026.30"]
+    assert release.human_edited_first(ctx, names, "announcement.md", 3) == ["v2026.43", "v2026.41", "v2026.30"]
+
+
+def test_review_rejects_breaks_the_review_itself_calls_internal():
+    from repo_manager import release
+
+    data = {
+        "breaking_changes": ["Removed --no-sign from tools/release.py. This is an internal maintainer CLI change."],
+        "evidence": {k: "x" for k in release.EVIDENCE_KEYS},
+    }
+    data["evidence"]["breaking_changes"] = "No user-facing breaking changes in this release."
+    errors = release.review_errors(data, [])
+    assert any("says there are no breaking changes" in e for e in errors)
+    assert any("internal or for maintainers" in e for e in errors)
+
+    data["breaking_changes"] = ["Removed the --foo flag; pass --bar instead."]
+    data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
+    assert not [e for e in release.review_errors(data, []) if "breaking" in e]
+
+
+def test_announcement_rejects_emoji_headings():
+    from repo_manager import release
+
+    post = "## Lemonade v2026.42.1\n\n@everyone hi\n\n### 🎨 TheNoise on Windows\n\nText.\n"
+    assert any("no emoji" in e for e in release.announcement_errors(post, [], False))
+    assert not any("no emoji" in e for e in release.announcement_errors(post.replace("🎨 ", ""), [], False))

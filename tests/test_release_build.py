@@ -231,3 +231,20 @@ class CommittedToGit(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_review_digest_keeps_fix_rows_and_marks_the_amended_pr():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "a", "pr_number": 3862, "summary": "sizing", "fixes_prs": []},
+        {"sha": "b", "pr_number": 3986, "summary": "never refuse", "fixes_prs": [3862],
+         "evidence": {"api_compatibility": "No breaking change: always a number again."}},
+    ]
+    kept = release.fold_fixes(rows, keep_fixes=True)
+    assert [r["sha"] for r in kept] == ["a", "b"]
+    assert kept[0]["amended_by"] == [{
+        "pr_number": 3986, "summary": "never refuse",
+        "api_compatibility": "No breaking change: always a number again.",
+    }]
+    assert [r["sha"] for r in release.fold_fixes(rows)] == ["a"]

@@ -43,6 +43,13 @@ class Store:
 
     # --- git ---------------------------------------------------------------------------
 
+    def unshallow(self):
+        if not self.has_origin or getattr(self, "_unshallowed", False):
+            return
+        self._unshallowed = True
+        if (self._git("rev-parse", "--is-shallow-repository").stdout or "").strip() == "true":
+            self._git("fetch", "--unshallow", "--quiet", "origin")
+
     def _git(self, *args):
         return subprocess.run(
             ["git", "-C", str(self.root), *args], text=True, capture_output=True, check=False
@@ -250,12 +257,14 @@ def generated_draft(store, bucket, filename, depth=30):
 
     The ledger keeps only the draft's hash; the draft itself is in the store's git history,
     so this walks that file's recent commits for the version whose hash matches. A store that
-    is not a git checkout has no history to walk.
+    is not a git checkout has no history to walk. The workflows clone the store with depth 1,
+    so a shallow clone fetches its history first.
     """
     recorded = generated_hashes(store, bucket).get(filename)
     key = f"releases/{bucket}/{filename}"
     if not store.is_git or not recorded:
         return ""
+    store.unshallow()
     log = store._git("log", f"-n{depth}", "--format=%H", "--", key)
     for sha in (log.stdout or "").split():
         shown = store._git("show", f"{sha}:{key}")

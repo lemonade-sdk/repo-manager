@@ -81,8 +81,8 @@ tester should get to.
 
 ## Breaking changes
 
-**Documenting a breaking change is never a to-do.** Capture every breaking change the commit
-reviews report in `breaking_changes` — a change that stops an existing setup working on
+**Documenting a breaking change is never a to-do.** Capture in `breaking_changes` every breaking
+change the commit reviews report that holds up below — a change that stops an existing setup working on
 upgrade. The release-notes and release-announcement steps read that list and document each one under an enforced coverage check, so "write the migration note for X" is
 already done by the pipeline. The only breaking change that also earns a *priority* is one that
 was unintended — a regression to fix or revert before shipping, which is P0 like any other
@@ -94,6 +94,23 @@ one change: a commit review that reported a break describes its own commit, and 
 or revert in the same release can take that break back out. List only what an upgrade from
 the last release to this head still meets. The list is rebuilt from the digest on every run,
 never carried over from an earlier one.
+
+The commit reviews over-report, so check each one they flag against this test before it goes
+on the list. Most behavior changes are not breaking, and listing one as breaking buries the real ones.
+These are not breaking:
+
+- A request that already failed now fails with a more accurate status code or error message
+  (a 500 that becomes a 400, a 404 that becomes a 405, one consistent "missing field" error).
+  It failed before and it fails now.
+- Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A field that now carries a more useful value of the same type, such as a product name where
+  a raw code was.
+- A requirement that always existed and is now documented or enforced with a clearer error.
+- A change to maintainer tooling (release scripts, CI, build helpers) that no user runs.
+
+A removed backend, flag, model id or config key that someone's setup names, a changed default
+that changes what an existing setup does, a field whose type changes, and a new download or
+migration on first run after upgrading are breaking.
 
 ## Platforms
 

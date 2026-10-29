@@ -1,4 +1,76 @@
 {
+  "v2026.40": {
+    "branch": "release-v2026.40",
+    "head": "29b21e7307e8d49d3dec5dfa80ee179339b16a49",
+    "checks": [
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "(?i)## Breaking Changes[\\s\\S]*marketing name",
+        "why": "Reporting the GPU's marketing name is an improvement, not a break; the admin dropped it."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "## Breaking Changes[\\s\\S]*user_models\\.json",
+        "why": "A restart requirement that was always there is not a break; the admin dropped it."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "(?i)## Breaking Changes[\\s\\S]*upscal",
+        "why": "Routing upscaling by model label broke nobody's setup; the admin dropped it."
+      },
+      {
+        "file": "notes.md",
+        "expect": "present",
+        "pattern": "(?i)openmoss[^\\n]*rocm|rocm[^\\n]*openmoss",
+        "why": "The OpenMOSS ROCm removal is the release's real break."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "(?i)### Breaking Changes(?:(?!\\n### )[\\s\\S])*marketing name",
+        "why": "The same false break, in the post."
+      }
+    ]
+  },
+  "v2026.41": {
+    "branch": "release-v2026.41",
+    "head": "16bcf639ca63aead9dcc34d9c382389a6c4aee25",
+    "checks": [
+      {
+        "file": "notes.md",
+        "expect": "first_headline",
+        "pattern": "(?i)ROCm\\s*10",
+        "why": "ROCm 10 across every ROCm backend led the published notes; the draft buried it."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "--no-sign",
+        "why": "The release-tool flag change is maintainer tooling, not a break for users."
+      },
+      {
+        "file": "notes.md",
+        "expect": "present",
+        "pattern": "(?i)## Breaking Changes[\\s\\S]*ROCm\\s*10",
+        "why": "Moving to ROCm 10 downloads a new runtime on first load; the admin listed it as a break."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "absent",
+        "pattern": "--no-sign",
+        "why": "The same tooling change, in the post."
+      },
+      {
+        "file": "announcement.md",
+        "expect": "present",
+        "pattern": "(?i)ROCm\\s*10",
+        "why": "ROCm 10 led the published post."
+      }
+    ]
+  },
   "v2026.42": {
     "branch": "release-v2026.42",
     "head": "2aedebc4858642b9dd51e21bdb2791e62b03408b",
@@ -44,6 +116,12 @@
         "expect": "absent",
         "pattern": "(?i)physical RAM|RAM[- ]in[- ]use",
         "why": "#3986 repairs a regression introduced in this same release, so nobody upgrading met it."
+      },
+      {
+        "file": "notes.md",
+        "expect": "absent",
+        "pattern": "(?i)## Breaking Changes[\\s\\S]*(4096|fallback|ConfigurationException|AUTO_CTX_NO_CAPACITY)",
+        "why": "#3986 restored loading where #3862 threw, so the removed fallback never reached anyone upgrading."
       },
       {
         "file": "announcement.md",
