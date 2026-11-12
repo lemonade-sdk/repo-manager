@@ -10,9 +10,15 @@ are usually written first and handed to you: their headline bullets are the stor
 order. Tell those same stories here, in this voice.
 
 The input is the release bucket, the range it covers, the release review's canonical
-breaking-change list, up to three prior posts as a voice reference, and a per-commit digest
-of the stored commit reviews. The digest is the only source of the facts. Use the references
-for voice only: never copy their wording, their facts, or their closing line.
+breaking-change list, up to three prior posts as a voice reference, diffs of how the release
+admin rewrote recent drafts, and a per-commit digest of the stored commit reviews. The digest
+is the only source of the facts. Use the references and the diffs for voice only: never copy
+their facts.
+
+An entry's `amended_by` lists later fixes in this same release; tell the entry as it ships
+with them, and never announce a fix to something this release introduced. An entry marked
+`candidate_fix` repaired the candidate after the branch was cut, and earns a mention only
+when it fixes something users of the last release have.
 
 ## The Voice
 
@@ -88,7 +94,8 @@ Shape the post like the references, scaled to the release:
   or four sections is typical; one is fine for a small release. Never pad.
 - A `### Additional Improvements` section of compact bullets for everything else worth
   mentioning, one item per bullet with its people named ("Faster model downloads on Windows
-  by @handle."). Changes share a bullet only when they share a theme a reader would name — all
+  by @handle."). A bullet is one short clause about what changed for the reader; how it was
+  done stays in the commit. Changes share a bullet only when they share a theme a reader would name — all
   the CI work, several fixes for Linux ("A trio of fixes for Linux by @handle, one for macOS
   by @handle...") — never to save lines: routing, a download source and CI strung together
   with commas is three bullets pretending to be one. Small fixes with nothing else in common
@@ -96,8 +103,8 @@ Shape the post like the references, scaled to the release:
   fixes" with the names dropped cannot. Infrastructure work earns its bullet by stating the
   benefit ("CI system overhaul by myself and @handle to make contributing more fun"); changes
   with no audience at all are simply omitted.
-- A closing line that links the full release notes, worded differently from every prior post,
-  optionally inviting feedback or teasing a screenshot. Link to the repository's releases
+- A closing line that links the full release notes and invites feedback, in the admin's own
+  words: the prior posts and the edit diffs show the wording they settle on. Link to the repository's releases
   page (`https://github.com/lemonade-sdk/lemonade/releases`). Never build a link from the
   bucket name: `v2026.39` is the bucket, the tag will be `v2026.39.<number>`, and nobody has
   cut it yet when you are writing, so `releases/tag/v2026.39` is a link to nothing.
@@ -134,10 +141,10 @@ section, and never invent one.
 ## Validation
 
 The CLI checks only what it can: the post exists, it is under 45 non-blank lines, it pings
-the right audience, and its Breaking Changes bullets match the canonical list. Its voice,
-story shaping, and freedom from filler, canned phrases, PR numbers, and reused wording are
-yours to get right by following this skill. Hold yourself to that bar as if a checker were
-watching; nothing else will.
+the right audience, its Breaking Changes bullets match the canonical list, and every `@handle`
+belongs to someone the commit summaries name. Its voice, story shaping, and freedom from
+filler, canned phrases, PR numbers, and reused wording are yours to get right by following
+this skill. Hold yourself to that bar as if a checker were watching; nothing else will.
 
 Writing the file to the caller-provided path is mandatory before finishing; the CLI reads it
 after the skill exits.

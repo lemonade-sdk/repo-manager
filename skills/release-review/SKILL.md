@@ -81,12 +81,42 @@ tester should get to.
 
 ## Breaking changes
 
-**Documenting a breaking change is never a to-do.** Capture every breaking change the commit
-reviews report in `breaking_changes` — a change that stops an existing setup working on
+**Documenting a breaking change is never a to-do.** Capture in `break_rulings` every breaking
+change the commit reviews report that holds up below — a change that stops an existing setup working on
 upgrade. The release-notes and release-announcement steps read that list and document each one under an enforced coverage check, so "write the migration note for X" is
 already done by the pipeline. The only breaking change that also earns a *priority* is one that
 was unintended — a regression to fix or revert before shipping, which is P0 like any other
-regression. A deliberate break, however large, goes in `breaking_changes` and is not work.
+regression. A deliberate break, however large, goes in `break_rulings` and is not work.
+
+A breaking change is judged on what the whole range ships, measured from the last release the
+caller names. When a digest row's `fixes_prs` names another PR in the digest, the two ship as
+one change: a commit review that reported a break describes its own commit, and a later fix
+or revert in the same release can take that break back out. List only what an upgrade from
+the last release to this head still meets. The list is rebuilt from the digest on every run,
+never carried over from an earlier one.
+
+Check each change the commit reviews flag against this test before it goes on the list. Most
+behavior changes are not breaking, and listing one as breaking buries the real ones.
+These are not breaking:
+
+- A field that can hold fewer values than before, such as one that can no longer be null.
+  Every client that handled the old values handles the new ones.
+- Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A change to what happens after the client has gone, such as work cancelled once it
+  disconnects: nobody is left to meet it.
+- A change to something no release has shipped: a key, flag or route that this PR's own
+  earlier commits, or this release, added and then changed or removed. Judge against the last
+  release, never against an intermediate commit; nobody upgrading had it.
+- A field that now carries a more useful value of the same type, such as a product name where
+  a raw code was.
+- A requirement that always existed and is now documented or enforced with a clearer error.
+- A change to maintainer tooling (release scripts, CI, build helpers) that no user runs.
+
+A removed backend, flag, model id or config key that someone's setup names, a changed default
+that changes what an existing setup does, a field that now holds values its clients never had
+to handle, a status code or error message a client may match on that changes, and anything
+new a setup needs on first run after upgrading — a download, a migration, a runtime such as
+the container engine a backend now runs in — are breaking.
 
 ## Platforms
 
@@ -111,9 +141,9 @@ CLI reads that file after the skill exits. Use exactly this shape:
   "extra_items": [
     {"priority": "P0", "platforms": ["Snap"], "text": "Tester report #4120: the Snap build fails to start on 24.04. Decide fix later, hotfix, or revert."}
   ],
-  "breaking_changes": [
-    "Removed the --foo flag; pass --bar instead.",
-    "Renamed the baz model id to baz-v2; old id no longer resolves."
+  "break_rulings": [
+    {"id": "a1b2c3d", "breaks": ["Removed the --foo flag; pass --bar instead."], "why": "Setups that pass --foo fail on upgrade."},
+    {"id": "e4f5678", "breaks": [], "why": "The key was added and removed within this release; nobody upgrading has it."}
   ],
   "evidence": {
     "coverage": "What range was reviewed and anything not covered.",
@@ -131,9 +161,12 @@ CLI reads that file after the skill exits. Use exactly this shape:
   discarded.
 - `extra_items` is only for work no commit review wrote, which in practice means `candidate`
   issues. Leave it `[]` when there are none. Never restate a digest to-do here.
-- `breaking_changes` is the canonical, deduplicated list of every breaking change the commit
-  reviews report shipping in this release — one entry per distinct change, each a single
-  sentence naming the change and its migration ("Removed X; use Y instead."). **Write each entry as the person who
+- `break_rulings` needs one entry for every id the caller lists as a possible breaking change,
+  and may add a row whose evidence shows a break its commit review missed. `breaks` holds each
+  distinct break that row still ships — one sentence each, naming the change and its migration
+  ("Removed X; use Y instead.") — and is `[]` when none survives the definitions above; `why`
+  says why in one sentence. The caller builds the canonical `breaking_changes` list from these,
+  so do not write that list yourself. **Write each break as the person who
   upgrades meets it**: what used to work, what happens now, what they must change. The release
   page and the Discord post publish this list word for word to people who have never seen this
   repository, so how it was done — a module that moved, a build variable renamed — belongs in
@@ -142,11 +175,11 @@ CLI reads that file after the skill exits. Use exactly this shape:
   instead of 11.9.0; pin the new format if you pin versions." passes. "CMake version extraction
   moved to a Python-based git state derivation system" is true and tells them nothing. Watch
   the parentheses in particular: a sentence that states the impact and then brackets the file
-  or symbol it happened in has written for both readers and served neither. Cut the bracket. This list is the source of truth: the
-  release-notes and release-announcement steps read it and must surface every entry, so it must
-  be complete and must not merge two real breaking changes into one entry or list a
-  non-breaking change. Use `[]` when there are none. It must agree with
-  `evidence.breaking_changes`: the prose summarizes the same set this list enumerates.
+  or symbol it happened in has written for both readers and served neither. Cut the bracket. The
+  list built from your rulings is the source of truth: the release-notes and
+  release-announcement steps read it and must surface every entry, so never merge two real
+  breaking changes into one sentence or keep a non-breaking change. `evidence.breaking_changes`
+  summarizes the same set.
 - Every `platforms` entry is one of the platforms the caller listed, or `"all"`.
 - `evidence` values are one or two sentences of synthesis each — no PR-by-PR lists, no
   statistics, no commit inventories, no shout-outs.

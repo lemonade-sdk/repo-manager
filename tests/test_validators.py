@@ -581,3 +581,137 @@ class PlatformShorthand(unittest.TestCase):
             {"id": "c0mmit0-1", "priority": "P1", "platforms": list(release.PLATFORMS[:-1])}]},
             todo_index("Check the version."))
         self.assertEqual(data["checklist"][0]["platforms"], list(release.PLATFORMS[:-1]))
+
+
+def digest_row(sha, pr, summary, fixes=(), author="@someone", **extra):
+    row = {"sha": sha, "pr_number": pr, "author": author, "summary": summary,
+           "shout_outs": [], "evidence": {}, "fixes_prs": list(fixes)}
+    row.update(extra)
+    return row
+
+
+class FixesFoldIntoWhatTheyRepair(unittest.TestCase):
+    """A fix for a PR in the same release is how that PR ships, not a story of its own."""
+
+    def test_an_in_range_fix_rides_on_the_pr_it_repairs(self):
+        rows = [digest_row("aaaaaaa", 3862, "Reworks context sizing."),
+                digest_row("bbbbbbb", 3986, "Never refuses a load.", fixes=[3862])]
+        entries = release.announcement_digest(rows)
+        self.assertEqual([e["id"] for e in entries], ["aaaaaaa"])
+        self.assertEqual(entries[0]["amended_by"], ["Never refuses a load."])
+
+    def test_a_fix_of_a_fix_lands_on_the_original(self):
+        rows = [digest_row("aaaaaaa", 1, "Feature."),
+                digest_row("bbbbbbb", 2, "First fix.", fixes=[1]),
+                digest_row("ccccccc", 3, "Second fix.", fixes=[2])]
+        entries = release.announcement_digest(rows)
+        self.assertEqual([e["id"] for e in entries], ["aaaaaaa"])
+        self.assertEqual(entries[0]["amended_by"], ["First fix.", "Second fix."])
+
+    def test_a_fix_for_something_users_already_have_stays(self):
+        rows = [digest_row("aaaaaaa", 3986, "Fixes a bug from last release.", fixes=[3500])]
+        self.assertEqual([e["id"] for e in release.announcement_digest(rows)], ["aaaaaaa"])
+
+    def test_folding_does_not_touch_the_callers_rows(self):
+        rows = [digest_row("aaaaaaa", 1, "Feature."), digest_row("bbbbbbb", 2, "Fix.", fixes=[1])]
+        release.announcement_digest(rows)
+        self.assertNotIn("amended_by", rows[0])
+
+    def test_a_revert_subject_names_what_it_repairs(self):
+        self.assertEqual(release.fixes_of({"subject": 'Revert "Bump FLM to v1.0.9 (#3873)"'}), [3873])
+
+    def test_fixes_prs_is_normalized_to_ints(self):
+        self.assertEqual(commits.normalize_pr_numbers(["#3862", 3862, "x", 0, " 12 "]), [12, 3862])
+
+
+class OnlyRealHandles(unittest.TestCase):
+    ALLOWED = {"fl0rianr", "sawansri"}
+
+    def test_a_misspelled_handle_is_caught(self):
+        errors = release.handle_errors("Thanks `@fl0hrnr` for the tuning.", self.ALLOWED)
+        self.assertTrue(any("@fl0hrnr" in e for e in errors))
+
+    def test_known_handles_pings_and_emails_pass(self):
+        text = "@everyone `@Sawansri` and @fl0rianr did it. Mail me at me@example.com.\n@release"
+        self.assertEqual(release.handle_errors(text, self.ALLOWED), [])
+
+    def test_credited_handles_include_shout_outs(self):
+        rows = [digest_row("aaaaaaa", 1, "x", author="@a", shout_outs=["@B"])]
+        self.assertEqual(release.credited_handles(rows), {"a", "b"})
+
+
+
+def test_style_references_skip_drafts_nobody_edited(tmp_path):
+    from repo_manager import release, store as store_mod
+
+    class Ctx:
+        pass
+
+    ctx = Ctx()
+    ctx.store = store_mod.Store(tmp_path)
+    for name, edited in (("v2026.41", True), ("v2026.42", False), ("v2026.43", True)):
+        release.write_bucket_file(ctx, name, "announcement.md", f"draft {name}\n")
+        if edited:
+            (tmp_path / "releases" / name / "announcement.md").write_text(f"edited {name}\n")
+    names = ["v2026.41", "v2026.42", "v2026.43", "v2026.30"]
+    assert release.human_edited_first(ctx, names, "announcement.md", 3) == ["v2026.43", "v2026.41", "v2026.30"]
+
+
+def test_review_rejects_breaks_the_review_itself_calls_internal():
+    from repo_manager import release
+
+    data = {
+        "breaking_changes": ["Removed --no-sign from tools/release.py. This is an internal maintainer CLI change."],
+        "evidence": {k: "x" for k in release.EVIDENCE_KEYS},
+    }
+    data["evidence"]["breaking_changes"] = "No user-facing breaking changes in this release."
+    errors = release.review_errors(data, [])
+    assert any("says there are no breaking changes" in e for e in errors)
+    assert any("says no user meets it" in e for e in errors)
+
+    data["breaking_changes"] = [
+        "resolved_ctx_size is no longer nullable (but null was never observable in practice)."
+    ]
+    data["evidence"]["breaking_changes"] = "One breaking change: resolved_ctx_size."
+    assert any("says no user meets it" in e for e in release.review_errors(data, []))
+
+    for narrowed in (
+        "resolved_ctx_size in GET /v1/models changed from ['integer', 'null'] to 'integer'.",
+        "resolved_ctx_size on GET /v1/models changed from nullable to always integer.",
+        "The field can no longer be null.",
+    ):
+        data["breaking_changes"] = [narrowed]
+        assert any("fewer values" in e for e in release.review_errors(data, [])), narrowed
+
+    data["breaking_changes"] = ["Removed the --foo flag; pass --bar instead."]
+    data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
+    assert not [e for e in release.review_errors(data, []) if "breaking" in e]
+    data["breaking_changes"] = ["`ctx_size` changed from an integer to a string."]
+    assert not [e for e in release.review_errors(data, []) if "fewer values" in e]
+
+
+def test_review_builds_breaking_changes_from_a_ruling_per_candidate():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "aaaaaaa", "evidence": {"api_compatibility": "Breaking change: --foo is removed."}},
+        {"sha": "bbbbbbb", "evidence": {"api_compatibility": "No breaking changes."}},
+        {"sha": "ccccccc", "evidence": {"api_compatibility": "This breaks setups that set enable_x."}},
+    ]
+    candidates = release.break_candidates(rows)
+    assert list(candidates) == ["aaaaaaa", "ccccccc"]
+
+    data = {
+        "break_rulings": [
+            {"id": "aaaaaaa", "breaks": ["Removed --foo; pass --bar instead."], "why": "Setups pass it."},
+        ],
+        "evidence": {k: "x" for k in release.EVIDENCE_KEYS},
+    }
+    data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
+    data = release.normalize_review(data, {})
+    assert data["breaking_changes"] == ["Removed --foo; pass --bar instead."]
+    errors = release.review_errors(data, [], {}, {}, candidates)
+    assert any("ccccccc" in e and "break_rulings" in e for e in errors)
+
+    data["break_rulings"].append({"id": "ccccccc", "breaks": [], "why": "Never shipped."})
+    assert not [e for e in release.review_errors(data, [], {}, {}, candidates) if "break_rulings" in e]

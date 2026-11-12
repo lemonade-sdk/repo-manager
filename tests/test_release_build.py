@@ -34,6 +34,9 @@ class Args:
 class BuildingABucket(TempDirCase):
     def setUp(self):
         super().setUp()
+        asked = mock.patch.object(release.github, "requests_answered", return_value={})
+        asked.start()
+        self.addCleanup(asked.stop)
         self.source = init_repo(self.tmp / "source")
         self.first = commit_file(self.source, "a.txt", "one\n", "first")
         git(self.source, "tag", "v11.9.0")
@@ -59,6 +62,7 @@ class BuildingABucket(TempDirCase):
             bucket.range_start = "v11.9.0"
             bucket.head = self.second
             bucket.stable_tags, bucket.is_hotfix, bucket.last_stable = [], False, ""
+            bucket.cut, bucket.previous_head = "", ""
         return bucket
 
     def build_all(self, review=None, notes=NOTES, post=POST, force=False):
@@ -149,6 +153,28 @@ class BuildingABucket(TempDirCase):
         post = self.state.read_text(store.announcement_key("v2026.39"))
         self.assertEqual(post.count(release.AI_WARNING), 1)
 
+    def test_the_previous_candidates_headline_is_the_notes_baseline(self):
+        seen = {}
+
+        def capture(skill, outputs, build_prompt, validate, **kwargs):
+            seen[skill] = build_prompt({name: self.tmp / f"x{suffix}" for name, suffix in outputs.items()}, "")
+            return NOTES
+
+        previous = release.annotate_notes("## Headline\n\n- pi gains MCP mode.\n- B.\n- C.\n\n## Breaking Changes\n")
+        self.state.write_text(store.notes_key("v2026.39"), previous)
+        store.record_generated(self.state, "v2026.39", "notes.md", previous)
+        with mock.patch.object(release, "generate", side_effect=capture):
+            release.build_notes(self.ctx, self.bucket)
+        self.assertIn("previous candidate", seen["release-notes"])
+        self.assertIn("- pi gains MCP mode.", seen["release-notes"])
+        self.assertNotIn(release.AI_WARNING, seen["release-notes"])
+
+    def test_last_runs_breaking_changes_are_not_carried_forward(self):
+        self.state.write_json(store.review_key("v2026.39"), {
+            "checklist": [], "breaking_changes": ["resolved_ctx_size can now be null."],
+        })
+        self.assertNotIn("resolved_ctx_size", release.prior_review_block(self.ctx, self.bucket))
+
     def test_a_missing_commit_review_is_reported_as_a_coverage_gap(self):
         commit_file(self.source, "c.txt", "three\n", "third")
         self.bucket.head = self.ctx._checkout.resolve("HEAD")
@@ -193,6 +219,7 @@ class CommittedToGit(TempDirCase):
         self.bucket.name, self.bucket.tags = "v2026.39", []
         self.bucket.range_start, self.bucket.head = "", self.sha
         self.bucket.stable_tags, self.bucket.is_hotfix, self.bucket.last_stable = [], False, ""
+        self.bucket.cut, self.bucket.previous_head = "", ""
 
     def test_the_file_and_its_hash_land_in_one_commit(self):
         with mock.patch.object(release, "generate", return_value=NOTES):
@@ -207,3 +234,71 @@ class CommittedToGit(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_review_digest_keeps_fix_rows_and_marks_the_amended_pr():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "a", "pr_number": 3862, "summary": "sizing", "fixes_prs": []},
+        {"sha": "b", "pr_number": 3986, "summary": "never refuse", "fixes_prs": [3862],
+         "evidence": {"api_compatibility": "No breaking change: always a number again."}},
+    ]
+    kept = release.fold_fixes(rows, keep_fixes=True)
+    assert [r["sha"] for r in kept] == ["a", "b"]
+    assert kept[0]["amended_by"] == [{
+        "pr_number": 3986, "summary": "never refuse",
+        "api_compatibility": "No breaking change: always a number again.",
+    }]
+    assert [r["sha"] for r in release.fold_fixes(rows)] == ["a"]
+
+
+def test_the_digest_carries_the_requests_a_change_answers():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "a", "pr_number": 3709, "author": "@a", "summary": "Adds containers.",
+         "shout_outs": [], "evidence": {}, "fixes_prs": [],
+         "answers": [{"ref": "discussion #3585", "title": "RFC: OCI backends", "opened": "2026-09-14",
+                      "votes": 24, "comments": 20}]},
+        {"sha": "b", "pr_number": 3800, "author": "@b", "summary": "Adds a flag.",
+         "shout_outs": [], "evidence": {}, "fixes_prs": [], "answers": []},
+    ]
+    entries = release.announcement_digest(rows)
+    assert entries[0]["answers"][0]["votes"] == 24
+    assert "answers" not in entries[1]
+
+
+def test_requests_answered_reads_closing_issues_and_linked_discussions():
+    from unittest import mock
+    from repo_manager import github
+
+    def fake(query):
+        if "pullRequest" in query:
+            return {
+                "p10": {"body": "Implements the RFC in https://github.com/o/r/discussions/5 (see #11).",
+                        "closingIssuesReferences": {"nodes": [{"number": 7}]}},
+                "p11": {"body": "Follow-up to #10.", "closingIssuesReferences": {"nodes": []}},
+            }
+        return {
+            "d5": {"title": "RFC", "createdAt": "2026-09-14T00:00:00Z", "upvoteCount": 24,
+                   "comments": {"totalCount": 20}},
+            "i5": None, "d7": None,
+            "i7": {"title": "Bug", "createdAt": "2026-10-01T00:00:00Z", "state": "CLOSED",
+                   "reactions": {"totalCount": 3}, "comments": {"totalCount": 2}},
+        }
+
+    with mock.patch.object(github, "graphql_data", side_effect=fake):
+        asked = github.requests_answered("o/r", [10, 11])
+    assert [a["ref"] for a in asked[10]] == ["issue #7", "discussion #5"]
+    assert asked[10][1]["votes"] == 24
+    assert asked[11] == []
+
+
+def test_referenced_numbers_reads_issue_discussion_and_hash_links():
+    from repo_manager import github
+
+    text = ("Fixes #3862. RFC: https://github.com/o/r/discussions/3585, see also "
+            "https://github.com/o/r/issues/12. Not a&#39; entity, and not other/repo#7, which "
+            "may name another repository's number.")
+    assert github.referenced_numbers(text) == [3862, 3585, 12]

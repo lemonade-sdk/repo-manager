@@ -199,3 +199,31 @@ class HumanEdits(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeneratedDraft(TempDirCase):
+    """The draft behind a hand-edited file is recovered from the store's history, so a prompt
+    can see what the release admin changed."""
+
+    def setUp(self):
+        super().setUp()
+        init_repo(self.tmp / "state")
+        self.state = Store(self.tmp / "state")
+        self.key = "releases/v2026.42/announcement.md"
+
+    def generate(self, content):
+        self.state.write_text(self.key, content)
+        ledger = store.record_generated(self.state, "v2026.42", "announcement.md", content)
+        self.state.save([self.key, ledger], "draft")
+
+    def test_the_draft_behind_an_edit_is_found(self):
+        self.generate("old draft\n")
+        self.generate("draft\n")
+        self.state.put_text(self.key, "the admin's words\n", "edit")
+        self.assertEqual(store.generated_draft(self.state, "v2026.42", "announcement.md"), "draft\n")
+
+    def test_a_store_without_history_has_no_draft(self):
+        plain = Store(self.tmp / "plain")
+        plain.write_text(self.key, "draft\n")
+        store.record_generated(plain, "v2026.42", "announcement.md", "draft\n")
+        self.assertEqual(store.generated_draft(plain, "v2026.42", "announcement.md"), "")

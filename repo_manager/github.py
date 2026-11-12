@@ -56,6 +56,95 @@ def gh_cli_json(args, check=True):
         raise SystemExit(f"GitHub CLI returned invalid JSON for `gh {' '.join(args)}`: {exc}")
 
 
+REQUEST_REF = re.compile(r"/(?:discussions|issues)/(\d+)|(?<![\w&/])#(\d+)\b")
+MAX_REQUESTS_PER_PR = 5
+
+
+def graphql_data(query):
+    """A GraphQL query's `data`, nulls and all. A number that names no discussion (or no
+    issue) is an error for that alias only; gh still prints the rest, and exits non-zero."""
+    require_gh()
+    result = run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
+    try:
+        return (json.loads(result.stdout or "{}").get("data") or {}).get("repository") or {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def pr_texts(repo, pr_numbers, batch=40):
+    """{pr_number: {"text": title and description, "closes": [issue numbers]}} in a few
+    GraphQL calls. A PR that does not resolve is left out."""
+    owner, name = repo.split("/", 1)
+    numbers = sorted({int(n) for n in pr_numbers if n})
+    found = {}
+    for start in range(0, len(numbers), batch):
+        chunk = numbers[start:start + batch]
+        fields = " ".join(
+            f"p{n}:pullRequest(number:{n}){{title body closingIssuesReferences(first:10){{nodes{{number}}}}}}"
+            for n in chunk
+        )
+        data = graphql_data(f'query{{repository(owner:"{owner}",name:"{name}"){{{fields}}}}}')
+        for n in chunk:
+            pr = data.get(f"p{n}")
+            if pr:
+                found[n] = {
+                    "text": f"{pr.get('title') or ''}\n{pr.get('body') or ''}",
+                    "closes": [int(node["number"]) for node in
+                               (pr.get("closingIssuesReferences") or {}).get("nodes") or []],
+                }
+    return found
+
+
+def referenced_numbers(text):
+    return [int(match.group(1) or match.group(2)) for match in REQUEST_REF.finditer(text or "")]
+
+
+def requests_answered(repo, pr_numbers, batch=40):
+    """{pr_number: [request, ...]}: the issues each PR closes and the issues, RFCs and
+    discussions its description links, with how many people asked and for how long.
+
+    This is the community's side of a release: a change that answers a request dozens of
+    people upvoted, argued over for months, matters to readers in a way its diff cannot
+    show. Counts are as of now. A reference that is a PR, or does not resolve, is dropped.
+    """
+    owner, name = repo.split("/", 1)
+    numbers = sorted({int(n) for n in pr_numbers if n})
+    texts = pr_texts(repo, numbers, batch)
+    refs = {}
+    for n in numbers:
+        pr = texts.get(n) or {"text": "", "closes": []}
+        found = pr["closes"] + referenced_numbers(pr["text"])
+        refs[n] = [ref for ref in dict.fromkeys(found) if ref not in numbers][:MAX_REQUESTS_PER_PR]
+
+    wanted = sorted({ref for found in refs.values() for ref in found})
+    requests = {}
+    for start in range(0, len(wanted), batch):
+        chunk = wanted[start:start + batch]
+        fields = " ".join(
+            f"d{n}:discussion(number:{n}){{title createdAt upvoteCount comments{{totalCount}}}} "
+            f"i{n}:issue(number:{n}){{title createdAt state reactions{{totalCount}} comments{{totalCount}}}}"
+            for n in chunk
+        )
+        data = graphql_data(f'query{{repository(owner:"{owner}",name:"{name}"){{{fields}}}}}')
+        for n in chunk:
+            discussion, issue = data.get(f"d{n}"), data.get(f"i{n}")
+            if discussion:
+                requests[n] = {
+                    "ref": f"discussion #{n}", "title": discussion.get("title", ""),
+                    "opened": (discussion.get("createdAt") or "")[:10],
+                    "votes": discussion.get("upvoteCount", 0),
+                    "comments": (discussion.get("comments") or {}).get("totalCount", 0),
+                }
+            elif issue:
+                requests[n] = {
+                    "ref": f"issue #{n}", "title": issue.get("title", ""),
+                    "opened": (issue.get("createdAt") or "")[:10],
+                    "votes": (issue.get("reactions") or {}).get("totalCount", 0),
+                    "comments": (issue.get("comments") or {}).get("totalCount", 0),
+                }
+    return {n: [requests[ref] for ref in found if ref in requests] for n, found in refs.items()}
+
+
 def associated_pr(repo, sha):
     """(number, author handle) for the PR a commit came from, or (None, "")."""
     data = gh_json([f"repos/{repo}/commits/{sha}/pulls"], check=False)

@@ -14,8 +14,10 @@ headline bullets, so the stories you pick here — and the order you put them in
 stories that release tells everywhere. Decide them here, once.
 
 The input is the release bucket, the range it covers, the release review's canonical
-breaking-change list, up to three prior releases' sections as a style reference, and a
-per-commit digest of the stored commit reviews. The digest is the only source of the facts.
+breaking-change list, up to three prior releases' sections as a style reference, diffs of how
+the release admin rewrote recent drafts, the previous candidate's headline when there was
+one, and a per-commit digest of the stored commit reviews, with the community requests each
+change answers. The digest is the only source of the facts.
 
 ## Shaping the release into stories
 
@@ -27,11 +29,34 @@ per-commit digest of the stored commit reviews. The digest is the only source of
 - Each story answers exactly one reader question. A title that needs an "&" or
   "Improvements" to hold its contents together is not a story — it is either two real
   stories or a handful of leftovers that do not belong in the highlights at all.
-- Work aimed at contributors rather than users — CI, internal refactors, test
-  infrastructure — is never a story.
+- Work aimed at contributors rather than users — CI, test infrastructure, a refactor nobody
+  outside the code can see — is never a story. A rebuild whose results users meet, such as
+  consistent errors or generated API docs, is.
 - A story is a capability that *debuts in this release*. Check every candidate against the
   prior releases above: if it already appears there, this release only refined it, and a
-  refinement is not a headline bullet unless the refinement itself is what users get.
+  refinement is not a headline bullet unless the refinement itself is what users get — a new
+  ability for a tool they already have is.
+- The headline is what is new, so it leads with new capabilities readers can try today, then
+  something the last release broke, working again, and only then other fixes. A fix earns a
+  headline bullet at all only when many readers were stuck on the problem; a fix for a narrow
+  setup is worth a line in the post, not a story here.
+- Within that order, rank by impact on real users: how many people each story reaches, and
+  how much it changes what they can do. Judge a change by what it lets people do, not by its
+  shape: a flag that gives an existing tool a new kind of ability, such as calling other tools,
+  is a new capability; a flag that tunes what it already did is not.
+- The community has already said what it wants: an entry's `answers` lists the requests it
+  closes, with how many people voted and commented and since when. A story many people asked
+  for, debated in an RFC, and built together leads the release, even when each of its PRs
+  looks small on its own. Judge a story by all of its entries — their requests, authors and
+  credits together — not by its largest commit.
+- Every entry is told as of the head, measured from the last release. An entry's
+  `amended_by` lists fixes that landed later in this same release: describe the entry as it
+  ships with them, and never tell a fix to something this release introduced as a story of
+  its own. Nobody upgrading met the problem.
+- An entry marked `candidate_fix` reached the release branch after it was cut, to repair the
+  candidate. It is a story only when it fixes something users of the last release have.
+- When the caller hands you the previous candidate's headline, it is the baseline: keep its
+  stories and order unless the caller names a new commit that outranks one of them.
 
 ## The file
 
