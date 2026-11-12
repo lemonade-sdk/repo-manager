@@ -675,6 +675,16 @@ def test_review_rejects_breaks_the_review_itself_calls_internal():
     data["evidence"]["breaking_changes"] = "One breaking change: resolved_ctx_size."
     assert any("says no user meets it" in e for e in release.review_errors(data, []))
 
+    for narrowed in (
+        "resolved_ctx_size in GET /v1/models changed from ['integer', 'null'] to 'integer'.",
+        "resolved_ctx_size on GET /v1/models changed from nullable to always integer.",
+        "The field can no longer be null.",
+    ):
+        data["breaking_changes"] = [narrowed]
+        assert any("fewer values" in e for e in release.review_errors(data, [])), narrowed
+
     data["breaking_changes"] = ["Removed the --foo flag; pass --bar instead."]
     data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
     assert not [e for e in release.review_errors(data, []) if "breaking" in e]
+    data["breaking_changes"] = ["`ctx_size` changed from an integer to a string."]
+    assert not [e for e in release.review_errors(data, []) if "fewer values" in e]

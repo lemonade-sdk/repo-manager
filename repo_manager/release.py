@@ -429,6 +429,13 @@ NOT_FOR_USERS = re.compile(
 )
 
 
+# A field that can hold fewer values than before breaks no client that handled the old ones.
+NARROWED = re.compile(
+    r"(?i)\b(?:no longer (?:be )?(?:null|nullable|optional)|(?:is|are) now always (?:an? )?\w+"
+    r"|from \[?['\"]?\w+['\"]?,\s*['\"]?null['\"]?\]? to|(?:nullable|optional) to (?:always )?(?:an? )?\w+)"
+)
+
+
 def review_errors(data, issues, index=None, ratings=None):
     """Structural checks that protect the maintainer-facing panels — nothing more.
 
@@ -489,6 +496,11 @@ def review_errors(data, issues, index=None, ratings=None):
             "make the prose agree with the list."
         )
     for entry in breaking if isinstance(breaking, list) else []:
+        if NARROWED.search(str(entry)):
+            errors.append(
+                f"breaking_changes entry {str(entry)[:80]!r} describes a field that now holds fewer "
+                "values than before. Every client that handled the old values handles these: drop it."
+            )
         if NOT_FOR_USERS.search(str(entry)):
             errors.append(
                 f"breaking_changes entry {str(entry)[:80]!r} says no user meets it: it is internal, "
