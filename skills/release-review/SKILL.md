@@ -102,6 +102,8 @@ These are not breaking:
 - A field that can hold fewer values than before, such as one that can no longer be null.
   Every client that handled the old values handles the new ones.
 - Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A change to what happens after the client has gone, such as work cancelled once it
+  disconnects: nobody is left to meet it.
 - A change to something no release has shipped: a key, flag or route that this PR's own
   earlier commits, or this release, added and then changed or removed. Judge against the last
   release, never against an intermediate commit; nobody upgrading had it.
