@@ -95,13 +95,12 @@ or revert in the same release can take that break back out. List only what an up
 the last release to this head still meets. The list is rebuilt from the digest on every run,
 never carried over from an earlier one.
 
-The commit reviews over-report, so check each one they flag against this test before it goes
-on the list. Most behavior changes are not breaking, and listing one as breaking buries the real ones.
+Check each change the commit reviews flag against this test before it goes on the list. Most
+behavior changes are not breaking, and listing one as breaking buries the real ones.
 These are not breaking:
 
-- A request that already failed now fails with a more accurate status code or error message
-  (a 500 that becomes a 400, a 404 that becomes a 405, one consistent "missing field" error).
-  It failed before and it fails now.
+- A field that can hold fewer values than before, such as one that can no longer be null.
+  Every client that handled the old values handles the new ones.
 - Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
 - A field that now carries a more useful value of the same type, such as a product name where
   a raw code was.
@@ -109,8 +108,9 @@ These are not breaking:
 - A change to maintainer tooling (release scripts, CI, build helpers) that no user runs.
 
 A removed backend, flag, model id or config key that someone's setup names, a changed default
-that changes what an existing setup does, a field whose type changes, and a new download or
-migration on first run after upgrading are breaking.
+that changes what an existing setup does, a field that now holds values its clients never had
+to handle, a status code or error message a client may match on that changes, and a new
+download or migration on first run after upgrading are breaking.
 
 ## Platforms
 
