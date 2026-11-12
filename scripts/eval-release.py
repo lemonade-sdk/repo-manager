@@ -250,6 +250,15 @@ EDIT_FIELDS = {
 }
 
 
+UNKNOWABLE = re.compile(r"(?i)\b(video|youtube|links?|urls?|contributors?|thanks|credit(?:s|ed)?)\b")
+
+
+def knowable(statements):
+    """A backstop for the skill's own rule: a writer working from the commits cannot know a
+    video, a link, or who the admin wants to thank, so no draft is held to one."""
+    return [statement for statement in statements if not UNKNOWABLE.search(statement)]
+
+
 def statements_from(data):
     """The extracted fields as statements a judge can check one by one."""
     found = []
@@ -262,7 +271,7 @@ def statements_from(data):
             if item:
                 statement = template.format(item).rstrip(".") + "."
                 found.append(statement[0].upper() + statement[1:])
-    return found
+    return knowable(found)
 
 
 def decisions(cache_dir, name, filename, case):
@@ -273,7 +282,7 @@ def decisions(cache_dir, name, filename, case):
     ).hexdigest()[:16]
     cache = cache_dir / f"{name}.{filename}.{digest}.json"
     if cache.exists():
-        return json.loads(cache.read_text())["decisions"]
+        return knowable(json.loads(cache.read_text())["decisions"])
 
     def prompt(paths, feedback):
         return (
@@ -300,7 +309,9 @@ def decisions(cache_dir, name, filename, case):
 def judge(out, name, filename, statements, text):
     """{statement number: (verdict, why)}, cached beside the run."""
     cache = out / f"{name}.{filename}.verdicts.json"
-    digest = hashlib.sha256((text + "\0" + json.dumps(statements)).encode()).hexdigest()
+    digest = hashlib.sha256(
+        (text + "\0" + json.dumps(statements) + "\0" + skill_hash("release-judge")).encode()
+    ).hexdigest()
     if cache.exists():
         stored = json.loads(cache.read_text())
         if stored.get("sha256") == digest:

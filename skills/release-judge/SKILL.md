@@ -15,8 +15,10 @@ version. Say, for each statement, whether the new draft makes that decision on i
   breaking change, or cuts the same detail counts.
 - `missed` — the statement is false of the new draft, whatever it does instead.
 
-When a statement is about order, look at the order. When it is about absence, search the
-whole draft before answering `made`.
+A statement is about one decision; hold the draft to that decision and nothing else. "It leads
+with the six new container backends" is made by a draft that leads with the container
+backends, whatever count it gives. When a statement is about order, look at the order. When
+it is about absence, search the whole draft before answering `made`.
 
 Write a JSON object to the path the caller names, and nothing else:
 
