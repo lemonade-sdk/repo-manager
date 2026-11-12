@@ -34,14 +34,16 @@ change answers. The digest is the only source of the facts.
   consistent errors or generated API docs, is.
 - A story is a capability that *debuts in this release*. Check every candidate against the
   prior releases above: if it already appears there, this release only refined it, and a
-  refinement is not a headline bullet unless the refinement itself is what users get.
+  refinement is not a headline bullet unless the refinement itself is what users get — a new
+  ability for a tool they already have is.
 - The headline is what is new, so it leads with new capabilities readers can try today, then
   something the last release broke, working again, and only then other fixes. A fix earns a
   headline bullet at all only when many readers were stuck on the problem; a fix for a narrow
   setup is worth a line in the post, not a story here.
 - Within that order, rank by impact on real users: how many people each story reaches, and
-  how much it changes what they can do. A new kind of thing users can do outranks a new
-  option on an existing one.
+  how much it changes what they can do. Judge a change by what it lets people do, not by its
+  shape: a flag that gives an existing tool a new kind of ability, such as calling other tools,
+  is a new capability; a flag that tunes what it already did is not.
 - The community has already said what it wants: an entry's `answers` lists the requests it
   closes, with how many people voted and commented and since when. A story many people asked
   for, debated in an RFC, and built together leads the release, even when each of its PRs

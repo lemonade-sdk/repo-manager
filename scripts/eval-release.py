@@ -18,9 +18,10 @@ history, because their edit diffs are an input under test. The release is rebuil
 stood at its candidate: stable tags at or after the head are ignored. Nothing is pushed.
 
 Scoring: the `release-edits` skill reads each case's draft and published file side by side
-and writes down the admin's decisions as checkable statements ("the headline leads with the
-container backends"); they are cached by the two texts' hash, so every run is held to the
-same list. The `release-judge` skill then says whether a regenerated file makes each
+and records the admin's decisions in a fixed shape — the lead, stories added to or cut from
+the headline, breaking changes added or removed, and at most two style patterns — which
+become checkable statements ("It leads with the container backends."). They are cached by
+the two texts and the skill's version, so every run is held to the same list. The `release-judge` skill then says whether a regenerated file makes each
 decision on its own. The score is the share of the admin's decisions the new code makes.
 
 Faster runs:
@@ -240,9 +241,36 @@ def json_artifact(contents, key):
     return data[key]
 
 
+EDIT_FIELDS = {
+    "added_stories": "{} is a headline story.",
+    "removed_stories": "{} is not a headline story.",
+    "added_breaks": "Breaking Changes lists that {}.",
+    "removed_breaks": "Breaking Changes does not list that {}.",
+    "style": "{}",
+}
+
+
+def statements_from(data):
+    """The extracted fields as statements a judge can check one by one."""
+    found = []
+    lead = str(data.get("lead") or "").strip().rstrip(".")
+    if lead:
+        found.append(f"It leads with {lead}.")
+    for field, template in EDIT_FIELDS.items():
+        for item in data.get(field) or []:
+            item = str(item).strip().rstrip(".")
+            if item:
+                statement = template.format(item).rstrip(".") + "."
+                found.append(statement[0].upper() + statement[1:])
+    return found
+
+
 def decisions(cache_dir, name, filename, case):
-    """The admin's decisions on this file, as statements. Extracted once per pair of texts."""
-    digest = hashlib.sha256((case["draft"] + "\0" + case["published"]).encode()).hexdigest()[:16]
+    """The admin's decisions on this file, as statements. Extracted once per pair of texts and
+    version of the release-edits skill, so every run is held to the same list."""
+    digest = hashlib.sha256(
+        (case["draft"] + "\0" + case["published"] + "\0" + skill_hash("release-edits")).encode()
+    ).hexdigest()[:16]
     cache = cache_dir / f"{name}.{filename}.{digest}.json"
     if cache.exists():
         return json.loads(cache.read_text())["decisions"]
@@ -256,11 +284,12 @@ def decisions(cache_dir, name, filename, case):
         )
 
     def validate(contents):
-        items = json_artifact(contents["decisions"], "decisions")
-        if items is None:
-            return None, ['Write {"decisions": ["...", ...]}.']
-        items = [str(item).strip() for item in items if str(item).strip()]
-        return items, [] if items else ["List at least one decision."]
+        data = pi.extract_json_object(contents["decisions"])
+        if not isinstance(data, dict):
+            return None, ['Write {"lead", "added_stories", "removed_stories", "added_breaks", '
+                          '"removed_breaks", "style"}.']
+        found = statements_from(data)
+        return found, [] if found else ["Record at least one decision."]
 
     found = release.generate("release-edits", {"decisions": ".json"}, prompt, validate)
     cache_dir.mkdir(parents=True, exist_ok=True)
