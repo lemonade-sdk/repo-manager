@@ -30,7 +30,9 @@ Faster runs:
   when the change under test is downstream of the review.
 - `--refresh-reviews` re-reviews, in the copy, only the commits that can fold as in-range
   fixes: their review predates `fixes_prs` and their PR mentions another PR in the same range.
-  Refreshed reviews are cached by commit and commit-review skill, so later runs reuse them.
+  `--refresh SHA,SHA` adds named commits, such as reviews a changed definition would now
+  write differently. Refreshed reviews are cached by commit and commit-review skill, so later
+  runs reuse them.
 - `--proxy DIR` runs no model. Each skill call writes its full prompt (skill plus input) to
   DIR and stops; another model writes the artifact beside it, and the next invocation
   validates and uses it. Rerun until no prompts are pending. `--proxy-skills` limits which
@@ -189,8 +191,13 @@ def fix_candidates(ctx, bucket):
     return found
 
 
-def refresh_reviews(ctx, bucket, cache):
+def refresh_reviews(ctx, bucket, cache, named=()):
+    """Re-review, in the copy, the fix candidates plus any commits named with `--refresh`:
+    reviews whose verdict a changed commit-review skill would write differently."""
     shas = fix_candidates(ctx, bucket)
+    in_bucket = set(bucket.commits())
+    shas += [full for full in in_bucket if any(full.startswith(prefix) for prefix in named)
+             and full not in shas]
     version = skill_hash("commit-review")
     print(f"{bucket.name}: {len(shas)} commit review(s) to refresh: "
           f"{', '.join(sha[:7] for sha in shas) or 'none'}", flush=True)
@@ -219,8 +226,8 @@ def run_bucket(args, name, case, out, current):
     bucket = as_candidate(release.Bucket(ctx, case["branch"], case["head"]))
     print(f"{name}: {bucket.summary()}", flush=True)
     current["bucket"] = name
-    if args.refresh_reviews:
-        refresh_reviews(ctx, bucket, Path(args.review_cache).expanduser())
+    if args.refresh_reviews or args.refresh:
+        refresh_reviews(ctx, bucket, Path(args.review_cache).expanduser(), args.refresh)
     builders = {"review": release.build_review, "notes": release.build_notes,
                 "announcement": release.build_announcement}
     for step in STEPS:
@@ -393,6 +400,9 @@ def main():
     parser.add_argument("--score-only", action="store_true", help="Judge what is already in --out.")
     parser.add_argument("--refresh-reviews", action="store_true",
                         help="Re-review, in the copy, commits that may fold as in-range fixes.")
+    parser.add_argument("--refresh", default="",
+                        help="Comma-separated commit SHAs (prefixes) to re-review too, such as reviews "
+                             "a changed commit-review skill would now write differently.")
     parser.add_argument("--review-cache", default="~/.cache/repo-manager/eval-reviews")
     parser.add_argument("--decisions-cache", default="~/.cache/repo-manager/eval-decisions",
                         help="Where each case's extracted decisions are kept, so every run is held to the same list.")
@@ -400,6 +410,7 @@ def main():
     parser.add_argument("--proxy-skills", default="", help="Comma-separated skills to proxy (default: all).")
     args = parser.parse_args()
     args.steps = [step.strip() for step in args.steps.split(",") if step.strip()]
+    args.refresh = [sha.strip() for sha in args.refresh.split(",") if sha.strip()]
     unknown = set(args.steps) - set(STEPS)
     if unknown:
         raise SystemExit(f"Unknown steps: {sorted(unknown)}; choose from {STEPS}.")
