@@ -176,6 +176,9 @@ These are not breaking:
 - A field that can hold fewer values than before, such as one that can no longer be null.
   Every client that handled the old values handles the new ones.
 - Something new: an endpoint, a field, a flag, a model, a label a new feature reads.
+- A change to something no release has shipped: a key, flag or route that this PR's own
+  earlier commits, or this release, added and then changed or removed. Judge against the last
+  release, never against an intermediate commit; nobody upgrading had it.
 - A field that now carries a more useful value of the same type, such as a product name where
   a raw code was.
 - A requirement that always existed and is now documented or enforced with a clearer error.
