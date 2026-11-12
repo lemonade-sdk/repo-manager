@@ -672,11 +672,3 @@ def test_review_rejects_breaks_the_review_itself_calls_internal():
     data["breaking_changes"] = ["Removed the --foo flag; pass --bar instead."]
     data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
     assert not [e for e in release.review_errors(data, []) if "breaking" in e]
-
-
-def test_announcement_rejects_emoji_headings():
-    from repo_manager import release
-
-    post = "## Lemonade v2026.42.1\n\n@everyone hi\n\n### 🎨 TheNoise on Windows\n\nText.\n"
-    assert any("no emoji" in e for e in release.announcement_errors(post, [], False))
-    assert not any("no emoji" in e for e in release.announcement_errors(post.replace("🎨 ", ""), [], False))

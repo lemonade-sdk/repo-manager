@@ -85,6 +85,10 @@ before any model reads the digest:
   to something this release introduced is not news to anyone upgrading.
 - **`candidate_fix`.** A commit that reached the release branch after it was cut from `main`.
   It repairs the candidate, and is a story only when it fixes something the last release had.
+- **`answers`.** The community requests a PR answers: the issues it closes and the issues,
+  RFCs and discussions its description links, with their votes, comments and opening date.
+  A diff cannot show that a change was asked for by dozens of people over months; GitHub
+  can, and the notes rank stories by real-world impact with it.
 
 Two more inputs keep a candidate's artifacts close to the one before and to the admin's taste:
 
@@ -150,3 +154,17 @@ release admin's words.
 The tradeoff is real and accepted: a hotfix landing after the admin edited `notes.md` is not
 reflected until they edit again or someone passes `--force`. The admin is already in that
 file during the candidate week.
+
+## Measuring drafts against the admin's edits
+
+`scripts/eval-release.py` regenerates recent releases and scores them against what the
+release admin did to the drafts that shipped. The cases are not kept anywhere: every release
+whose notes or post a human edited, with the draft still in the store's history, is one, and
+the default is the three most recent. Each hunk of the admin's draft-to-published diff is a
+check, and the `release-judge` skill says whether the new draft makes the admin's decision
+on its own. As the admin edits next week's release, the eval moves with them.
+
+`--steps` regenerates only part of the pipeline, `--refresh-reviews` re-reviews only commits
+that may fold as in-range fixes (cached across runs), and `--proxy DIR` hands every prompt to
+another model through files, for fast iteration before a confirming run on the CI model.
+

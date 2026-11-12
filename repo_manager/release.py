@@ -114,7 +114,9 @@ def digest(ctx, shas, bucket=None):
     Given the bucket, each row also says how it relates to the rest of the release: which PRs
     it repairs (`fixes_prs`) and whether it reached the release branch after the cut
     (`candidate_fix`). Those are facts git and the reviews can settle, so they are settled
-    here rather than left for the model to notice.
+    here rather than left for the model to notice. It also says which community requests the
+    PR answers (`answers`): how many people asked for it is a fact GitHub holds, not one the
+    model can see in a diff.
 
     Only what a release decision turns on: who to ask, what shipped, what the commit review
     concluded, and the evidence behind it. Not the full review — a release with eighty
@@ -163,6 +165,10 @@ def digest(ctx, shas, bucket=None):
             "fixes_prs": fixes_of(data),
             "candidate_fix": sha in candidate_fixes,
         })
+    if bucket:
+        asked = github.requests_answered(ctx.repo, [row["pr_number"] for row in rows])
+        for row in rows:
+            row["answers"] = asked.get(row["pr_number"]) or []
     return rows, missing, index
 
 
@@ -845,11 +851,6 @@ def closing_link_errors(markdown, repo):
     ]
 
 
-HEADING = re.compile(r"^\s*#{1,6}\s")
-EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
-AI_WARNING_LINE = re.compile(r"^\s*#{1,6}\s*⚠️ These notes are AI generated")
-
-
 def announcement_errors(markdown, canonical, hotfix, bucket="", repo="", title=""):
     text = (markdown or "").strip()
     if not text:
@@ -873,14 +874,6 @@ def announcement_errors(markdown, canonical, hotfix, bucket="", repo="", title="
             errors.append("A hotfix post pings `@release`, never `@everyone`; remove the `@everyone`.")
     elif "@everyone" not in text:
         errors.append("The post must open with an `@everyone` ping; add `@everyone` to the opener.")
-    decorated = [
-        line.strip() for line in text.splitlines()
-        if HEADING.match(line) and EMOJI.search(line) and not AI_WARNING_LINE.match(line)
-    ]
-    if decorated:
-        errors.append(
-            f"Section headings carry no emoji: {decorated[0]!r}. Name the section in words alone."
-        )
     if canonical:
         errors.extend(breaking_count_errors(count_breaking_bullets(text), canonical, "The announcement"))
     return errors
@@ -1075,6 +1068,8 @@ def announcement_digest(rows):
             "credits": [c for c in (human(c) for c in row["shout_outs"]) if c],
             "docs": " ".join(str(row["evidence"].get("documentation", "")).split())[:200],
         }
+        if row.get("answers"):
+            entry["answers"] = row["answers"]
         if row.get("amended_by"):
             entry["amended_by"] = [item["summary"] for item in row["amended_by"]]
         if row.get("candidate_fix"):

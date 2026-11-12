@@ -34,6 +34,9 @@ class Args:
 class BuildingABucket(TempDirCase):
     def setUp(self):
         super().setUp()
+        asked = mock.patch.object(release.github, "requests_answered", return_value={})
+        asked.start()
+        self.addCleanup(asked.stop)
         self.source = init_repo(self.tmp / "source")
         self.first = commit_file(self.source, "a.txt", "one\n", "first")
         git(self.source, "tag", "v11.9.0")
@@ -248,3 +251,54 @@ def test_review_digest_keeps_fix_rows_and_marks_the_amended_pr():
         "api_compatibility": "No breaking change: always a number again.",
     }]
     assert [r["sha"] for r in release.fold_fixes(rows)] == ["a"]
+
+
+def test_the_digest_carries_the_requests_a_change_answers():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "a", "pr_number": 3709, "author": "@a", "summary": "Adds containers.",
+         "shout_outs": [], "evidence": {}, "fixes_prs": [],
+         "answers": [{"ref": "discussion #3585", "title": "RFC: OCI backends", "opened": "2026-09-14",
+                      "votes": 24, "comments": 20}]},
+        {"sha": "b", "pr_number": 3800, "author": "@b", "summary": "Adds a flag.",
+         "shout_outs": [], "evidence": {}, "fixes_prs": [], "answers": []},
+    ]
+    entries = release.announcement_digest(rows)
+    assert entries[0]["answers"][0]["votes"] == 24
+    assert "answers" not in entries[1]
+
+
+def test_requests_answered_reads_closing_issues_and_linked_discussions():
+    from unittest import mock
+    from repo_manager import github
+
+    def fake(query):
+        if "pullRequest" in query:
+            return {
+                "p10": {"body": "Implements the RFC in https://github.com/o/r/discussions/5 (see #11).",
+                        "closingIssuesReferences": {"nodes": [{"number": 7}]}},
+                "p11": {"body": "Follow-up to #10.", "closingIssuesReferences": {"nodes": []}},
+            }
+        return {
+            "d5": {"title": "RFC", "createdAt": "2026-09-14T00:00:00Z", "upvoteCount": 24,
+                   "comments": {"totalCount": 20}},
+            "i5": None, "d7": None,
+            "i7": {"title": "Bug", "createdAt": "2026-10-01T00:00:00Z", "state": "CLOSED",
+                   "reactions": {"totalCount": 3}, "comments": {"totalCount": 2}},
+        }
+
+    with mock.patch.object(github, "graphql_data", side_effect=fake):
+        asked = github.requests_answered("o/r", [10, 11])
+    assert [a["ref"] for a in asked[10]] == ["issue #7", "discussion #5"]
+    assert asked[10][1]["votes"] == 24
+    assert asked[11] == []
+
+
+def test_referenced_numbers_reads_issue_discussion_and_hash_links():
+    from repo_manager import github
+
+    text = ("Fixes #3862. RFC: https://github.com/o/r/discussions/3585, see also "
+            "https://github.com/o/r/issues/12. Not a&#39; entity, and not other/repo#7, which "
+            "may name another repository's number.")
+    assert github.referenced_numbers(text) == [3862, 3585, 12]

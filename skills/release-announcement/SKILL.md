@@ -88,12 +88,14 @@ Shape the post like the references, scaled to the release:
 - One `### heading` per story, matching the website highlights' headline bullets when the
   caller provided them. When several changes advance the same theme — GPU support landing
   for two vendors, several backends arriving on a new OS — they share one section with one
-  name. Short, concrete names ("Omni Models", "Fedora 43 is back!"), with no emoji. Hold a high bar: a
+  name. Short, concrete names ("Omni Models", "Fedora 43 is back!"). A Discord emoji prefix
+  on a heading or two is welcome when it fits; most headings have none. Hold a high bar: a
   section is for stories enthusiasts will want to read a paragraph about or try today. Three
   or four sections is typical; one is fine for a small release. Never pad.
 - A `### Additional Improvements` section of compact bullets for everything else worth
   mentioning, one item per bullet with its people named ("Faster model downloads on Windows
-  by @handle."). Changes share a bullet only when they share a theme a reader would name — all
+  by @handle."). A bullet is one short clause about what changed for the reader; how it was
+  done stays in the commit. Changes share a bullet only when they share a theme a reader would name — all
   the CI work, several fixes for Linux ("A trio of fixes for Linux by @handle, one for macOS
   by @handle...") — never to save lines: routing, a download source and CI strung together
   with commas is three bullets pretending to be one. Small fixes with nothing else in common
