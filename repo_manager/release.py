@@ -310,6 +310,38 @@ def extract_extra_items(data):
     return [entry for entry in (raw or []) if isinstance(entry, (dict, str))]
 
 
+BREAK_WORD = re.compile(r"\bbreak(?:ing|s)?\b", re.IGNORECASE)
+
+
+def break_candidates(rows):
+    """{short sha: row} for every digest row whose commit review says it may break a setup.
+
+    These are the release review's breaking-change decisions, one per row, the same way every
+    to-do id is a rating it owes. A list the model writes freely can lose a real break between
+    runs as easily as it can keep a false one; a ruling it owes per row cannot go missing."""
+    return {
+        row["sha"]: row for row in rows
+        if prose.asserts(str((row.get("evidence") or {}).get("api_compatibility", "")),
+                         BREAK_WORD, NO_BREAKING)
+    }
+
+
+def extract_break_rulings(data):
+    """{short sha: {"breaks": [sentences], "why": str}} from `break_rulings`."""
+    raw = data.get("break_rulings")
+    rulings = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict) or not str(entry.get("id", "")).strip():
+            continue
+        breaks = entry.get("breaks")
+        breaks = breaks if isinstance(breaks, list) else ([breaks] if breaks else [])
+        rulings[str(entry["id"]).strip()[:7]] = {
+            "breaks": normalize_breaking_changes(breaks),
+            "why": str(entry.get("why", "")).strip(),
+        }
+    return rulings
+
+
 def normalize_breaking_changes(value):
     """Pi files each entry as a bare string or a small object; read both and fold any
     migration pointer into the sentence, so one string fully describes the change."""
@@ -376,10 +408,18 @@ def normalize_review(data, index=None):
     # Sorted by priority and otherwise left in commit order, so the file's diff moves only
     # when a priority does.
     data["checklist"] = sorted(todos, key=priority_rank)
-    data["breaking_changes"] = normalize_breaking_changes(
-        data.get("breaking_changes")
-        or ((data.get("evidence") or {}) if isinstance(data.get("evidence"), dict) else {}).get("breaking_changes_list")
-    )
+    rulings = extract_break_rulings(data)
+    if rulings:
+        built = []
+        for ruling in rulings.values():
+            built.extend(entry for entry in ruling["breaks"] if entry not in built)
+        data["breaking_changes"] = built
+        data["break_rulings"] = [{"id": sha, **ruling} for sha, ruling in rulings.items()]
+    else:
+        data["breaking_changes"] = normalize_breaking_changes(
+            data.get("breaking_changes")
+            or ((data.get("evidence") or {}) if isinstance(data.get("evidence"), dict) else {}).get("breaking_changes_list")
+        )
     data["evidence"] = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
     # No verdict is computed, and none is stored. Whether a release ships is the release
     # admin's decision, made from the checklist and from the testing they have actually seen
@@ -436,7 +476,7 @@ NARROWED = re.compile(
 )
 
 
-def review_errors(data, issues, index=None, ratings=None):
+def review_errors(data, issues, index=None, ratings=None, candidates=None):
     """Structural checks that protect the maintainer-facing panels — nothing more.
 
     The checklist's contents are guaranteed by `normalize_review`, so what is left is the
@@ -480,6 +520,14 @@ def review_errors(data, issues, index=None, ratings=None):
                 f"evidence.{key} is required: one or two sentences of synthesis for the dashboard "
                 "(or 'none observed' when that is the honest answer)."
             )
+    ruled = {entry["id"] for entry in data.get("break_rulings") or []}
+    unruled = [sha for sha in candidates or {} if sha not in ruled]
+    if unruled:
+        errors.append(
+            f"break_rulings has no entry for {', '.join(unruled)}, whose commit review describes a "
+            "possible breaking change. Rule on every one: list each break an upgrade from the last "
+            "release still meets in `breaks`, or leave `breaks` empty and say why in `why`."
+        )
     breaking = data.get("breaking_changes")
     claims = str(evidence.get("breaking_changes", ""))
     if isinstance(breaking, list) and not breaking and prose.asserts(claims, HAS_BREAKING, NO_BREAKING):
@@ -624,7 +672,7 @@ do not count the entries yourself.
 {coverage}
 {json.dumps(fold_fixes(rows, keep_fixes=True), indent=2)}
 
-## Rate all {len(index)} to-dos
+{break_rulings_block(break_candidates(fold_fixes(rows, keep_fixes=True)), bucket)}## Rate all {len(index)} to-dos
 
 `ratings` needs one entry per id below — P0, P1 or P2, plus the platforms it applies to. Each
 id's text is in the digest above; do not retype it, the caller carries the words over. Every
@@ -640,6 +688,23 @@ it is a judgement you did not make, and it lands in P1. Put a `candidate` issue 
 is read by somebody who has never seen this digest, so name the feature or behavior.
 
 {feedback}"""
+
+
+def break_rulings_block(candidates, bucket):
+    if not candidates:
+        return ("## Breaking changes\n\nNo commit review in this digest describes a possible "
+                "breaking change. Leave `break_rulings` empty unless a row's evidence shows one.\n\n")
+    listed = ", ".join(candidates)
+    return f"""## Rule on all {len(candidates)} possible breaking changes
+
+These rows' commit reviews describe a possible breaking change: {listed}. `break_rulings`
+needs one entry per id. Hold each against the definitions above, as an upgrade from
+{bucket.range_start or 'the last release'} to this head meets it: `breaks` lists every break
+the row still ships, one sentence each as the person upgrading meets it, and is empty when
+none survives; `why` says in one sentence why. A commit review's word "breaking" is the
+question, not the answer. The caller builds `breaking_changes` from your rulings.
+
+"""
 
 
 def build_review(ctx, bucket, force=False):
@@ -664,7 +729,8 @@ def build_review(ctx, bucket, force=False):
             return None, ["The artifact file must contain a valid JSON object."]
         ratings = extract_ratings(data)
         data = normalize_review(data, index)
-        return data, review_errors(data, issues, index, ratings)
+        return data, review_errors(data, issues, index, ratings,
+                                   break_candidates(fold_fixes(rows, keep_fixes=True)))
 
     notes = []
     data = generate("release-review", {"review": ".json"}, prompt, validate,

@@ -688,3 +688,30 @@ def test_review_rejects_breaks_the_review_itself_calls_internal():
     assert not [e for e in release.review_errors(data, []) if "breaking" in e]
     data["breaking_changes"] = ["`ctx_size` changed from an integer to a string."]
     assert not [e for e in release.review_errors(data, []) if "fewer values" in e]
+
+
+def test_review_builds_breaking_changes_from_a_ruling_per_candidate():
+    from repo_manager import release
+
+    rows = [
+        {"sha": "aaaaaaa", "evidence": {"api_compatibility": "Breaking change: --foo is removed."}},
+        {"sha": "bbbbbbb", "evidence": {"api_compatibility": "No breaking changes."}},
+        {"sha": "ccccccc", "evidence": {"api_compatibility": "This breaks setups that set enable_x."}},
+    ]
+    candidates = release.break_candidates(rows)
+    assert list(candidates) == ["aaaaaaa", "ccccccc"]
+
+    data = {
+        "break_rulings": [
+            {"id": "aaaaaaa", "breaks": ["Removed --foo; pass --bar instead."], "why": "Setups pass it."},
+        ],
+        "evidence": {k: "x" for k in release.EVIDENCE_KEYS},
+    }
+    data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."
+    data = release.normalize_review(data, {})
+    assert data["breaking_changes"] == ["Removed --foo; pass --bar instead."]
+    errors = release.review_errors(data, [], {}, {}, candidates)
+    assert any("ccccccc" in e and "break_rulings" in e for e in errors)
+
+    data["break_rulings"].append({"id": "ccccccc", "breaks": [], "why": "Never shipped."})
+    assert not [e for e in release.review_errors(data, [], {}, {}, candidates) if "break_rulings" in e]
