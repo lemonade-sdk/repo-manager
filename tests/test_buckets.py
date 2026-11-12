@@ -107,6 +107,25 @@ class RangeStart(unittest.TestCase):
     def test_no_earlier_tag_means_no_range_start(self):
         self.assertEqual(buckets.range_start(["v2026.38.1"], "v2026.38"), "")
 
+    def test_an_untagged_previous_week_starts_the_range_at_its_branch(self):
+        # The usual Wednesday: v2026.38's stable has not shipped when v2026.39's candidate is
+        # cut, so the range must not fall back to v2026.37 and take in two weeks of commits.
+        branches = ["release-v2026.37", "release-v2026.38", "release-v2026.39"]
+        tags = ["v2026.37.0", "v2026.37.1"]
+        self.assertEqual(buckets.range_start(tags, "v2026.39", branches), "origin/release-v2026.38")
+
+    def test_a_tagged_previous_week_starts_the_range_at_its_tag(self):
+        branches = ["release-v2026.37", "release-v2026.38"]
+        self.assertEqual(buckets.range_start(self.TAGS, "v2026.39", branches), "v2026.38.1")
+
+    def test_a_skipped_week_falls_back_to_the_newest_earlier_release(self):
+        branches = ["release-v2026.36", "release-v2026.37"]
+        self.assertEqual(buckets.range_start(["v2026.36.0"], "v2026.39", branches), "origin/release-v2026.37")
+
+    def test_branches_that_are_not_release_branches_are_ignored(self):
+        branches = ["release-v2026.40", "main", "release-quality"]
+        self.assertEqual(buckets.range_start(self.TAGS, "v2026.39", branches), "v2026.38.1")
+
     def test_stable_tags_in_bucket_is_the_hotfix_signal(self):
         self.assertEqual(
             buckets.stable_tags_in_bucket(self.TAGS, "v2026.38"), ["v2026.38.1"]

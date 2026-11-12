@@ -51,6 +51,11 @@ class Checkout:
     def resolve(self, ref):
         return self.out("rev-parse", f"{ref}^{{commit}}")
 
+    def release_branches(self):
+        """The `release-v<year>.<week>` branches on origin, by name."""
+        listed = self.out("for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin/release-v*")
+        return [line.strip() for line in listed.splitlines() if line.strip()]
+
     def tags(self):
         listed = self.out("tag", "--list", "v*").splitlines()
         return buckets.sort_tags(tag.strip() for tag in listed if tag.strip())
