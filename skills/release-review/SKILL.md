@@ -109,8 +109,9 @@ These are not breaking:
 
 A removed backend, flag, model id or config key that someone's setup names, a changed default
 that changes what an existing setup does, a field that now holds values its clients never had
-to handle, a status code or error message a client may match on that changes, and a new
-download or migration on first run after upgrading are breaking.
+to handle, a status code or error message a client may match on that changes, and anything
+new a setup needs on first run after upgrading — a download, a migration, a runtime such as
+the container engine a backend now runs in — are breaking.
 
 ## Platforms
 

@@ -667,7 +667,13 @@ def test_review_rejects_breaks_the_review_itself_calls_internal():
     data["evidence"]["breaking_changes"] = "No user-facing breaking changes in this release."
     errors = release.review_errors(data, [])
     assert any("says there are no breaking changes" in e for e in errors)
-    assert any("internal or for maintainers" in e for e in errors)
+    assert any("says no user meets it" in e for e in errors)
+
+    data["breaking_changes"] = [
+        "resolved_ctx_size is no longer nullable (but null was never observable in practice)."
+    ]
+    data["evidence"]["breaking_changes"] = "One breaking change: resolved_ctx_size."
+    assert any("says no user meets it" in e for e in release.review_errors(data, []))
 
     data["breaking_changes"] = ["Removed the --foo flag; pass --bar instead."]
     data["evidence"]["breaking_changes"] = "One breaking change: --foo is gone."

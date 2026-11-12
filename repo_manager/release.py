@@ -423,7 +423,8 @@ NO_BREAKING = re.compile(
 
 
 NOT_FOR_USERS = re.compile(
-    r"\b(internal|maintainer|not shipped|not user[- ]facing|no user[- ]facing|does not affect users)\b",
+    r"\b(internal|maintainer|not shipped|not user[- ]facing|no user[- ]facing|does not affect users"
+    r"|(?:never|not|un)\s*observ\w*|no client (?:would|could) (?:have )?(?:seen|hit|met|observed))\b",
     re.IGNORECASE,
 )
 
@@ -490,8 +491,9 @@ def review_errors(data, issues, index=None, ratings=None):
     for entry in breaking if isinstance(breaking, list) else []:
         if NOT_FOR_USERS.search(str(entry)):
             errors.append(
-                f"breaking_changes entry {str(entry)[:80]!r} describes something internal or for "
-                "maintainers. A change no user runs into is not a breaking change: drop it."
+                f"breaking_changes entry {str(entry)[:80]!r} says no user meets it: it is internal, "
+                "for maintainers, or something no client could have observed. A change no user runs "
+                "into is not a breaking change: drop it."
             )
     known = {p.lower() for p in PLATFORMS} | {ALL_PLATFORMS}
     for index, todo in enumerate(todos):
