@@ -118,16 +118,33 @@ def sort_tags(tags):
     return sorted((tag for tag in tags if is_version_tag(tag)), key=version_parts)
 
 
-def range_start(tags, bucket):
-    """The newest version tag belonging to a bucket earlier than this one.
+def range_start(tags, bucket, release_branches=()):
+    """Where this bucket's commits start: the release before it, in whatever form that release
+    has right now.
+
+    That is the newest earlier bucket that has either a version tag or a release branch. When
+    it has a tag, the range starts at its newest tag. When its stable has not been tagged yet —
+    the usual state when the next week's candidate is cut, because a stable rarely ships before
+    the cut — the range starts at the head of its release branch, which is what that stable
+    will ship. Without that, the candidate would range from the week before, and describe two
+    weeks of commits as one release.
 
     Never this bucket's own tag. On a hotfix or a tag build, bucket `v2026.38` with a stable
-    `v2026.38.1` still ranges from the newest `v2026.37`-or-earlier tag, so the range
-    describes everything the bucket ships rather than only what came after its first tag.
+    `v2026.38.1` still ranges from the release before it, so the range describes everything
+    the bucket ships rather than only what came after its first tag.
     """
     current = version_parts(bucket)
-    earlier = [tag for tag in sort_tags(tags) if version_parts(tag_bucket(tag)) < current]
-    return earlier[-1] if earlier else ""
+    earlier_tags = [tag for tag in sort_tags(tags) if version_parts(tag_bucket(tag)) < current]
+    earlier_branches = {
+        bucket_for_branch(branch): branch for branch in release_branches
+        if RELEASE_BRANCH_PATTERN.fullmatch(str(branch or ""))
+        and version_parts(bucket_for_branch(branch)) < current
+    }
+    newest_tagged = tag_bucket(earlier_tags[-1]) if earlier_tags else ""
+    newest_branched = max(earlier_branches, key=version_parts, default="")
+    if newest_branched and (not newest_tagged or version_parts(newest_branched) > version_parts(newest_tagged)):
+        return f"origin/{earlier_branches[newest_branched]}"
+    return earlier_tags[-1] if earlier_tags else ""
 
 
 def stable_tags_in_bucket(tags, bucket):

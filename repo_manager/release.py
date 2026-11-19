@@ -53,7 +53,7 @@ class Bucket:
         self.checkout = ctx.checkout()
         self.name = buckets.bucket_for_branch(branch, self.checkout, ctx.now())
         self.tags = ctx.tags()
-        self.range_start = buckets.range_start(self.tags, self.name)
+        self.range_start = buckets.range_start(self.tags, self.name, self.checkout.release_branches())
         self.head = self.checkout.resolve(head) if head else self.checkout.resolve(f"origin/{branch}")
         self.stable_tags = buckets.stable_tags_in_bucket(self.tags, self.name)
         self.is_hotfix = bool(self.stable_tags)
